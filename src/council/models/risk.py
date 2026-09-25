@@ -28,7 +28,7 @@ class Band(Strict):
 
 
 class RiskCheck(Strict):
-    rule_id: str                    # R1..R21
+    rule_id: str                    # R1..R21, plus R4d (re-entry cool-off) and MC (material change)
     name: str
     passed: bool
     value: float | str | None = None
@@ -40,14 +40,15 @@ class RiskCheck(Strict):
 class RiskDecision(Strict):
     raw_levels: dict[str, float]
     banded_levels: dict[str, float]
+    base_w: dict[str, float] = Field(default_factory=dict)   # the book the engine started from (snapshot)
     proposed_w: dict[str, float]    # after projection, before execution filters
     final_w: dict[str, float]       # after deadband/min-hold/cost gate etc.
     checks: list[RiskCheck]
     gross: float
     net: float
     margin_use: float
-    stop_budget_used: float
-    stop_budget_limit: float
+    stop_budget_used: float         # v1: stop-at-risk (reporting only; no stop budget)
+    stop_budget_limit: float        # v1: cushion to the halt line
     carry_bps_day: float
     ex_ante_vol: float
     basis: DecisionBasis
@@ -57,3 +58,10 @@ class RiskDecision(Strict):
     @property
     def passed(self) -> bool:
         return all(c.passed for c in self.checks if c.kind == "policy")
+
+
+def changed_lines(decision: RiskDecision, eps: float = 1e-6) -> list[str]:
+    """Lines whose final weight differs from the base book: the only lines the planner may touch."""
+    lines = set(decision.final_w) | set(decision.base_w)
+    return sorted(s for s in lines
+                  if abs(decision.final_w.get(s, 0.0) - decision.base_w.get(s, 0.0)) > eps)

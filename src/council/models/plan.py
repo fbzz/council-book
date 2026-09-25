@@ -18,7 +18,8 @@ LegState = Literal[
 class Leg(Strict):
     seq: int
     kind: LegKind
-    symbol: str
+    symbol: str                                 # VEHICLE symbol (what the broker trades)
+    line: str | None = None                     # exposure line (NDX, SPX, ...)
     instrument_id: int | None = None
     direction: Direction
     settlement: Settlement | None = None
@@ -37,6 +38,7 @@ class Leg(Strict):
     sl_rate: float | None = None
     position_id: int | None = None
     depends_on: list[int] = Field(default_factory=list)   # e.g. an open that waits for a close
+    whole_units: bool = False
 
 
 class Plan(Strict):

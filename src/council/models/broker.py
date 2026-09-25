@@ -51,6 +51,8 @@ class Position(Strict):
     tp_rate: float | None = None
     settlement: Settlement = "cfd"
     opened_at: datetime | None = None
+    exposure_usd: float | None = None   # current exposure (unsigned) from the broker read, when present
+    close_rate: float | None = None     # current close rate from the broker read, when present
 
 
 class Quote(Strict):
@@ -70,12 +72,13 @@ class ExposureSnapshot(Strict):
     equity_usd: float
     credit_usd: float
     positions: list[Position]
-    signed_w: dict[str, float]        # signed notional / equity per symbol
+    signed_w: dict[str, float]        # signed notional / equity per LINE (UNMAPPED_<id> for unknown)
     gross: float
     net: float
     margin_use: float
     unmapped: list[str] = Field(default_factory=list)
     hedged: list[str] = Field(default_factory=list)
+    flags: list[str] = Field(default_factory=list)   # e.g. exposure fallbacks used
 
 
 class CostQuote(Strict):
