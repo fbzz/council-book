@@ -1,0 +1,20 @@
+# PRE-REGISTERED before running (tag reference-variants-spec). Mechanical reference-book variants
+# tested on the same 2015-2026 window with the same engine and costs as reference-spec-v1.
+# Motivation (from the reference-spec-v1 backtest): 21-25 trend flips per line per year, 764%
+# turnover, 59% mean gross, 11% vol — not the ~20-25% vol composition the user chose.
+#
+# SELECTION RULE (frozen): among variants whose listed-vehicle book has
+#   (a) a full-window max drawdown shallower than -25% (the kill line) AND
+#   (b) turnover <= 300% per year,
+# pick the highest CAGR; CAGRs within 0.25 pp are a tie, broken by the higher Sharpe.
+# If no variant qualifies, pick the shallowest max drawdown. The winner becomes reference.yaml.
+# Every variant is published, whatever the result. This is in-sample and hindsight-chosen.
+version: 1
+variants:
+  V0: {band_pct: 0.0, confirm_closes: 1, levels: {up: 1.0, mixed: 0.5,  down: 0.25}, line_cap_ratio: 1.0}   # = reference-spec-v1
+  V1: {band_pct: 2.0, confirm_closes: 1, levels: {up: 1.0, mixed: 0.5,  down: 0.25}, line_cap_ratio: 1.0}
+  V2: {band_pct: 2.0, confirm_closes: 3, levels: {up: 1.0, mixed: 0.5,  down: 0.25}, line_cap_ratio: 1.0}
+  V3: {band_pct: 2.0, confirm_closes: 1, levels: {up: 1.0, mixed: 0.75, down: 0.25}, line_cap_ratio: 1.0}
+  V4: {band_pct: 2.0, confirm_closes: 1, levels: {up: 1.0, mixed: 0.75, down: 0.25}, line_cap_ratio: 1.25}
+  V5: {band_pct: 2.0, confirm_closes: 1, levels: {up: 1.0, mixed: 0.75, down: 0.5},  line_cap_ratio: 1.25}
+  V6: {band_pct: 3.0, confirm_closes: 1, levels: {up: 1.0, mixed: 0.75, down: 0.25}, line_cap_ratio: 1.25}

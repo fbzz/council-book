@@ -30,22 +30,48 @@ from council.policy import Policy
 TREND_STATES = ("up", "mixed", "down")
 
 
-def trend_states(close: pd.Series, *, fast: int = 50, slow: int = 200, confirm: int = 1) -> pd.Series:
-    """Trend state per close (object dtype: "up"/"mixed"/"down"/None).
+def _sticky_above(c: np.ndarray, sma: np.ndarray, band: float) -> np.ndarray:
+    """Hysteresis: 'above' flips to True only when close > sma*(1+band) and back to False only when
+    close < sma*(1-band); inside the band the previous side is kept (band 0 = plain comparison)."""
+    out = np.zeros(len(c), dtype=bool)
+    prev: bool | None = None
+    for i, (x, m) in enumerate(zip(c, sma, strict=True)):
+        if not (np.isfinite(x) and np.isfinite(m)):
+            prev = None
+            continue
+        if band <= 0 or prev is None:
+            prev = bool(x > m)             # no band, or the first valid close: plain comparison
+        elif prev and x < m * (1 - band):
+            prev = False
+        elif not prev and x > m * (1 + band):
+            prev = True
+        out[i] = prev
+    return out
 
-    Rule: up if close > both SMAs, mixed if above exactly one, down if above neither; None before
-    `slow` closes. With confirm > 1 a change of state needs `confirm` consecutive closes in it."""
+
+def trend_states(close: pd.Series, *, fast: int = 50, slow: int = 200, confirm: int = 1,
+                 band: float = 0.0) -> pd.Series:
+    """Trend state per close (object dtype: "up"/"mixed"/"down"/None). The ONE implementation used
+    by the live cycle (facts.features) and the backtest.
+
+    Rule: up if close is above both SMAs, mixed if above exactly one, down if above neither; None
+    before `slow` closes. `band` adds hysteresis around each SMA (see _sticky_above). With
+    confirm > 1 a change of state needs `confirm` consecutive closes in it."""
     if fast < 1 or slow < fast:
         raise ValueError("need 1 <= fast <= slow")
+    if band < 0:
+        raise ValueError("band must be >= 0")
     c = close.astype(float)
     sma_fast = c.rolling(fast, min_periods=fast).mean()
     sma_slow = c.rolling(slow, min_periods=slow).mean()
     valid = (sma_fast.notna() & sma_slow.notna() & c.notna()).to_numpy()
-    up = ((c > sma_fast) & (c > sma_slow)).to_numpy()
-    down = (~(c > sma_fast) & ~(c > sma_slow)).to_numpy()
+    cv = c.to_numpy()
+    above_fast = _sticky_above(cv, sma_fast.to_numpy(), band)
+    above_slow = _sticky_above(cv, sma_slow.to_numpy(), band)
+    count = above_fast.astype(int) + above_slow.astype(int)
     raw: list[str | None] = [
-        None if not ok else ("up" if u else "down" if d else "mixed")
-        for ok, u, d in zip(valid, up, down, strict=True)
+        None if not ok else ("up" if n == 2 else "mixed" if n == 1 else "down")
+        for ok, n in zip(valid, count, strict=True)
     ]
     if confirm > 1:
         raw = _confirm(raw, confirm)
@@ -112,7 +138,9 @@ def signal_params(policy: Policy, asset_class: str) -> dict[str, Any]:
     return {
         "fast": int(trend["fast_sma"]),
         "slow": int(trend["slow_sma"]),
-        "confirm": int(trend.get("crypto_confirm_closes", 1)) if asset_class == "crypto" else 1,
+        "confirm": int(trend.get("crypto_confirm_closes", 1)) if asset_class == "crypto"
+        else int(trend.get("confirm_closes", 1)),
+        "band": float(trend.get("band_pct", 0.0)) / 100.0,
         "lam": float(vol["ewma_lambda"]),
         "window": int(vol["realised_window"]),
         "floor_mult": float(vol["realised_floor_mult"]),
@@ -128,7 +156,7 @@ def line_signals(close: pd.Series, *, asset_class: str, policy: Policy) -> pd.Da
     sigma = sigma_annualised(rets, lam=p["lam"], window=p["window"], floor_mult=p["floor_mult"], ann=p["ann"])
     return pd.DataFrame(
         {
-            "trend": trend_states(c, fast=p["fast"], slow=p["slow"], confirm=p["confirm"]),
+            "trend": trend_states(c, fast=p["fast"], slow=p["slow"], confirm=p["confirm"], band=p["band"]),
             "sigma_ann": sigma,
             "vol_ratio_1y": vol_ratio(sigma, p["ann"]),
         },

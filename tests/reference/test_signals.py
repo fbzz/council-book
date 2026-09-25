@@ -105,3 +105,24 @@ def test_signals_use_only_data_up_to_each_row(policy):
     changed = line_signals(mutated, asset_class="etf", policy=policy)
     pd.testing.assert_frame_equal(base.iloc[: t + 1], changed.iloc[: t + 1])
     assert not base.iloc[t + 1 :].equals(changed.iloc[t + 1 :])
+
+
+def test_hysteresis_band_suppresses_whipsaw_around_the_sma():
+    """Lead addition: prices oscillating ±1% around a flat SMA flip every close with band 0 and
+    never with a 2% band; a decisive 5% break still flips."""
+    import numpy as np
+    import pandas as pd
+
+    from council.reference.signals import trend_states
+
+    base = np.full(260, 100.0)
+    wiggle = base + np.where(np.arange(260) % 2 == 0, 1.0, -1.0)
+    idx = pd.date_range("2025-01-01", periods=260, freq="D", tz="UTC")
+    s = pd.Series(wiggle, index=idx)
+    plain = trend_states(s, fast=5, slow=20, band=0.0).dropna()
+    banded = trend_states(s, fast=5, slow=20, band=0.02).dropna()
+    flips = lambda x: int((x != x.shift()).sum()) - 1  # noqa: E731
+    assert flips(plain) > 100 and flips(banded) == 0
+    broken = s.copy()
+    broken.iloc[-3:] = 106.0
+    assert trend_states(broken, fast=5, slow=20, band=0.02).iloc[-1] == "up"

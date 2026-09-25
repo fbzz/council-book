@@ -36,6 +36,7 @@ from council import clock
 from council.data.bars import available_only, last_available_at, normalize_bars, to_utc
 from council.models.facts import MarketState
 from council.policy import LineSpec, Policy
+from council.reference.signals import trend_states
 
 MIN_MEDIAN_OBS = 126
 MOM_SHORT = 10
@@ -68,7 +69,8 @@ def vol_params(policy: Policy, asset_class: str) -> VolParams:
 def trend_params(policy: Policy, asset_class: str) -> tuple[int, int, int]:
     """(fast SMA, slow SMA, closes needed to confirm a flip) for this asset class."""
     trend = policy.reference["trend"]
-    confirm = int(trend.get("crypto_confirm_closes", 1)) if asset_class == "crypto" else 1
+    confirm = (int(trend.get("crypto_confirm_closes", 1)) if asset_class == "crypto"
+               else int(trend.get("confirm_closes", 1)))
     return int(trend["fast_sma"]), int(trend["slow_sma"]), max(1, confirm)
 
 
@@ -196,7 +198,9 @@ def market_state(
     last = float(closes.iloc[-1])
 
     fast, slow, confirm = trend_params(policy, line.asset_class)
-    trend = confirm_trend(trend_series(closes, fast, slow), confirm).iloc[-1]
+    band = float(policy.reference["trend"].get("band_pct", 0.0)) / 100.0
+    # the ONE trend implementation shared with the backtest (reference.signals.trend_states)
+    trend = trend_states(closes, fast=fast, slow=slow, confirm=confirm, band=band).iloc[-1]
     sma_fast = float(closes.iloc[-fast:].mean()) if len(closes) >= fast else None
     sma_slow = float(closes.iloc[-slow:].mean()) if len(closes) >= slow else None
 
