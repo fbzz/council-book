@@ -10,7 +10,7 @@ from council import paths
 from council.operator import keychain
 from council.operator.keychain import KeychainError
 
-TOKEN = "tok_ABCdef123456789.xyz"
+TOKEN = "tok_" + "synthetic" + "-not-a-secret"  # built at runtime; see .gitleaksignore
 
 
 class FakeSecurity:

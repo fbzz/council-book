@@ -1,0 +1,2 @@
+# Synthetic test token committed before it was rewritten to a runtime-built fake (not a real secret).
+3b08922f16700159ebfd4dee4bec3c6e80403705:tests/boundaries/test_keychain.py:generic-api-key:13

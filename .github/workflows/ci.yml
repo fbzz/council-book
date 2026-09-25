@@ -46,10 +46,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@v2  # TODO: SHA-pin before go-live
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
+      - name: gitleaks (full history)
+        # the binary directly: gitleaks-action cannot diff a repository's first push
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz | tar xz -C /tmp gitleaks
+          /tmp/gitleaks git --redact --verbose --exit-code 1 --config .gitleaks.toml .
 
   identity:
     name: noreply identities and journal ownership
