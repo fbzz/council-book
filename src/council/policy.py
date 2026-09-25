@@ -13,59 +13,66 @@ from pydantic import BaseModel, ConfigDict, Field
 from council.paths import POLICY_DIR
 
 AssetClass = Literal["stock", "etf", "crypto", "index", "commodity", "fx"]
-Sleeve = Literal["core", "crypto", "satellite", "index", "commodity", "fx"]
+Sleeve = Literal["core", "crypto", "overlay", "satellite"]
 HistorySource = Literal["etoro", "tiingo", "binance"]
 
 
-class InstrumentSpec(BaseModel):
+class Signal(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: HistorySource
+    ticker: str
+
+
+class Vehicle(BaseModel):
+    """A tradable instrument candidate for a line. Resolved against broker eligibility at onboarding."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     symbol: str
+    settlement: Literal["real", "cfd"]
+
+
+class Vehicles(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    long: list[Vehicle]
+    short: list[Vehicle] = Field(default_factory=list)
+
+
+class LineSpec(BaseModel):
+    """An exposure line: what the council reasons about (e.g. Nasdaq-100), not a broker symbol."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    symbol: str
+    name: str
     asset_class: AssetClass
     sleeve: Sleeve
     in_reference: bool
-    budget_pct: float = Field(gt=0, le=20)
-    history: HistorySource
-    proxy: str
-    peer_group: str | None = None
+    base_weight: float = Field(gt=0, le=1.0)
+    council_deviations: bool = True
+    signal: Signal
+    vehicles: Vehicles
 
-
-class SatelliteSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    k: int = Field(ge=0, le=5)
-    budget_pct_per_name: float
-    benchmark: str
-    peer_groups: dict[str, list[str]]
+    @property
+    def shortable(self) -> bool:
+        return bool(self.vehicles.short)
 
 
 class Universe(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     version: int
-    instruments: list[InstrumentSpec]
-    satellite: SatelliteSpec
+    reference_gross_max: float = Field(gt=0, le=1.0)
+    lines: list[LineSpec]
+    controls: dict[str, list[str]] = Field(default_factory=dict)
 
-    def by_symbol(self) -> dict[str, InstrumentSpec]:
-        return {i.symbol: i for i in self.instruments}
+    def by_symbol(self) -> dict[str, LineSpec]:
+        return {line.symbol: line for line in self.lines}
 
-    def satellite_candidates(self) -> list[InstrumentSpec]:
-        out: list[InstrumentSpec] = []
-        for group, symbols in self.satellite.peer_groups.items():
-            for sym in symbols:
-                out.append(
-                    InstrumentSpec(
-                        symbol=sym,
-                        asset_class="stock",
-                        sleeve="satellite",
-                        in_reference=True,
-                        budget_pct=self.satellite.budget_pct_per_name,
-                        history="tiingo",
-                        proxy=sym,
-                        peer_group=group,
-                    )
-                )
-        return out
+    def symbols(self) -> list[str]:
+        return [line.symbol for line in self.lines]
 
 
 def _load(name: str, directory: Path | None = None) -> dict[str, Any]:

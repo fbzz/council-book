@@ -1,18 +1,13 @@
-# Cost floors: per-side cost = max(broker what-if, floor, live half-spread). Floors only ever raise estimates.
-# Recalibrated after the first 10 fills, with a published note.
-version: 1
-per_side_bps:
-  crypto: 100          # real or CFD
-  etf_real: 5
-  stock_real: 5
-  etf_cfd: 15
-  stock_cfd: 15
-  index_cfd: 5
-  commodity_cfd: 8
-  fx_cfd: 3
+# Cost floors: per-side cost = max(broker what-if, floor, live half-spread). Floors only ratchet UP
+# after the first fills (the broker what-if returned 0 on an older account).
+version: 2
+per_side_bps: {crypto: 100, etf_real: 5, etf_cfd: 15, index_cfd: 5, commodity_cfd: 8, fx_cfd: 3}
+fixed_commission_usd: {real: 1.0, cfd: 0.0}       # divided by the REAL mirrored amount (amount x mirror ratio)
 slippage_buffer_bps: 10
-overnight_bps_day:
-  long_cfd: 2.2
-  short_cfd: 2.2
-  crypto_cfd: 5.0
+overnight_annual:                                  # carry on leveraged/short CFD exposure; 1x long ETF/stock CFD = 0
+  benchmark_rate: 0.043                            # refreshed at onboarding; published
+  long_cfd_markup: 0.064                           # (benchmark + 6.4%) / 365 on leveraged longs
+  short_cfd_markup: 0.029                          # conservative floor for shorts (never counted as income)
+  index_commodity_fx: 0.035                        # per-instrument what-if wins when higher
+  crypto_cfd: 0.18
 weekend_multiplier: 3

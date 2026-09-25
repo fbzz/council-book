@@ -1,33 +1,104 @@
-# Universe v1. Pruned at runtime by broker eligibility and minimum position sizes.
-# sleeve: core | crypto | satellite | index | commodity | fx
-# in_reference: the mechanical reference book holds it; otherwise the council may only tilt it inside bands.
-# budget_pct: annualised volatility contribution (% of NAV) for one reference unit u_i = budget / sigma.
-# history: where daily/4h bars come from (etoro first; fallback proxy via tiingo/binance).
-version: 1
-instruments:
-  - {symbol: QQQ,     asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 5.0, history: tiingo,  proxy: QQQ}
-  - {symbol: SOXX,    asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 4.0, history: tiingo,  proxy: SOXX}
-  - {symbol: GLD,     asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 3.0, history: tiingo,  proxy: GLD}
-  - {symbol: DBC,     asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 3.0, history: tiingo,  proxy: DBC}
-  - {symbol: IEF,     asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 2.0, history: tiingo,  proxy: IEF}
-  - {symbol: BTC,     asset_class: crypto,    sleeve: crypto,    in_reference: true,  budget_pct: 5.0, history: binance, proxy: BTCUSDT}
-  - {symbol: ETH,     asset_class: crypto,    sleeve: crypto,    in_reference: true,  budget_pct: 3.0, history: binance, proxy: ETHUSDT}
-  - {symbol: SPX500,  asset_class: index,     sleeve: index,     in_reference: false, budget_pct: 3.0, history: etoro,   proxy: SPY}
-  - {symbol: NSDQ100, asset_class: index,     sleeve: index,     in_reference: false, budget_pct: 3.0, history: etoro,   proxy: QQQ}
-  - {symbol: GOLD,    asset_class: commodity, sleeve: commodity, in_reference: false, budget_pct: 2.0, history: etoro,   proxy: GLD}
-  - {symbol: OIL,     asset_class: commodity, sleeve: commodity, in_reference: false, budget_pct: 2.0, history: etoro,   proxy: USO}
-  - {symbol: EURUSD,  asset_class: fx,        sleeve: fx,        in_reference: false, budget_pct: 2.0, history: etoro,   proxy: FXE}
-  - {symbol: GBPUSD,  asset_class: fx,        sleeve: fx,        in_reference: false, budget_pct: 2.0, history: etoro,   proxy: FXB}
-
-# Satellite: single US stocks ranked by the four-line fundamental rule inside peer groups.
-# The reference holds the top `satellite_k` names at level 1.0; the sector analyst may swap within the top 2k.
-satellite:
-  k: 3
-  budget_pct_per_name: 1.0
-  benchmark: SPY
-  peer_groups:
-    semis_ai:            [NVDA, AMD, AVGO, QCOM, MU, MRVL, ARM, INTC, "ON", MPWR, LSCC, AMKR]
-    software_data_ai:    [PLTR, SNOW, DDOG, MDB, CRWD, NET, ZS, APP, TTD, HUBS, TWLO, U]
-    dc_infra_power:      [VRT, VST, CEG, NRG, GEV, ETN, PWR, NVT]
-    networking_optical:  [ANET, CIEN, COHR, LITE, FN, DELL, PSTG]
-    megacap_platforms:   [AAPL, MSFT, GOOGL, AMZN, META]
+# Universe v1 — EXPOSURE LINES. Each line has a signal (history used for trend/vol) and ordered
+# vehicle candidates (what is actually traded). Vehicles are resolved against broker eligibility at
+# onboarding: the first eligible candidate with the lowest expected cost over the hold wins.
+# EU retail note: US-domiciled ETFs are CFD-only for EU clients (PRIIPs), so real long exposure uses
+# UCITS/ETC equivalents when the broker lists them; otherwise a 1x CFD. Candidate symbols are
+# UNVERIFIED until eligibility confirms them (M5).
+# No single stocks in v1 (satellite, filings and sector roles arrive in v1.1).
+version: 2
+reference_gross_max: 0.95          # the reference book never levers; ~5% cash reserve for costs
+lines:
+  - symbol: NDX
+    name: Nasdaq-100
+    asset_class: index
+    sleeve: core
+    in_reference: true
+    base_weight: 0.35              # weight at level 1.0 before vol capping
+    signal: {source: tiingo, ticker: QQQ}
+    vehicles:
+      long:  [{symbol: EQQQ.L, settlement: real}, {symbol: CNDX.L, settlement: real}, {symbol: QQQ, settlement: cfd}, {symbol: NSDQ100, settlement: cfd}]
+      short: [{symbol: NSDQ100, settlement: cfd}, {symbol: QQQ, settlement: cfd}]
+  - symbol: SEMIS
+    name: Semiconductors
+    asset_class: etf
+    sleeve: core
+    in_reference: true
+    base_weight: 0.15
+    signal: {source: tiingo, ticker: SOXX}
+    vehicles:
+      long:  [{symbol: SMH.L, settlement: real}, {symbol: SOXX, settlement: cfd}, {symbol: SMH, settlement: cfd}]
+      short: [{symbol: SOXX, settlement: cfd}, {symbol: SMH, settlement: cfd}]
+  - symbol: SPX
+    name: S&P 500
+    asset_class: index
+    sleeve: core
+    in_reference: true
+    base_weight: 0.15
+    signal: {source: tiingo, ticker: SPY}
+    vehicles:
+      long:  [{symbol: CSPX.L, settlement: real}, {symbol: VUSA.L, settlement: real}, {symbol: SPY, settlement: cfd}, {symbol: SPX500, settlement: cfd}]
+      short: [{symbol: SPX500, settlement: cfd}, {symbol: SPY, settlement: cfd}]
+  - symbol: GOLD
+    name: Gold
+    asset_class: commodity
+    sleeve: core
+    in_reference: true
+    base_weight: 0.12
+    signal: {source: tiingo, ticker: GLD}
+    vehicles:
+      long:  [{symbol: SGLN.L, settlement: real}, {symbol: PHAU.L, settlement: real}, {symbol: GLD, settlement: cfd}, {symbol: GOLD, settlement: cfd}]
+      short: [{symbol: GOLD, settlement: cfd}]
+  - symbol: BTC
+    name: Bitcoin
+    asset_class: crypto
+    sleeve: crypto
+    in_reference: true
+    base_weight: 0.13
+    council_deviations: false       # ~1% per side: reference-only in v1
+    signal: {source: binance, ticker: BTCUSDT}
+    vehicles:
+      long:  [{symbol: BTC, settlement: real}]
+      short: []
+  - symbol: ETH
+    name: Ether
+    asset_class: crypto
+    sleeve: crypto
+    in_reference: true
+    base_weight: 0.05
+    council_deviations: false
+    signal: {source: binance, ticker: ETHUSDT}
+    vehicles:
+      long:  [{symbol: ETH, settlement: real}]
+      short: []
+  - symbol: OIL
+    name: Crude oil
+    asset_class: commodity
+    sleeve: overlay
+    in_reference: false             # council-only: reference level 0, trend-following bands
+    base_weight: 0.10
+    signal: {source: tiingo, ticker: USO}
+    vehicles:
+      long:  [{symbol: OIL, settlement: cfd}]
+      short: [{symbol: OIL, settlement: cfd}]
+  - symbol: EURUSD
+    name: Euro / US dollar
+    asset_class: fx
+    sleeve: overlay
+    in_reference: false
+    base_weight: 0.25
+    signal: {source: tiingo, ticker: FXE}
+    vehicles:
+      long:  [{symbol: EURUSD, settlement: cfd}]
+      short: [{symbol: EURUSD, settlement: cfd}]
+  - symbol: GBPUSD
+    name: Pound / US dollar
+    asset_class: fx
+    sleeve: overlay
+    in_reference: false
+    base_weight: 0.25
+    signal: {source: tiingo, ticker: FXB}
+    vehicles:
+      long:  [{symbol: GBPUSD, settlement: cfd}]
+      short: [{symbol: GBPUSD, settlement: cfd}]
+controls:
+  buy_and_hold: [SPY, BTCUSDT]

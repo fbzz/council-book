@@ -1,22 +1,22 @@
-# Mechanical reference book: the default position, the council's band centre, the fallback, and
-# the primary benchmark (headline metric = council as proposed minus this book).
-version: 1
+# Mechanical reference book: default position, the council's band centre, the fallback, and the
+# primary benchmark. Aggression comes from COMPOSITION (equity- and crypto-heavy, no bonds) at about
+# 1x gross, not from leverage. Vol is used as a CAP (shrink lines in vol spikes), never to lever up.
+version: 2
 vol:
-  ewma_lambda: 0.94          # daily EWMA of squared log returns
-  realised_window: 60        # days
-  realised_floor_mult: 0.8   # sigma = max(ewma, 0.8 * realised_60d), annualised
+  ewma_lambda: 0.94
+  realised_window: 60
+  realised_floor_mult: 0.8          # sigma = max(ewma, 0.8 * realised_60d), annualised
   annualisation_days: {crypto: 365, default: 252}
+  line_cap_ratio: 1.0               # unit = base_weight * min(1, sigma_1y_median / sigma_now)
 trend:
   fast_sma: 50
-  slow_sma: 200               # computed on PRIOR completed daily closes only
+  slow_sma: 200                     # PRIOR completed daily closes only
   levels: {up: 1.0, mixed: 0.5, down: 0.25}
-  satellite_level: 1.0        # stocks: momentum is ~random, hold at 1.0 regardless of trend
-level_grid: [-0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0]
+  crypto_confirm_closes: 2          # crypto trend flips need 2 consecutive closes (1%/side costs)
+level_grid: [-0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
 book:
-  target_vol_candidates: [0.15, 0.20, 0.25]   # sigma* chosen by the frozen rule below
-  target_vol_default: 0.20
-  target_vol_rule: "highest candidate whose 2015-2026 mechanical backtest at cost floors has <=20% of rolling 12m windows containing a -25% drawdown"
+  ex_ante_vol_target: 0.22          # informational target for the all-uptrend book (published)
+  ex_ante_vol_hard: 0.30            # above this the whole book is scaled down
   covariance_ewma_days: 90
-  rescale: "Monday 02:40Z slot, or when any sigma moves >30% since last scale"
-  truncation_order: [gross_proposal, ex_ante_vol_hard, stop_budget, margin, caps, broker_minimums]
   never_short: true
+  never_lever: true

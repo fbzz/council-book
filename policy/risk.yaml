@@ -1,59 +1,52 @@
 # Every number the risk engine enforces. Changing this file is a policy change: new tag + CHANGELOG.
-version: 1
+# The user's invariants are ALSO hard-coded in src/council/invariants.py; this file may be stricter,
+# never looser (a test enforces it).
+version: 2
 gross:        {proposal_max: 1.90, hard_max: 2.00, watch_derisk_to: 1.80}          # R1
 net:          {min: -0.50, max: 1.90, short_gross_max: 0.60}                        # R2
-killswitch:   {warn_at: 0.80, halt_at: 0.75, confirm_reads: 2, confirm_gap_s: 60}   # R3 (fraction of peak NAV)
-stop_budget:                                                                        # R4
-  reserve: 0.01            # of NAV
-  proposal_use: 0.90       # proposals may use 90% of the available budget
-stop_distance:                                                                      # R4a
-  sigma_mult: 2.5          # d = max(floor, 2.5 * sigma_daily * sqrt(5))
+killswitch:   {warn_at: 0.80, halt_at: 0.75, confirm_reads: 2, confirm_gap_s: 60, peak: lifetime}   # R3 soft kill
+catastrophe_stop:                                                                   # R4 (every open carries one)
+  sigma_mult: 3.0                   # d = max(class floor, 3 * sigma_daily * sqrt(5)), within eligibility SL bounds
   horizon_days: 5
-  floors: {fx: 0.015, index: 0.03, commodity_gold: 0.03, etf: 0.05, stock: 0.05, commodity: 0.05, crypto: 0.08}
+  floors: {index: 0.08, etf: 0.10, commodity: 0.10, commodity_gold: 0.08, crypto: 0.20, fx: 0.04}
   cap: 0.35
-  tighten_floor_sigma_mult: 1.5
   margin_pct_buffer_pp: 0.5
-gap_haircut:  {etf: 0.03, stock: 0.03, stock_earnings: 0.08, stock_short: 0.10, index: 0.03, crypto: 0.05, commodity: 0.04, fx: 0.02}  # R4b
+  stop_at_risk_reporting_only: true # published metric; no ladder (user chose soft kill)
+reentry_cooloff_days: {crypto: 7, default: 3}                                       # R4d after a stop hit
 caps:                                                                               # R5 (|w| of NAV)
-  index_each: 1.0
-  etf_each: {QQQ: 0.6, SOXX: 0.6, IEF: 0.6, GLD: 0.5, DBC: 0.5, default: 0.4}
-  stock_long_each: 0.10
-  stock_short_each: 0.05
-  stock_long_count: 5
-  stock_short_count: 3
-  satellite_gross: 0.30
-  crypto_each: {BTC: 0.5, ETH: 0.3}
-  crypto_total: 0.6
-  commodity_each: {GOLD: 0.5, OIL: 0.3, default: 0.3}
-  commodity_total: 0.7
-  fx_each: 0.25
-  fx_total: 0.5
-  equity_beta_cluster: 1.4        # indices + stocks + equity ETFs (QQQ, SOXX)
-  single_vol_share_max: 0.35      # of ex-ante book vol
-leverage_caps: {stock: 2, etf: 2, crypto: 2, index: 5, commodity: 5, fx: 10}        # R6 (<= eligibility)
-margin_use_max: 0.80                                                                # R7
-ex_ante_vol_hard: 0.25                                                              # R8
+  line: {NDX: 0.80, SEMIS: 0.40, SPX: 0.80, GOLD: 0.50, BTC: 0.40, ETH: 0.20, OIL: 0.20, EURUSD: 0.30, GBPUSD: 0.30}
+  crypto_total: 0.50
+  fx_total: 0.50
+  equity_beta_cluster: {members: [NDX, SEMIS, SPX], max: 1.60}
+leverage_caps: {index: 2, etf: 2, commodity: 2, fx: 5, crypto: 1}                   # R6 (also <= eligibility)
+margin_use_max: 0.95                                                                # R7 (sum |w|/L, 5% cash reserve)
+ex_ante_vol_hard: 0.30                                                              # R8
 vol_breaker: {instrument_ratio: 3.0, book_ratio: 2.0, card_ratio: 2.0}              # R9 (EWMA5/EWMA60)
-authority:                                                                          # R10
-  up:    {lo_minus_max: 0.5, hi: ref}
+authority:                                                                          # R10 (units of the line's unit weight)
+  up:    {cut_with_qualifying_card: 0.5, leverage_extension: 0.5}   # [ref-cut, ref] ; +0.5 only if the lever leg passes the cost gate
   mixed: {lo: 0.0, hi: 1.0}
-  down:  {lo: -0.5, hi: 0.25}
-  council_only: {up: [0.0, 0.0], mixed: [0.0, 0.5], down: [-0.5, 0.0], fx: [-0.5, 0.5]}
-  max_council_cut_share_per_cycle: 0.30
-  two_cycle_confirmation: true
+  down:  {lo: -0.5, hi: 0.25}                                       # shorts only here, need a cited risk_down card
+  overlay: {up: [0.0, 0.5], mixed: [-0.25, 0.25], down: [-0.5, 0.0]}
+  qualifying_cut_cards: [vol_shock, news_material]
+  max_deviations_per_cycle: 3                                       # the PM outputs sparse deviations only
+  card_expiry_returns_to_reference: true
 deadband: {level: 0.25, level_crypto: 0.5, min_nav_share: 0.02}                     # R11
-min_hold_days: {crypto: 7, stock: 28, etf: 3, index: 3, commodity: 3, fx: 3, no_flip_hours: 24}   # R12 (stock 20 trading days ~ 28 calendar)
+min_hold_days: {crypto: 7, default: 3, no_flip_hours: 24, toward_reference_exempt: true}   # R12
 churn: {cycle_increase_max: 0.60, turnover_7d_max: 1.00, turnover_30d_max: 3.00}    # R13
-cost_budget: {cycle_max_bps: 40, discretionary_30d_max_bps: 100, carry_proposal_max_bps_day: 3.5, carry_watch_max_bps_day: 5.0}  # R14
-net_of_cost_gate: {reference_max_srbe: 0.30, council_max_srbe: 0.20, hold_days: {crypto: 60, stock: 60, default: 20}}  # R15
-event_block: {earnings_before_h: 48, earnings_after_h: 12, macro_before_h: 24, macro_after_h: 2}  # R16
+cost_budget: {cycle_max_bps: 40, discretionary_30d_max_bps: 100, carry_proposal_max_bps_day: 2.0, carry_watch_max_bps_day: 3.0}  # R14
+net_of_cost_gate: {reference_max_srbe: 0.30, council_max_srbe: 0.20, hold_days: {crypto: 60, default: 20}}  # R15
+event_block: {macro_before_h: 24, macro_after_h: 2}                                 # R16 (blocks ADDS only)
 anti_chase_sigma: 2.5                                                               # R17
 freshness: {daily_bar_max_h: 30, four_hour_bar_max_h: 5, quote_max_s: 60, frozen_reference_share_max: 0.30}  # R18
-proposal: {max_legs: 8, max_tranches_per_direction: 3, open_amount_slack: 1.02}     # R21
+material_change_required: true                                                      # executable changes need a new material fingerprint
+proposal: {max_legs: 8}                                                             # R21
 approval:
+  window: {tz: Europe/Lisbon, start: "08:00", end: "23:00"}
   open_price_guard_sigma4h: 1.5
   drift_l1_max: 0.10
   amount_tolerance: 0.30
   cost_tolerance_mult: 1.5
   cost_tolerance_add_bps: 5
+  post_fill_exposure_tolerance: 0.05
 reconcile: {drift_max: 0.03, sl_rate_tolerance: 0.002}
+priority: [flatten, compliance, rebalance]                                          # lower never supersedes higher

@@ -7,7 +7,8 @@ from pydantic import BaseModel, ConfigDict
 TrendState = Literal["up", "mixed", "down"]
 Direction = Literal["long", "short"]
 Settlement = Literal["real", "cfd", "realFutures", "marginTrade"]
-LEVEL_GRID: tuple[float, ...] = (-0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0)
+LEVEL_GRID: tuple[float, ...] = (-0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5)
+# Levels are multiples of a line's unit weight. Above 1.0 = leverage extension (uptrend only, cost-gated).
 
 # Evidence-ID prefixes. The auditor rejects any cited ID that is not in the cycle's pack.
 #   F:<sym>:<field>      market fact            N:<sha8>             news item

@@ -9,10 +9,31 @@ from council.settings import Settings, SettingsError
 
 
 def test_policy_loads_and_hashes(policy):
-    assert len(policy.universe.instruments) == 13
+    syms = policy.universe.symbols()
+    assert syms == ["NDX", "SEMIS", "SPX", "GOLD", "BTC", "ETH", "OIL", "EURUSD", "GBPUSD"]
     assert len(policy.sha256) == 64
-    assert all(isinstance(s, str) for g in policy.universe.satellite.peer_groups.values() for s in g)
-    assert "ON" in policy.universe.satellite.peer_groups["semis_ai"]  # YAML 1.1 'ON' must stay a ticker
+    ref = [ln for ln in policy.universe.lines if ln.in_reference]
+    assert sum(ln.base_weight for ln in ref) <= policy.universe.reference_gross_max + 1e-9
+    assert not policy.universe.by_symbol()["BTC"].council_deviations
+
+
+def test_invariants_hold_for_shipped_policy(policy):
+    from council.invariants import check_policy
+
+    check_policy(policy)
+
+
+def test_invariants_reject_looser_policy(policy):
+    from council.invariants import InvariantViolation, check_policy
+
+    risk = dict(policy.risk)
+    risk["gross"] = {**risk["gross"], "hard_max": 2.5}
+    with pytest.raises(InvariantViolation):
+        check_policy(policy.model_copy(update={"risk": risk}))
+    risk = dict(policy.risk)
+    risk["killswitch"] = {**risk["killswitch"], "halt_at": 0.6}
+    with pytest.raises(InvariantViolation):
+        check_policy(policy.model_copy(update={"risk": risk}))
 
 
 def test_slot_grid_is_utc_and_4h():
@@ -49,6 +70,7 @@ def test_snap_level():
     assert snap_level(0.13) == 0.25
     assert snap_level(0.125) == 0.0  # tie goes toward zero
     assert snap_level(-0.9) == -0.5
+    assert snap_level(1.4) == 1.5
 
 
 def test_pack_hash_ignores_created_at(slot):
