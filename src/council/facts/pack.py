@@ -316,7 +316,7 @@ def build_fact_pack(
             reasons.append("no_data")
         elif is_stale(bar_at, slot_t, asset_class=line.asset_class, max_h=max_h):
             reasons.append("stale")
-        is_open = clock.market_open(line.asset_class, slot_t)
+        is_open = clock.market_open(line.asset_class, slot_t, line.session)
         if not is_open:
             reasons.append("market_closed")
         update: dict[str, object] = {

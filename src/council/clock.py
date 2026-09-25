@@ -107,9 +107,27 @@ def fx_open(ts: datetime) -> bool:
     return not (time(17, 0) <= t < time(18, 0))
 
 
-def market_open(asset_class: str, ts: datetime) -> bool:
-    if asset_class == "crypto":
+LONDON = ZoneInfo("Europe/London")
+UK_HOLIDAYS_2026 = {
+    date(2026, 1, 1), date(2026, 4, 3), date(2026, 4, 6), date(2026, 5, 4), date(2026, 5, 25),
+    date(2026, 8, 31), date(2026, 12, 25), date(2026, 12, 28), date(2027, 1, 1),
+}
+
+
+def lse_open(ts: datetime) -> bool:
+    """London Stock Exchange cash session 08:00-16:30 London time, weekdays, UK holidays excluded."""
+    local = _as_utc(ts).astimezone(LONDON)
+    if local.weekday() >= 5 or local.date() in UK_HOLIDAYS_2026:
+        return False
+    return time(8, 0) <= local.time() < time(16, 30)
+
+
+def market_open(asset_class: str, ts: datetime, session: str | None = None) -> bool:
+    """Is the line's preferred vehicle tradable now? `session` (LineSpec.session) wins when given."""
+    if session == "crypto" or (session is None and asset_class == "crypto"):
         return True
-    if asset_class in ("stock", "etf"):
+    if session == "lse":
+        return lse_open(ts)
+    if session == "us" or (session is None and asset_class in ("stock", "etf")):
         return us_equity_open(ts)
     return fx_open(ts)

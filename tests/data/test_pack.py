@@ -64,10 +64,12 @@ def test_hash_ignores_created_at_but_not_inputs(policy):
 
 
 # ------------------------------------------------------------------------------------ freezing
-def test_closed_equity_session_freezes_etf_line_only(policy):
-    pack = _pack(policy, slot=utc(2026, 10, 1, 2, 40))            # Wed 22:40 New York
-    assert pack.frozen == ["SEMIS"] and pack.states["SEMIS"].frozen_reason == "market_closed"
-    assert "NDX" in pack.admitted and "BTC" in pack.admitted       # index CFD / crypto trade
+def test_closed_london_session_freezes_ucits_lines_only(policy):
+    pack = _pack(policy, slot=utc(2026, 10, 1, 2, 40))            # 03:40 London: LSE closed
+    # lines whose preferred vehicle is a London-listed UCITS/ETC hold; crypto and CFD overlays trade
+    assert sorted(pack.frozen) == ["GOLD", "NDX", "SEMIS", "SPX"]
+    assert all(pack.states[s].frozen_reason == "market_closed" for s in pack.frozen)
+    assert {"BTC", "ETH", "OIL", "EURUSD", "GBPUSD"} <= set(pack.admitted)
     assert pack.states["SEMIS"].market_open is False
     assert "F:SEMIS:dist_sma200" in _facts(pack)                  # facts kept for context
 

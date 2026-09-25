@@ -48,17 +48,19 @@ def _toward_reference_from_flat(policy, pack):
 
 def test_monday_slot_with_closed_equity_session_lets_crypto_move(policy):
     """Monday 06:40 UTC: the Friday Tiingo bar is 54.7 h old on the clock (> 30 h) but fresh for
-    the pack (weekend skipped); the ETF session is closed. BTC/ETH (and the open index/gold CFDs)
-    move toward the reference; only the closed ETF line holds."""
+    the pack (weekend skipped); the London session (UCITS vehicles) opens at 08:00 London, so the
+    UCITS lines hold while BTC/ETH move toward the reference."""
     slot = datetime(2026, 10, 5, 6, 40, tzinfo=UTC)
     pack = _pack_states(policy, slot, equity_bar=datetime(2026, 10, 3, 0, 0, tzinfo=UTC),
                         crypto_bar=datetime(2026, 10, 5, 0, 0, tzinfo=UTC))
-    assert pack.states["NDX"].data_age_h > 30 and not pack.states["NDX"].frozen
-    assert pack.frozen == ["SEMIS"] and pack.states["SEMIS"].frozen_reason == "market_closed"
+    # the Friday bar is 54.7 h old on the clock but not stale (weekend skipped): the freeze is the
+    # closed London session only
+    assert pack.states["NDX"].data_age_h > 30 and pack.states["NDX"].frozen_reason == "market_closed"
+    assert sorted(pack.frozen) == ["GOLD", "NDX", "SEMIS", "SPX"]
+    assert all(pack.states[s].frozen_reason == "market_closed" for s in pack.frozen)
     d = _toward_reference_from_flat(policy, pack)
     assert d.final_w["BTC"] == pytest.approx(0.13) and d.final_w["ETH"] == pytest.approx(0.05)
-    assert d.final_w["NDX"] == pytest.approx(0.35) and d.final_w["GOLD"] == pytest.approx(0.12)
-    assert d.final_w["SEMIS"] == 0.0
+    assert all(d.final_w[s] == 0.0 for s in ("NDX", "GOLD", "SEMIS", "SPX"))
     fresh = row(d, "R18", "data_freshness")
     assert fresh.passed and fresh.value == 0.0
     assert any(r.startswith("SEMIS:") for r in d.hold_reasons)            # frozen band: hold

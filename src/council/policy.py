@@ -59,6 +59,20 @@ class LineSpec(BaseModel):
     def shortable(self) -> bool:
         return bool(self.vehicles.short)
 
+    @property
+    def session(self) -> str:
+        """Trading session of the PREFERRED long vehicle: London-listed UCITS/ETCs ('.L') trade on
+        London hours, crypto 24/7, index/commodity/FX CFDs 24/5, US ETF CFDs on US hours. The broker's
+        eligibility is still the final word at execution."""
+        if self.asset_class == "crypto":
+            return "crypto"
+        first = self.vehicles.long[0].symbol if self.vehicles.long else self.symbol
+        if first.endswith(".L"):
+            return "lse"
+        if self.asset_class in ("index", "commodity", "fx"):
+            return "fx24x5"
+        return "us"
+
 
 class Universe(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)

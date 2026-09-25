@@ -84,3 +84,14 @@ def test_settings_refuse_lab_keys(monkeypatch):
     monkeypatch.setenv("ETORO_USER_KEY", "x")
     with pytest.raises(SettingsError):
         Settings.from_env()
+
+
+def test_sessions_follow_the_preferred_vehicle(policy):
+    by = policy.universe.by_symbol()
+    assert by["SEMIS"].session == "lse" and by["NDX"].session == "lse"
+    assert by["BTC"].session == "crypto" and by["OIL"].session == "fx24x5"
+    london_morning = datetime(2026, 10, 1, 10, 40, tzinfo=UTC)   # 11:40 London, 06:40 New York
+    assert clock.market_open("etf", london_morning, "lse")
+    assert not clock.market_open("etf", london_morning, "us")
+    evening = datetime(2026, 10, 1, 18, 40, tzinfo=UTC)          # London closed at 16:30
+    assert not clock.market_open("etf", evening, "lse")

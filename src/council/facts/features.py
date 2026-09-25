@@ -183,7 +183,7 @@ def market_state(
     base = {
         "symbol": line.symbol,
         "asset_class": line.asset_class,
-        "market_open": clock.market_open(line.asset_class, asof.to_pydatetime()),
+        "market_open": clock.market_open(line.asset_class, asof.to_pydatetime(), line.session),
         "history_source": label,
     }
     bars = usable_daily(line, daily, now=asof.to_pydatetime(), source=src)
