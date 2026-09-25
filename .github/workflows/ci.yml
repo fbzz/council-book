@@ -1,0 +1,100 @@
+# Tests, lint, the public-record leak scan, gitleaks and the noreply-identity check.
+# Actions are pinned to major versions for now. TODO before go-live: pin every `uses:` to a full
+# commit SHA (with the version in a comment) and let Dependabot bump them.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4          # TODO: SHA-pin before go-live
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6        # TODO: SHA-pin before go-live
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check .
+      - name: Tests (no network, no LLM, no broker)
+        run: uv run pytest -m "not live"
+      - name: Leak scan of everything public
+        run: uv run python -m council.publish.leakscan journal docs site README.md DISCLAIMER.md SECURITY.md CHANGELOG.md
+      - name: Site builds and passes the leak scan
+        run: uv run python site/build.py --out _site
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4          # TODO: SHA-pin before go-live
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@v2  # TODO: SHA-pin before go-live
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  identity:
+    name: noreply identities and journal ownership
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4          # TODO: SHA-pin before go-live
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Every author and committer e-mail is a GitHub noreply address
+        run: |
+          bad=$(git log --all --format='%ae%n%ce' | sort -u | grep -v -E '@users\.noreply\.github\.com$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::$(printf '%s\n' "$bad" | wc -l | tr -d ' ') commit identity(ies) are not noreply addresses"
+            exit 1
+          fi
+          echo "all commit identities are noreply"
+      - name: Publisher commits touch only journal/; humans only add incidents or withdrawn claims there
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          base="${BASE_SHA:-${BEFORE:-}}"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            range="HEAD"
+          else
+            range="$base..HEAD"
+          fi
+          status=0
+          for c in $(git rev-list --no-merges "$range"); do
+            name=$(git log -1 --format='%an' "$c")
+            files=$(git diff-tree --no-commit-id --name-only -r "$c")
+            if [ "$name" = "council-publisher" ]; then
+              outside=$(printf '%s\n' "$files" | grep -v -E '^journal/' || true)
+              if [ -n "$outside" ]; then
+                echo "::error::publisher commit $c touches paths outside journal/"; status=1
+              fi
+            else
+              inside=$(printf '%s\n' "$files" | grep -E '^journal/' \
+                | grep -v -E '^journal/(incidents/INC-[0-9]{4}\.md|claims/withdrawn\.md|\.keep)$' || true)
+              if [ -n "$inside" ]; then
+                echo "::error::human commit $c edits journal/ (only new incidents or withdrawn claims are allowed)"; status=1
+              fi
+            fi
+          done
+          exit $status

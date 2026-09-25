@@ -1,0 +1,52 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}Cycles{% endblock %}
+{% block toc %}
+{{ m.toc_item("list", "All cycles", "proposed") }}
+{{ m.toc_item("read", "How to read a cycle", "code") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">Cycles</p>
+  <h1>Every sealed cycle, newest first</h1>
+  <p class="lede">A cycle is revealed once its decision is final. Its commitment was published before any order could be approved.</p>
+</header>
+
+{% call m.section("list", 1, "All cycles", "proposed") %}
+{% if cycles %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Cycle</th><th>Run</th><th>Basis</th><th>Legs</th><th>Cost</th><th>Decision</th><th>Seal</th></tr></thead>
+  <tbody>
+  {% for cv in cycles %}
+  {% set c = cv.doc %}
+  <tr>
+    <td class="n"><a href="cycles/{{ c.cycle_id }}.html">{{ c.cycle_id }}</a></td>
+    <td>{{ c.status | replace("_", " ") }}{% if c.late_by_min %} <span class="muted small">+{{ c.late_by_min }} min</span>{% endif %}</td>
+    <td>{{ (c.basis or "—") | replace("_", " ") }}</td>
+    <td class="n">{{ c.plan.legs | length if c.plan else 0 }}</td>
+    <td class="n">{{ c.plan.cost_bp_total | bp if c.plan else "—" }}</td>
+    <td>{{ m.chip(cv.chip) }}</td>
+    <td>{% if cv.verified %}<span class="chip state-executed">VERIFIED</span>{% elif cv.commitment %}<span class="chip state-sealed">SEALED</span>{% else %}<span class="chip state-warn">NO SEAL</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+{{ m.empty("No cycles yet", "The account does not exist yet, so no cycle has been sealed. The first one will appear here.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("read", 2, "How to read a cycle", "code") %}
+<ol class="steps">
+  <li><strong>Why we met</strong> — the code's reasons for this cycle.</li>
+  <li><strong>Evidence cards</strong> — analysts' claims, each citing facts by id. Broker news is cited by id only.</li>
+  <li><strong>Bull vs bear</strong> — the debate, with the bear's rebuttals.</li>
+  <li><strong>PM decision</strong> — three independent replicates and the medoid that was used.</li>
+  <li><strong>Raw → final</strong> — what the PM asked for, what the bands allowed, and what the risk engine kept.</li>
+  <li><strong>Costs and legs</strong> — every leg in multiples of NAV, with its cost in basis points.</li>
+  <li><strong>Human outcome</strong> — approved, rejected or expired.</li>
+</ol>
+{% endcall %}
+{% endblock %}

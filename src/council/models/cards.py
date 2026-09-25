@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import Field
@@ -13,13 +14,16 @@ CardType = Literal[
     "macro_context", "event_binary", "vol_shock", "sector_rank",
 ]
 CardDirection = Literal["risk_up", "risk_down", "neutral"]
-QUALIFYING_TYPES: frozenset[str] = frozenset({"event_binary", "vol_shock", "filing_material"})
+# Card types that may justify a CUT in an uptrend. Must match policy risk.authority.qualifying_cut_cards;
+# a card also needs qualifying=True (news_material only when a code vol card corroborates it).
+# Event cards never qualify: they only block adds.
+QUALIFYING_TYPES: frozenset[str] = frozenset({"vol_shock", "news_material"})
 
 
 class CardDraft(Strict):
     """What an LLM analyst returns for one card (no ID; code assigns it)."""
 
-    scope: list[str] = Field(min_length=1, max_length=6)
+    scope: list[str] = Field(min_length=1, max_length=9)
     card_type: CardType
     direction: CardDirection
     claim: str = Field(max_length=200)
@@ -32,6 +36,7 @@ class CardDraft(Strict):
 class EvidenceCard(CardDraft):
     card_id: str = Field(pattern=r"^K:[a-z_]+:\d+$")
     role: str
+    issued_at: datetime | None = None
     corroborated_by: list[str] = Field(default_factory=list)   # code card IDs (news_material rule)
     qualifying: bool = False
 

@@ -23,6 +23,7 @@ class Fact(Strict):
     unit: FactUnit
     available_at: datetime
     source: str
+    publishable: bool = True        # False for licensed series (e.g. VIXCLS): agents read, never published
 
 
 class MarketState(Strict):
@@ -46,6 +47,7 @@ class MarketState(Strict):
     frozen: bool = False
     frozen_reason: str | None = None
     history_source: str | None = None
+    bar_available_at: datetime | None = None   # availability time of the last bar used
 
 
 class NewsItem(Strict):
@@ -88,6 +90,7 @@ class EventItem(Strict):
     binary: bool = True
     severity: int = Field(ge=1, le=3)
     source: str
+    known_at: datetime | None = None           # when the schedule became public
 
 
 class FactPack(Strict):

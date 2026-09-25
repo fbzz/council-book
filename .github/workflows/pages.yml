@@ -1,0 +1,56 @@
+# Builds the static site from journal/, prompts/ and policy/ and deploys it to GitHub Pages.
+# No generated HTML is ever committed. Actions are pinned to major versions for now.
+# TODO before go-live: pin every `uses:` to a full commit SHA (with the version in a comment).
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "journal/**"
+      - "site/**"
+      - "prompts/**"
+      - "policy/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4                  # TODO: SHA-pin before go-live
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6                # TODO: SHA-pin before go-live
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+      - name: Build (fails on any leak-scan finding)
+        run: uv run python site/build.py --out _site
+      - name: Leak scan of the built site
+        run: uv run python -m council.publish.leakscan _site
+      - uses: actions/upload-pages-artifact@v3     # TODO: SHA-pin before go-live
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4              # TODO: SHA-pin before go-live

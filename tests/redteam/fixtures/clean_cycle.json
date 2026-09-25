@@ -1,0 +1,10 @@
+{
+  "schema_id": "council-book/cycle/v1",
+  "cycle_id": "2026-10-01T1440Z",
+  "input_hash": "1234567abcdef0123456789abcdef0123456789abcdef0123456789abcdef01",
+  "risk": {"gross_x": 0.855, "margin_use_pct": 43.21, "carry_bp_day": 0.4, "final_x": {"EURUSD": 0.25, "GBPUSD": -0.1}},
+  "cards": [{"card_id": "K:news:1", "claim": "Semis are 6.2% above the 200-day average; risk-increasing legs wait.",
+             "evidence": [{"kind": "broker_feed", "id": "N:12345678"}, {"kind": "fred", "series": "DGS10", "publishable": true, "value": 4.11}]}],
+  "calls": [{"role": "pm", "tokens_in": 9000, "tokens_out": 400, "latency_ms": 2300, "prompt_sha": "abababababababababababababababababababababababababababababababab"}],
+  "plan": {"legs": [{"seq": 1, "kind": "partial_close", "line": "SEMIS", "weight_before_x": 0.15, "weight_after_x": 0.075, "stop_distance_pct": 10.0, "cost_bp": 0.6}]}
+}

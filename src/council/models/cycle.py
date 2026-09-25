@@ -81,6 +81,11 @@ class CycleRecord(Strict):
     debate: Debate = Field(default_factory=Debate)
     pm: list[PMReplicate] = Field(default_factory=list)
     medoid_replicate: int | None = None
+    agreement: float | None = None
+    single_agent: list[PMReplicate] = Field(default_factory=list)   # control C10
+    single_agent_levels: dict[str, float] = Field(default_factory=dict)
+    desk_sha: str = ""
+    dropped_cards: list[str] = Field(default_factory=list)
     risk: RiskDecision | None = None
     plan: Plan | None = None
     decision_id: str | None = None

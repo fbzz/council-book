@@ -1,0 +1,224 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}Cycle {{ c.cycle_id }}{% endblock %}
+{% block toc %}
+{{ m.toc_item("why", "Why we met", "code") }}
+{{ m.toc_item("cards", "Evidence cards", "analyst") }}
+{{ m.toc_item("debate", "Bull vs bear", "bull") }}
+{{ m.toc_item("pm", "PM decision", "pm") }}
+{{ m.toc_item("risk", "Raw → final", "risk") }}
+{{ m.toc_item("legs", "Costs and legs", "risk") }}
+{{ m.toc_item("human", "Human outcome", "proposed") }}
+{{ m.toc_item("seal", "Seal and calls", "code") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow"><a href="../cycles.html">Cycles</a> / {{ c.cycle_id }}</p>
+  <h1>Cycle {{ c.cycle_id }}</h1>
+  <div class="status-row">
+    {{ m.chip(cv.chip) }}
+    <span class="chip state-{{ kill_chip(c.kill_state).css }}">kill switch: {{ kill_chip(c.kill_state).label }}</span>
+    <span class="chip state-sealed">{{ (c.basis or "no basis") | replace("_", " ") }}</span>
+    {% if cv.verified %}<span class="chip state-executed">SEAL VERIFIED</span>{% endif %}
+  </div>
+</header>
+
+{% call m.section("why", 1, "Why we met", "code") %}
+<dl class="facts">
+  <div><dt>Slot</dt><dd class="n">{{ c.slot | slot }}</dd></div>
+  <div><dt>Run</dt><dd>{{ c.status | replace("_", " ") }}{% if c.late_by_min %} (+{{ c.late_by_min }} min){% endif %}</dd></div>
+  <div><dt>Model</dt><dd><code>{{ c.model }}</code> · thinking {{ "on" if c.think else "off" }}</dd></div>
+</dl>
+{% if c.why_we_met %}
+<ul class="codes">{% for w in c.why_we_met %}<li><code>{{ w }}</code></li>{% endfor %}</ul>
+{% else %}<p class="muted">No specific trigger: a scheduled review.</p>{% endif %}
+{% if c.reference %}
+<h3>Reference book</h3>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Line</th><th>Trend</th><th>Level</th><th>Weight</th></tr></thead>
+  <tbody>
+  {% for line, r in c.reference | by_line %}
+  <tr><td><strong>{{ line }}</strong></td><td>{% if r.trend %}<span class="chip trend-{{ r.trend }}">{{ r.trend }}</span>{% else %}—{% endif %}</td><td class="n">{{ r.level_ref | level }}</td><td class="n">{{ r.weight_ref_x | x }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endcall %}
+
+{% call m.section("cards", 2, "Evidence cards", "analyst") %}
+{% if c.cards %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Card</th><th>Direction</th><th>Claim</th><th>Evidence</th></tr></thead>
+  <tbody>
+  {% for k in c.cards %}
+  <tr>
+    <td class="n"><strong>{{ k.card_id }}</strong><br><span class="muted small">{{ k.card_type | replace("_", " ") }} · {{ k.horizon_days }}d{% if k.qualifying %} · qualifying{% endif %}</span><br><span class="muted small">{{ k.scope | join(", ") }}</span></td>
+    <td>{{ m.direction_chip(k.direction) }}</td>
+    <td class="text">{{ k.claim }}{% if k.falsifier %}<br><span class="muted small">Would be wrong if: {{ k.falsifier }}</span>{% endif %}</td>
+    <td>{{ m.evidence(k.evidence) }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+{{ m.empty("No cards", "No analyst card was accepted this cycle.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("debate", 3, "Bull vs bear", "bull") %}
+{% set turns = [("Bull opening", c.debate.bull, "bull"), ("Bear rebuttal", c.debate.bear, "bear"), ("Bull answer", c.debate.rebuttal, "bull")] %}
+<div class="debate">
+{% for title, a, accent in turns %}
+  <article class="turn accent-{{ accent }}">
+    <h3>{{ title }}</h3>
+    {% if a %}
+    <p>{{ a.argument }}</p>
+    {% if a.proposal_levels %}<p class="small">Proposed levels: {% for line, lv in a.proposal_levels | by_line %}<span class="kv"><span class="k">{{ line }}</span> <span class="n">{{ lv | level }}</span></span>{% endfor %}</p>{% endif %}
+    {% if a.claims %}<ul class="claims">{% for cl in a.claims %}<li><span class="n muted">{{ cl.claim_id }}</span> {{ cl.text }} {{ m.evidence(cl.evidence) }}</li>{% endfor %}</ul>{% endif %}
+    {% if a.rebuttals %}<ul class="claims">{% for rb in a.rebuttals %}<li><span class="chip {{ 'dir-short' if rb.verdict == 'refute' else 'dir-cash' }}">{{ rb.verdict }} {{ rb.claim_id }}</span> {{ rb.text }} {{ m.evidence(rb.evidence) }}</li>{% endfor %}</ul>{% endif %}
+    {% if a.concessions %}<p class="small muted">Concedes: {{ a.concessions | join("; ") }}</p>{% endif %}
+    {% else %}<p class="muted">No valid output.</p>{% endif %}
+  </article>
+{% endfor %}
+</div>
+{% endcall %}
+
+{% call m.section("pm", 4, "PM decision", "pm") %}
+{% if c.pm.replicates %}
+<p>Valid replicates: <span class="n">{{ c.pm.valid_replicates }}</span> of {{ c.pm.replicates | length }}. Used: {% if c.pm.medoid is not none %}replicate <span class="n">{{ c.pm.medoid }}</span> (medoid){% else %}none — fell back to the reference{% endif %}.</p>
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Replicate</th><th>Sided with</th><th>Deviations</th><th>Decisive fact</th></tr></thead>
+  <tbody>
+  {% for r in c.pm.replicates %}
+  <tr{% if r.replicate == c.pm.medoid %} class="chosen"{% endif %}>
+    <td class="n">{{ r.replicate }}{% if r.replicate == c.pm.medoid %} <span class="chip state-proposed">MEDOID</span>{% endif %}{% if not r.valid %} <span class="chip state-warn">INVALID</span>{% endif %}</td>
+    <td>{{ r.sided_with or "—" }}</td>
+    <td>{% for d in r.deviations %}<div><strong>{{ d.line }}</strong> → <span class="n">{{ d.level | level }}</span> {{ m.direction_chip(d.direction) }} <span class="small">{{ d.reason }}</span> {{ m.evidence(d.evidence) }}</div>{% else %}<span class="muted">none{% if r.no_change_reason %}: {{ r.no_change_reason }}{% endif %}</span>{% endfor %}
+      {% if r.violations %}<div class="small warn-text">Auditor: {{ r.violations | join("; ") }}</div>{% endif %}</td>
+    <td>{% if r.decisive_fact %}{{ r.decisive_fact.text }}{% if r.decisive_fact.evidence %} {{ m.evidence([r.decisive_fact.evidence]) }}{% endif %}{% else %}—{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if c.pm.agreement %}<p class="small">Replicates agreeing with the medoid, per line: {% for line, n in c.pm.agreement | by_line %}<span class="kv"><span class="k">{{ line }}</span> <span class="n">{{ n }}/{{ c.pm.valid_replicates }}</span></span>{% endfor %}</p>{% endif %}
+{% else %}
+{{ m.empty("No PM output", "The council did not run or no replicate returned a valid decision; the reference book applies.") }}
+{% endif %}
+{% if c.single_agent %}
+<h3>Control: single agent, no debate</h3>
+<p class="small">{% for r in c.single_agent.replicates %}Replicate <span class="n">{{ r.replicate }}</span>: {% for d in r.deviations %}{{ d.line }} → <span class="n">{{ d.level | level }}</span>{% if not loop.last %}, {% endif %}{% else %}no deviation{% endfor %}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+{% endif %}
+{% endcall %}
+
+{% call m.section("risk", 5, "Raw → final", "risk") %}
+{% if c.risk %}
+{% set lines_all = (c.risk.raw_levels.keys() | list) + (c.risk.final_x.keys() | list) + (c.bands.keys() | list) %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Line</th><th>Band</th><th>PM level</th><th>Banded</th><th>Proposed</th><th>Final</th></tr></thead>
+  <tbody>
+  {% for line in lines_all | unique | sort_lines %}
+  {% set b = c.bands.get(line) %}
+  <tr>
+    <td><strong>{{ line }}</strong></td>
+    <td class="n">{% if b %}{{ b.lo | level }} … {{ b.hi | level }}{% else %}—{% endif %}</td>
+    <td class="n">{{ c.risk.raw_levels.get(line) | level }}</td>
+    <td class="n">{{ c.risk.banded_levels.get(line) | level }}</td>
+    <td class="n">{{ c.risk.proposed_x.get(line) | x }}</td>
+    <td class="n"><strong>{{ c.risk.final_x.get(line) | x }}</strong></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<dl class="facts">
+  <div><dt>Gross</dt><dd class="n">{{ c.risk.gross_x | x }}</dd></div>
+  <div><dt>Net</dt><dd class="n">{{ c.risk.net_x | x }}</dd></div>
+  <div><dt>Margin use</dt><dd class="n">{{ c.risk.margin_use_pct | pct }}</dd></div>
+  <div><dt>Ex-ante vol</dt><dd class="n">{{ c.risk.ex_ante_vol_pct | pct }}</dd></div>
+  <div><dt>Stop at risk</dt><dd class="n">{{ c.risk.stop_at_risk_pct | pct }}</dd></div>
+  <div><dt>Carry / day</dt><dd class="n">{{ c.risk.carry_bp_day | bp }}</dd></div>
+</dl>
+{% if c.risk.checks %}
+<h3>Rule checks</h3>
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Rule</th><th>Check</th><th>Result</th><th>Value</th><th>Limit</th></tr></thead>
+  <tbody>
+  {% for ch in c.risk.checks %}
+  <tr><td class="n">{{ ch.rule_id }}</td><td>{{ ch.name }}</td><td>{% if ch.passed %}<span class="chip state-executed">PASS</span>{% else %}<span class="chip state-halted">FAIL</span>{% endif %}</td><td class="n">{{ ch.value | value }}</td><td class="n">{{ ch.limit | value }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% if c.risk.hold_reasons %}<p class="small">Held back: {% for h in c.risk.hold_reasons %}<code>{{ h }}</code> {% endfor %}</p>{% endif %}
+{% else %}
+{{ m.empty("No risk decision", "The cycle ended before the risk engine ran.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("legs", 6, "Costs and legs", "risk") %}
+{% if c.plan and c.plan.legs %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>#</th><th>Leg</th><th>Line</th><th>Before → after</th><th>Settlement</th><th>Stop</th><th>Cost</th></tr></thead>
+  <tbody>
+  {% for leg in c.plan.legs %}
+  <tr>
+    <td class="n">{{ leg.seq }}</td>
+    <td>{{ leg.kind | replace("_", " ") }} {{ m.direction_chip(leg.direction) }}{% if leg.risk_increasing %} <span class="chip state-warn">adds risk</span>{% endif %}</td>
+    <td><strong>{{ leg.line }}</strong></td>
+    <td class="n">{{ leg.weight_before_x | x }} → {{ leg.weight_after_x | x }}</td>
+    <td>{{ leg.settlement or "—" }} · {{ leg.leverage }}x</td>
+    <td class="n">{{ leg.stop_distance_pct | pct }}</td>
+    <td class="n">{{ leg.cost_bp | bp }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p>Total cost <span class="n">{{ c.plan.cost_bp_total | bp }}</span> of NAV · carry <span class="n">{{ c.plan.carry_bp_day | bp }}</span> per day · gross <span class="n">{{ c.plan.gross_before_x | x }} → {{ c.plan.gross_after_x | x }}</span></p>
+{% else %}
+{{ m.empty("No legs", "Nothing to trade this cycle: the book was already within the deadband, or every change was held back.") }}
+{% endif %}
+{% if c.plan and c.plan.skipped %}<p class="small muted">Skipped: {{ c.plan.skipped | join("; ") }}</p>{% endif %}
+{% endcall %}
+
+{% call m.section("human", 7, "Human outcome", "proposed") %}
+<div class="status-row">{{ m.chip(cv.chip) }}<span class="chip state-sealed">{{ c.decision.human_outcome | replace("_", " ") }}</span></div>
+{% if c.decision.reason %}<p>Reason given: {{ c.decision.reason }}</p>{% endif %}
+{% if c.decision.approved_slot %}<p class="small">Approved during the slot starting {{ c.decision.approved_slot | slot }} (times are rounded to the slot).</p>{% endif %}
+{% endcall %}
+
+{% call m.section("seal", 8, "Seal and calls", "code") %}
+<dl class="facts">
+  <div><dt>Commitment</dt><dd class="n">{% if cv.commitment %}{{ cv.commitment.commitment_sha256 | sha }}{% else %}—{% endif %}</dd></div>
+  <div><dt>Sealed at</dt><dd class="n">{% if cv.commitment %}{{ cv.commitment.sealed_at | slot }}{% else %}—{% endif %}</dd></div>
+  <div><dt>Verified here</dt><dd>{{ "yes" if cv.verified else "no" }}</dd></div>
+  <div><dt>Input hash</dt><dd class="n">{{ c.input_hash | sha }}</dd></div>
+  <div><dt>Policy</dt><dd class="n">{{ c.policy_sha | sha }}</dd></div>
+  <div><dt>Prompts</dt><dd class="n">{{ c.prompt_manifest_sha | sha }}</dd></div>
+</dl>
+<p class="small">Files: <a href="../{{ cv.path }}">cycle</a>{% if cv.reveal %} · <a href="../{{ cv.path | replace('.json', '.reveal.json') }}">salt</a>{% endif %}. Check: sha256(bytes.fromhex(salt) + canonical_json(cycle)) equals the commitment, where canonical JSON has sorted keys and no spaces.</p>
+{% if c.calls %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Role</th><th>Rep</th><th>Status</th><th>Latency</th><th>Tokens in / out</th><th>Prompt</th></tr></thead>
+  <tbody>
+  {% for call in c.calls %}
+  <tr><td>{{ call.role }}</td><td class="n">{{ call.replicate }}</td><td>{% if call.status in ("ok", "cached") %}<span class="chip state-executed">{{ call.status }}</span>{% else %}<span class="chip state-warn">{{ call.status | replace("_", " ") }}</span>{% endif %}</td><td class="n">{{ call.latency_ms }} ms</td><td class="n">{{ call.tokens_in }} / {{ call.tokens_out }}</td><td><code>{{ call.prompt_id }}</code> <span class="n muted small">{{ call.prompt_sha | sha }}</span></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% if c.flags %}<p class="small">Flags: {% for f in c.flags %}<code>{{ f }}</code> {% endfor %}</p>{% endif %}
+{% endcall %}
+{% endblock %}

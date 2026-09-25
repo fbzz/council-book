@@ -1,0 +1,79 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}What this is{% endblock %}
+{% block toc %}
+{{ m.toc_item("status", "Status", "code") }}
+{{ m.toc_item("what", "What is it?", "analyst") }}
+{{ m.toc_item("who", "Who's on the council?", "pm") }}
+{{ m.toc_item("stop", "What can code stop?", "risk") }}
+{{ m.toc_item("button", "Who presses the button?", "bull") }}
+{{ m.toc_item("hindsight", "How do we know it isn't hindsight?", "code") }}
+{{ m.toc_item("never", "What can this never prove?", "bear") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">A public experiment</p>
+  <h1>An LLM council proposes. Code limits. A human decides.</h1>
+  <p class="lede">Every four hours a council of language-model agents looks at a small multi-asset book and may propose a few changes. Deterministic code enforces every risk limit, a person approves every order, and every decision is sealed here before it can be executed.</p>
+</header>
+
+{% call m.section("status", "●", "Status", "code") %}
+<div class="status-row">
+  <span class="chip chip-lg state-{{ status.css }}">{{ status.label }}</span>
+  <span class="chip chip-lg state-{{ kill_chip(status.kill).css }}">kill switch: {{ kill_chip(status.kill).label }}</span>
+</div>
+{% if status.state == "AWAITING_ACCOUNT" %}
+<p>The system is being built in public. There is no broker account yet, so nothing trades and no cycle has been sealed. The first sealed cycle will appear under <a href="cycles.html">Cycles</a>.</p>
+{% elif status.note %}
+<p>{{ status.note }}</p>
+{% endif %}
+<dl class="facts">
+  <div><dt>Cycles published</dt><dd class="n">{{ cycles_count }}</dd></div>
+  <div><dt>Last cycle</dt><dd class="n">{% if latest %}<a href="cycles/{{ latest.doc.cycle_id }}.html">{{ latest.doc.cycle_id }}</a>{% else %}none yet{% endif %}</dd></div>
+  <div><dt>On time</dt><dd class="n">{% if ops_count %}{{ ops_on_time }} of {{ ops_count }}{% else %}—{% endif %}</dd></div>
+</dl>
+{% endcall %}
+
+{% call m.section("what", 1, "What is it?", "analyst") %}
+<p class="big">A forward-only test of whether a council of language models, boxed in by code, can run a small real-money book without fooling itself.</p>
+<p>The book holds exposure <em>lines</em>, not stock picks:
+{% for l in lines %}<span class="chip line-chip">{{ l.name }}</span>{% endfor %}.
+A mechanical <strong>reference book</strong> (trend times volatility, about {{ reference_gross_max }}x gross, never levered, never short) is the default position and the benchmark. The council can only propose sparse deviations from it.</p>
+{% endcall %}
+
+{% call m.section("who", 2, "Who's on the council?", "pm") %}
+<ul class="roles">
+  <li><span class="dot accent-code"></span><strong>Code roles</strong> build the facts, the reference book, the event and volatility cards and the costs. Every number comes from code.</li>
+  <li><span class="dot accent-analyst"></span><strong>Analysts</strong> (language models) write evidence cards that must cite facts from the pack.</li>
+  <li><span class="dot accent-bull"></span><strong>A bull</strong> and <span class="dot accent-bear"></span><strong>a bear</strong> debate: the bear has to rebut the bull's specific claims.</li>
+  <li><span class="dot accent-pm"></span><strong>A portfolio manager</strong>, run three times independently, proposes at most {{ max_deviations }} deviations. The medoid replicate is used — a real decision, never an average.</li>
+</ul>
+<p><a href="council.html">Full roster and rules →</a></p>
+{% endcall %}
+
+{% call m.section("stop", 3, "What can code stop?", "risk") %}
+<p class="big">Everything that matters. Prompts explain the rules; code enforces them.</p>
+<ul class="ticks">
+  <li>Gross exposure at most <span class="n">{{ invariants.gross }}x</span> NAV, hard-coded.</li>
+  <li>Soft kill: at <span class="n">{{ (kill.warn_at * 100) | round(0) | int }}%</span> of the lifetime peak no new risk is added; at <span class="n">{{ (kill.halt_at * 100) | round(0) | int }}%</span> an urgent flatten proposal is raised (a human still approves it).</li>
+  <li>Every opening order carries a catastrophe stop-loss.</li>
+  <li>Leverage and shorts only through the council, and only when the leg passes a net-of-cost gate.</li>
+  <li>Bands, deadbands, minimum holds, turnover and cost budgets, event blocks and an anti-chase rule.</li>
+</ul>
+{% endcall %}
+
+{% call m.section("button", 4, "Who presses the button?", "bull") %}
+<p class="big">A person, every time.</p>
+<p>The unattended runner can only read. Orders are approved in a separate operator terminal that refuses to run under automation or an agent, asks for a typed confirmation code, and unlocks a separate, auto-locking keychain. Notifications carry percentages only. Nothing trades on its own.</p>
+{% endcall %}
+
+{% call m.section("hindsight", 5, "How do we know it isn't hindsight?", "code") %}
+<p class="big">Each cycle is sealed before any order can be approved.</p>
+<p>A hash commitment of the full cycle is published first; the cycle itself and the salt that opens the seal are published once the decision is final. Anyone can re-hash the revealed file. Only forward, sealed cycles count as evidence. Language models have read the history we could backtest on, so no council backtest is ever shown.</p>
+{% endcall %}
+
+{% call m.section("never", 6, "What can this never prove?", "bear") %}
+<p class="big">A small edge.</p>
+<p>The standard error of a Sharpe ratio is roughly one over the square root of the number of years. Telling an information ratio of 0.5 from zero at two standard errors takes about 16 years. The record can show rule-keeping, costs, drawdown behaviour and how often the council disagrees with the reference — not that it is skilful.</p>
+{% endcall %}
+{% endblock %}

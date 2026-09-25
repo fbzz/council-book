@@ -1,0 +1,48 @@
+{
+ "interval": "OneDay",
+ "candles": [
+  {
+   "instrumentId": 12,
+   "candles": [
+    {
+     "instrumentID": 12,
+     "fromDate": "2026-10-01T00:00:00Z",
+     "open": 1.169,
+     "high": 1.172,
+     "low": 1.167,
+     "close": 1.17,
+     "volume": 0.0
+    },
+    {
+     "instrumentID": 12,
+     "fromDate": "2026-09-30T00:00:00Z",
+     "open": 1.17,
+     "high": 1.1729999999999998,
+     "low": 1.168,
+     "close": 1.1709999999999998,
+     "volume": 0.0
+    },
+    {
+     "instrumentID": 12,
+     "fromDate": "2026-09-29T00:00:00Z",
+     "open": 1.171,
+     "high": 1.174,
+     "low": 1.169,
+     "close": 1.172,
+     "volume": 0.0
+    },
+    {
+     "instrumentID": 12,
+     "fromDate": "2026-09-28T00:00:00Z",
+     "open": 1.172,
+     "high": 1.1749999999999998,
+     "low": 1.17,
+     "close": 1.1729999999999998,
+     "volume": 0.0
+    }
+   ],
+   "rangeOpen": 1.169,
+   "rangeClose": 1.173
+  }
+ ]
+}

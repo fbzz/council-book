@@ -1,0 +1,62 @@
+[
+ {
+  "date": "2026-09-28T00:00:00.000Z",
+  "close": 480.0,
+  "high": 483.0,
+  "low": 476.0,
+  "open": 479.0,
+  "volume": 41000000,
+  "adjClose": 475.2,
+  "adjHigh": 478.17,
+  "adjLow": 471.24,
+  "adjOpen": 474.21,
+  "adjVolume": 41000000,
+  "divCash": 0.0,
+  "splitFactor": 1.0
+ },
+ {
+  "date": "2026-09-29T00:00:00.000Z",
+  "close": 482.0,
+  "high": 485.0,
+  "low": 478.0,
+  "open": 481.0,
+  "volume": 41000001,
+  "adjClose": 477.18,
+  "adjHigh": 480.15,
+  "adjLow": 473.21999999999997,
+  "adjOpen": 476.19,
+  "adjVolume": 41000001,
+  "divCash": 0.0,
+  "splitFactor": 1.0
+ },
+ {
+  "date": "2026-09-30T00:00:00.000Z",
+  "close": 484.0,
+  "high": 487.0,
+  "low": 480.0,
+  "open": 483.0,
+  "volume": 41000002,
+  "adjClose": 479.15999999999997,
+  "adjHigh": 482.13,
+  "adjLow": 475.2,
+  "adjOpen": 478.17,
+  "adjVolume": 41000002,
+  "divCash": 0.0,
+  "splitFactor": 1.0
+ },
+ {
+  "date": "2026-10-01T00:00:00.000Z",
+  "close": 999.0,
+  "high": 489.0,
+  "low": 482.0,
+  "open": 485.0,
+  "volume": 41000003,
+  "adjClose": 999.0,
+  "adjHigh": 484.11,
+  "adjLow": 477.18,
+  "adjOpen": 480.15,
+  "adjVolume": 41000003,
+  "divCash": 0.0,
+  "splitFactor": 1.0
+ }
+]

@@ -1,0 +1,56 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}Failures & disclaimers{% endblock %}
+{% block toc %}
+{{ m.toc_item("incidents", "Incidents", "halted") }}
+{{ m.toc_item("withdrawn", "Withdrawn claims", "stone") }}
+{{ m.toc_item("disclaimer", "Disclaimers", "code") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">Failures & disclaimers</p>
+  <h1>What went wrong, and what this is not</h1>
+  <p class="lede">Failures, fallbacks, withheld cycles and withdrawn claims are part of the record.</p>
+</header>
+
+{% call m.section("incidents", 1, "Incidents", "halted") %}
+{% if incidents %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Incident</th><th>Opened</th><th>Severity</th><th>Status</th><th>What happened</th></tr></thead>
+  <tbody>
+  {% for i in incidents %}
+  <tr>
+    <td class="n"><strong>{{ i.incident_id }}</strong>{% if i.withheld %}<br><span class="chip state-warn">cycle withheld</span>{% endif %}</td>
+    <td class="n">{{ i.opened_slot | slot }}</td>
+    <td><span class="chip sev-{{ i.severity }}">{{ i.severity }}</span></td>
+    <td><span class="chip {{ 'state-executed' if i.status == 'resolved' else 'state-warn' }}">{{ i.status }}</span></td>
+    <td class="text"><strong>{{ i.title }}</strong><br><span class="small">{{ i.summary }}</span>{% if i.cycles %}<br><span class="small muted">Cycles: {{ i.cycles | join(", ") }}</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+{{ m.empty("No incidents", "Nothing has gone wrong in public yet — mostly because nothing has run yet.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("withdrawn", 2, "Withdrawn claims", "stone") %}
+<p>Claims from the research that preceded this project which were later withdrawn. They are kept here so they are not repeated.</p>
+{% for w in withdrawn %}
+<article class="withdrawn">
+  <h3><span class="chip state-stone">WITHDRAWN</span> {{ w.claim }}</h3>
+  <p>{{ w.why }}</p>
+</article>
+{% else %}
+<p class="muted">None.</p>
+{% endfor %}
+{% endcall %}
+
+{% call m.section("disclaimer", 3, "Disclaimers", "code") %}
+<ul class="disclaimer">
+{% for d in disclaimer %}<li><strong>{{ d.title }}</strong> {{ d.text }}</li>{% endfor %}
+</ul>
+{% endcall %}
+{% endblock %}

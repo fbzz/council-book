@@ -1,0 +1,92 @@
+{
+ "discussions": [
+  {
+   "id": "d-1001",
+   "post": {
+    "message": {
+     "text": "my body text with @trader_joe and https://scam.example"
+    },
+    "title": "Fed holds rates steady \u202etxt.exe",
+    "summary": "Policy rate unchanged; see www.fake-news.com for more. Ping @insider",
+    "aiSummary": "AI summary ignored when summary exists",
+    "created": "2026-10-01T12:00:00Z",
+    "owner": {
+     "username": "trader_joe",
+     "avatar": "https://a/b.png"
+    },
+    "tags": [
+     {
+      "market": {
+       "symbolName": "SPX500",
+       "internalId": 27
+      }
+     },
+     {
+      "market": {
+       "symbolName": "nsdq100",
+       "internalId": 28
+      }
+     }
+    ],
+    "marketEvent": null
+   }
+  },
+  {
+   "id": "d-1002",
+   "post": {
+    "title": "",
+    "aiSummary": "Chipmakers rally on \u001b[31mdemand\u001b[0m outlook",
+    "created": "2026-10-01T09:30:00Z",
+    "markets": [
+     {
+      "symbolName": "SOXX"
+     }
+    ]
+   }
+  },
+  {
+   "post": {
+    "title": "Earnings preview",
+    "summary": "Company reports next week",
+    "created": "2026-09-30T20:00:00Z",
+    "tags": [
+     {
+      "symbolName": "AAPL"
+     }
+    ],
+    "marketEvent": {
+     "earningsDate": "2026-10-29T20:00:00Z",
+     "isBeforeMarketOpen": false,
+     "estimatedEps": 1.6
+    }
+   }
+  },
+  {
+   "id": "d-1004",
+   "post": {
+    "title": "No timestamp here",
+    "summary": "cannot prove availability"
+   }
+  },
+  {
+   "id": "d-1005",
+   "post": {
+    "title": "From the future",
+    "summary": "clock skew",
+    "created": "2026-10-01T18:00:00Z"
+   }
+  },
+  {
+   "id": "d-1001",
+   "post": {
+    "title": "Duplicate of first",
+    "created": "2026-10-01T12:00:00Z"
+   }
+  }
+ ],
+ "paging": {
+  "take": 20,
+  "offset": 0,
+  "total": 6
+ }
+}

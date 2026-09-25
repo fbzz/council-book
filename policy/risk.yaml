@@ -34,7 +34,7 @@ deadband: {level: 0.25, level_crypto: 0.5, min_nav_share: 0.02}                 
 min_hold_days: {crypto: 7, default: 3, no_flip_hours: 24, toward_reference_exempt: true}   # R12
 churn: {cycle_increase_max: 0.60, turnover_7d_max: 1.00, turnover_30d_max: 3.00}    # R13
 cost_budget: {cycle_max_bps: 40, discretionary_30d_max_bps: 100, carry_proposal_max_bps_day: 2.0, carry_watch_max_bps_day: 3.0}  # R14
-net_of_cost_gate: {reference_max_srbe: 0.30, council_max_srbe: 0.20, hold_days: {crypto: 60, default: 20}}  # R15
+net_of_cost_gate: {reference_max_srbe: 0.30, council_max_srbe: 0.20, hold_days: {crypto: 60, default: 20}, reference_hold_days: {crypto: 120, default: 90}}  # R15 (reference trend states last months)
 event_block: {macro_before_h: 24, macro_after_h: 2}                                 # R16 (blocks ADDS only)
 anti_chase_sigma: 2.5                                                               # R17
 freshness: {daily_bar_max_h: 30, four_hour_bar_max_h: 5, quote_max_s: 60, frozen_reference_share_max: 0.30}  # R18

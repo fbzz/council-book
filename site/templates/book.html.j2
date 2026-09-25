@@ -1,0 +1,87 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}Book & performance{% endblock %}
+{% block toc %}
+{{ m.toc_item("book", "Latest book", "long") }}
+{{ m.toc_item("performance", "Performance vs controls", "pm") }}
+{{ m.toc_item("controls", "What the controls are", "code") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">Book & performance</p>
+  <h1>What is held, and how it compares</h1>
+  <p class="lede">Exposure is shown as a multiple of NAV (x). The book is lagged: it is published only after the cycle that set it has been revealed.</p>
+</header>
+
+{% call m.section("book", 1, "Latest book", "long") %}
+{% if book %}
+<p>As of cycle <a class="n" href="cycles/{{ book.as_of_cycle_id }}.html">{{ book.as_of_cycle_id }}</a> · gross <span class="n">{{ book.gross_x | x }}</span> · net <span class="n">{{ book.net_x | x }}</span> · cash <span class="n">{{ book.cash_x | x }}</span></p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Line</th><th>Side</th><th>Weight</th><th>Reference</th><th class="bar-col">Exposure</th></tr></thead>
+  <tbody>
+  {% for row in book_rows %}
+  <tr>
+    <td><strong>{{ row.line }}</strong></td>
+    <td>{{ m.direction_chip(row.b.direction) }}</td>
+    <td class="n">{{ row.b.weight_x | x }}</td>
+    <td class="n">{{ row.b.reference_weight_x | x }}</td>
+    <td class="bar-col">
+      <svg class="bar" viewBox="0 0 100 12" preserveAspectRatio="none" role="img" aria-label="{{ row.line }} weight {{ row.b.weight_x | x }}">
+        <rect class="bar-track" x="0" y="3" width="100" height="6"></rect>
+        <rect class="{{ row.bar.css }}" x="{{ row.bar.x }}" y="2" width="{{ row.bar.w }}" height="8"></rect>
+        {% if row.ref %}<rect class="bar-ref" x="{{ (row.ref.x | float) + (row.ref.w | float) if row.b.reference_weight_x >= 0 else row.ref.x }}" y="0" width="0.8" height="12"></rect>{% endif %}
+        <rect class="bar-axis" x="49.8" y="0" width="0.4" height="12"></rect>
+      </svg>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="legend small"><span class="swatch sw-long"></span>long <span class="swatch sw-short"></span>short <span class="swatch sw-ref"></span>reference</p>
+{% else %}
+{{ m.empty("No book yet", "Nothing is held. The book appears after the first revealed cycle that trades.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("performance", 2, "Performance vs controls", "pm") %}
+{% if chart %}
+<figure class="chart">
+  <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img" aria-label="Base-100 index of the book and its controls">
+    <line class="chart-base" x1="0" x2="{{ chart.width }}" y1="{{ chart.base_y }}" y2="{{ chart.base_y }}"></line>
+    {% for s in chart.series %}
+    <polyline class="series series-{{ s.css }}" points="{{ s.points }}"></polyline>
+    {% endfor %}
+  </svg>
+  <figcaption class="small">Base 100 at the start ({{ chart.first }} to {{ chart.last }}). Dashed line = 100.</figcaption>
+</figure>
+<ul class="legend">
+{% for s in chart.series %}<li><span class="swatch sw-{{ s.css }}"></span>{{ s.label }} <span class="n">{{ "%.1f" | format(s.last) }}</span></li>{% endfor %}
+</ul>
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Day</th>{% for key, label, css in controls %}<th>{{ label }}</th>{% endfor %}<th>Drawdown</th></tr></thead>
+  <tbody>
+  {% for p in points %}
+  <tr><td class="n">{{ p.as_of }}</td>{% for key, label, css in controls %}<td class="n">{% set v = p[key] %}{{ "%.1f" | format(v) if v is not none else "—" }}</td>{% endfor %}<td class="n">{{ p.drawdown_pct | pct }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Descriptive only. Differences over months are noise-dominated; see "What can this never prove?" on the first page.</p>
+{% else %}
+{{ m.empty("No performance data yet", "The index starts with the first executed cycle. Until then there is nothing to compare.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("controls", 3, "What the controls are", "code") %}
+<dl class="defs">
+  <dt><span class="swatch sw-c0"></span>C0 as executed</dt><dd>The real book, from the broker's equity marks, time-weighted so deposits and withdrawals do not count as returns.</dd>
+  <dt><span class="swatch sw-c2"></span>C2 reference</dt><dd>The mechanical reference book, executed with the same costs and deadband. The council is scored against this.</dd>
+  <dt><span class="swatch sw-c2x"></span>C2x exposure-matched</dt><dd>The reference scaled to the council's average gross exposure, so "held less risk" is not mistaken for skill.</dd>
+  <dt><span class="swatch sw-c3"></span>C3 hold</dt><dd>The starting book, never traded again.</dd>
+  <dt><span class="swatch sw-c4a"></span>C4 buy-and-hold</dt><dd>SPY and BTC, each held on its own.</dd>
+</dl>
+{% endcall %}
+{% endblock %}

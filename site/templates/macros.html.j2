@@ -1,0 +1,34 @@
+{% macro toc_item(id, label, accent) %}
+<li><a href="#{{ id }}"><span class="dot accent-{{ accent }}" aria-hidden="true"></span>{{ label }}</a></li>
+{% endmacro %}
+
+{% macro section(id, num, title, accent) %}
+<section class="card accent-{{ accent }}" id="{{ id }}" aria-labelledby="{{ id }}-h">
+  <h2 id="{{ id }}-h"><span class="num">{{ num }}</span>{{ title }}</h2>
+  {{ caller() }}
+</section>
+{% endmacro %}
+
+{% macro chip(c) %}<span class="chip state-{{ c.css }}">{{ c.label }}</span>{% endmacro %}
+
+{% macro direction_chip(direction) %}
+{% if direction in ("long", "risk_up", "add", "lever", "cover") %}<span class="chip dir-long">{{ direction | replace("_", " ") }}</span>
+{% elif direction in ("short", "risk_down", "cut") %}<span class="chip dir-short">{{ direction | replace("_", " ") }}</span>
+{% else %}<span class="chip dir-cash">{{ direction | replace("_", " ") }}</span>{% endif %}
+{% endmacro %}
+
+{% macro evidence(refs) %}
+{% for r in refs %}
+{% if r.kind == "broker_feed" %}<span class="ev ev-feed" title="Broker feed item: cited by id, text not republished">{{ r.id }}</span>
+{% elif r.kind == "fred" %}<span class="ev ev-fred" title="FRED series{% if not r.publishable %}; value not publishable{% endif %}">FRED {{ r.series }}{% if r.as_of %} {{ r.as_of }}{% endif %}{% if r.publishable and r.value is not none %} = {{ r.value }}{% endif %}</span>
+{% else %}<span class="ev ev-{{ r.kind }}">{{ r.id }}</span>
+{% endif %}
+{% endfor %}
+{% endmacro %}
+
+{% macro empty(title, text) %}
+<div class="empty">
+  <p class="empty-title">{{ title }}</p>
+  <p class="muted">{{ text }}</p>
+</div>
+{% endmacro %}

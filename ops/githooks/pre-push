@@ -1,0 +1,52 @@
+#!/bin/sh
+# council-book pre-push hook. Install once per clone:  git config core.hooksPath ops/githooks
+# For every commit about to be pushed:
+# 1. author and committer e-mails must be GitHub noreply addresses;
+# 2. the pushed tree's journal/, docs/ and site/ files must pass the leak scan.
+set -eu
+
+LEAKSCAN=${COUNCIL_LEAKSCAN:-"uv run --quiet python -m council.publish.leakscan"}
+zero=0000000000000000000000000000000000000000
+status=0
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in
+    "$zero"|0000000*) continue ;;   # branch deletion
+  esac
+  case "$remote_sha" in
+    "$zero"|0000000*) range="$local_sha --not --remotes" ;;
+    *) range="$remote_sha..$local_sha" ;;
+  esac
+  # shellcheck disable=SC2086
+  bad=$(git log --format='%ae%n%ce' $range | sort -u | grep -v -E '@users\.noreply\.github\.com$' || true)
+  if [ -n "$bad" ]; then
+    echo "pre-push: $local_ref has commits whose e-mail is not a GitHub noreply address" >&2
+    status=1
+  fi
+  out="$tmp/$(printf '%s' "$local_sha" | cut -c1-12)"
+  mkdir -p "$out"
+  dirs=$(git ls-tree -r --name-only "$local_sha" -- journal docs site | cut -d/ -f1 | sort -u)
+  if [ -n "$dirs" ]; then
+    # shellcheck disable=SC2086
+    git archive --format=tar "$local_sha" -- $dirs | tar -x -C "$out"
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+
+if [ -n "$(find "$tmp" -type f -print -quit)" ]; then
+  set --
+  user=$(id -un 2>/dev/null || true)
+  if [ "${#user}" -ge 5 ]; then
+    set -- --canary "$user"
+  fi
+  # shellcheck disable=SC2086
+  if ! $LEAKSCAN "$@" "$tmp"; then
+    echo "pre-push: leak scan failed; nothing was pushed" >&2
+    exit 1
+  fi
+fi

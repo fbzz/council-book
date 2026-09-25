@@ -1,0 +1,38 @@
+# gitleaks configuration: the default rule set plus council-book specific rules.
+# Runs in CI (gitleaks-action) and can be run locally: `gitleaks git --config .gitleaks.toml`.
+title = "council-book"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "council-broker-user-key-header"
+description = "A broker user key sent as a header value"
+regex = '''(?i)x-user-key['"]?\s*[:=]\s*['"]?[A-Za-z0-9._~+/=-]{20,}'''
+keywords = ["x-user-key"]
+
+[[rules]]
+id = "council-broker-api-key-header"
+description = "A broker application key sent as a header value"
+regex = '''(?i)x-api-key['"]?\s*[:=]\s*['"]?[A-Za-z0-9._~+/=-]{20,}'''
+keywords = ["x-api-key"]
+
+[[rules]]
+id = "council-ntfy-topic-url"
+description = "A private ntfy topic in a URL (topics are unguessable secrets)"
+regex = '''ntfy\.sh/[A-Za-z0-9_-]{12,}'''
+keywords = ["ntfy.sh/"]
+
+[[rules]]
+id = "council-healthcheck-ping-url"
+description = "A healthchecks.io ping URL (anyone holding it can fake the heartbeat)"
+regex = '''hc-ping\.com/[0-9a-fA-F-]{20,}'''
+keywords = ["hc-ping.com"]
+
+[allowlist]
+description = "Synthetic red-team fixtures and condensed public API examples"
+paths = [
+  '''^tests/redteam/fixtures/''',
+  '''^tests/contract/specs/''',
+  '''^uv\.lock$''',
+]

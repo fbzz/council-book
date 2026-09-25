@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hourly at :40; the cycle itself decides whether a 4h slot is due (runs late slots up to 120 min). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.fbzz.council.cycle</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string><string>-i</string>
+    <string>{{RELEASE}}/.venv/bin/council</string><string>cycle</string><string>--slot</string><string>auto</string>
+  </array>
+  <key>WorkingDirectory</key><string>{{RELEASE}}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>{{HOME}}</string>
+    <key>COUNCIL_ROLE</key><string>runner</string>
+    <key>COUNCIL_MODE</key><string>live</string>
+    <key>COUNCIL_AGENT_CONTEXT</key><string>1</string>
+  </dict>
+  <key>StartCalendarInterval</key><dict><key>Minute</key><integer>40</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>Nice</key><integer>5</integer>
+  <key>StandardOutPath</key><string>{{LOGS}}/cycle.out.log</string>
+  <key>StandardErrorPath</key><string>{{LOGS}}/cycle.err.log</string>
+</dict>
+</plist>

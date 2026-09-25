@@ -1,0 +1,33 @@
+{
+ "rates": [
+  {
+   "instrumentID": 12,
+   "ask": 1.1702,
+   "bid": 1.17,
+   "lastExecution": 1.1701,
+   "date": "2026-10-01T14:39:58Z"
+  },
+  {
+   "InstrumentID": 27,
+   "Ask": 6612.5,
+   "Bid": 6611.9,
+   "Date": "2026-10-01T14:39:59Z"
+  },
+  {
+   "instrumentId": 100000,
+   "ask": 62750.0,
+   "bid": 62700.0
+  },
+  {
+   "instrumentID": 55,
+   "ask": 10.0,
+   "bid": 10.5,
+   "date": "2026-10-01T14:39:59Z"
+  },
+  {
+   "instrumentID": 56,
+   "ask": 10.0,
+   "bid": 0.0
+  }
+ ]
+}

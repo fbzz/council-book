@@ -1,0 +1,87 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}Council & rules{% endblock %}
+{% block toc %}
+{{ m.toc_item("llm", "Language-model roles", "pm") }}
+{{ m.toc_item("code", "Code roles", "code") }}
+{{ m.toc_item("invariants", "Hard-coded limits", "halted") }}
+{{ m.toc_item("rules", "Risk rules", "risk") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">Council & rules</p>
+  <h1>Who does what, and the numbers they cannot change</h1>
+  <p class="lede">Model <code>{{ roster.model }}</code>, thinking {{ "on" if roster.think else "off" }}, temperature {{ roster.temperature }}. Cycles at {% for h in roster.slots %}{{ "%02d" | format(h) }}:{{ "%02d" | format(roster.slot_minute) }}{% if not loop.last %}, {% endif %}{% endfor %} UTC.</p>
+</header>
+
+{% call m.section("llm", 1, "Language-model roles", "pm") %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Role</th><th>Kind</th><th>Authority</th><th>Replicates</th><th>Prompt</th></tr></thead>
+  <tbody>
+  {% for r in roster.llm %}
+  <tr{% if not r.enabled %} class="disabled"{% endif %}>
+    <td><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
+    <td><span class="chip kind-llm">LLM</span></td>
+    <td><span class="chip auth-{{ r.authority | lower }}">{{ r.authority }}</span></td>
+    <td class="n">{{ r.replicates }}{% if r.cadence != "every cycle" %}<br><span class="muted small">{{ r.cadence }}</span>{% endif %}</td>
+    <td>{% for p in r.prompts %}<code>{{ p.prompt_id }}</code> <span class="n muted small">{{ p.sha | sha }}</span><br>{% else %}<span class="muted small">not yet in the manifest</span>{% endfor %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted small">DECIDES = sole author of the council's deviations, inside code-enforced bands. ADVISES = evidence or argument the decider may use. CONTEXT = background only.</p>
+{% endcall %}
+
+{% call m.section("code", 2, "Code roles", "code") %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>Role</th><th>Kind</th><th>Authority</th></tr></thead>
+  <tbody>
+  {% for r in roster.code %}
+  <tr>
+    <td><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
+    <td><span class="chip kind-code">CODE</span></td>
+    <td><span class="chip auth-code">CODE</span></td>
+  </tr>
+  {% endfor %}
+  <tr>
+    <td><span class="dot accent-bull" aria-hidden="true"></span><strong>Human operator</strong><br><span class="muted small">Approves or rejects every order in a separate terminal. Nothing trades without this step.</span></td>
+    <td><span class="chip kind-human">HUMAN</span></td>
+    <td><span class="chip auth-decides">DECIDES</span></td>
+  </tr>
+  </tbody>
+</table>
+</div>
+{% endcall %}
+
+{% call m.section("invariants", 3, "Hard-coded limits", "halted") %}
+<p>These are constants in the code. The policy file may be stricter, never looser, and a test enforces it.</p>
+<ul class="ticks">
+  <li>Gross exposure at most <span class="n">{{ invariants.gross }}x</span> NAV.</li>
+  <li>Halt at <span class="n">{{ invariants.halt }}</span> of the lifetime peak.</li>
+  <li>Stop-loss on every opening order: <strong>{{ "required" if invariants.stop else "not required" }}</strong>.</li>
+  <li>Human approval of every order: <strong>{{ "required" if invariants.human else "not required" }}</strong>.</li>
+  <li>Only the dedicated agent portfolio is ever touched: <strong>{{ "yes" if invariants.main_account else "no" }}</strong>.</li>
+</ul>
+{% endcall %}
+
+{% call m.section("rules", 4, "Risk rules", "risk") %}
+<div class="table-wrap">
+<table class="rules wide">
+  <thead><tr><th>Rule</th><th>What it does</th><th>Numbers</th></tr></thead>
+  <tbody>
+  {% for r in rules %}
+  <tr>
+    <td class="n"><strong>{{ r.rule_id or "—" }}</strong></td>
+    <td>{{ r.title }}<br><code class="muted small">{{ r.key }}</code></td>
+    <td>{% for k, v in r.numbers %}<span class="kv"><span class="k">{{ k }}</span> <span class="n">{{ v }}</span></span>{% endfor %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted small">Source: <code>policy/risk.yaml</code>. Its hash is recorded in every sealed cycle.</p>
+{% endcall %}
+{% endblock %}

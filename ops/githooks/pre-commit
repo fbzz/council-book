@@ -1,0 +1,49 @@
+#!/bin/sh
+# council-book pre-commit hook. Install once per clone:  git config core.hooksPath ops/githooks
+# 1. Refuse commits whose author or committer e-mail is not a GitHub noreply address.
+# 2. Leak-scan the STAGED content (not the working tree) of files under journal/, docs/ and site/.
+#    The local user name is added as a canary, so a home path or login name cannot slip through.
+set -eu
+
+is_noreply() {
+  case "$1" in
+    *@users.noreply.github.com) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+author_email=$(git var GIT_AUTHOR_IDENT | sed -n 's/^.*<\([^>]*\)>.*$/\1/p')
+committer_email=$(git var GIT_COMMITTER_IDENT | sed -n 's/^.*<\([^>]*\)>.*$/\1/p')
+if ! is_noreply "$author_email" || ! is_noreply "$committer_email"; then
+  echo "pre-commit: author and committer e-mails must end in @users.noreply.github.com" >&2
+  echo "pre-commit: set a repo-local identity: git config user.email '<id>+<login>@users.noreply.github.com'" >&2
+  exit 1
+fi
+
+# The scanner command can be overridden for tests; bypassing a hook needs --no-verify anyway.
+LEAKSCAN=${COUNCIL_LEAKSCAN:-"uv run --quiet python -m council.publish.leakscan"}
+top=$(git rev-parse --show-toplevel)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+staged="$tmp/staged.lst"
+git diff --cached --name-only --diff-filter=ACMR -z -- journal docs site > "$staged"
+if [ ! -s "$staged" ]; then
+  exit 0
+fi
+mkdir "$tmp/files"
+# Fail closed: if the staged blobs cannot be exported, the commit is refused.
+(cd "$top" && xargs -0 git checkout-index --prefix="$tmp/files/" -- < "$staged")
+
+
+set --
+user=$(id -un 2>/dev/null || true)
+if [ "${#user}" -ge 5 ]; then
+  set -- --canary "$user"
+fi
+
+# shellcheck disable=SC2086
+if ! $LEAKSCAN "$@" "$tmp/files"; then
+  echo "pre-commit: leak scan failed on staged public files; nothing was committed" >&2
+  exit 1
+fi

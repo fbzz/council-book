@@ -1,0 +1,21 @@
+# Claims from the research lab that preceded council-book and were later withdrawn.
+# Shown on the "Failures & disclaimers" page. Neutral wording; no amounts, names or paths.
+# Humans may add entries here (a withdrawn claim is never deleted, only added).
+claims:
+  - id: W-1
+    claim: "A language-model trading agent passed its evaluation."
+    why: >-
+      Most of the result came from a mechanical drawdown gate rather than from the model's
+      judgement, and the test window lay inside the model's training data, so the model may already
+      have known how that period ended. The result is not evidence of forecasting skill.
+  - id: W-2
+    claim: "An interim scoreboard for a single-agent setup."
+    why: >-
+      The interim figures were wrong: funding and trading costs were counted incorrectly. The
+      scoreboard was withdrawn and replaced by the corrected result.
+  - id: W-3
+    claim: "Shorting was validated."
+    why: >-
+      A note recorded shorting as validated; later tests contradicted it. Shorts are therefore
+      allowed only through the council, in downtrends, and only when a leg passes the
+      net-of-cost gate.

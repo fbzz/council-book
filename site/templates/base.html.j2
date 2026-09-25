@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="{{ csp }}">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="An LLM agent council proposes trades every four hours; code enforces the risk limits and a human approves every order. The public record.">
+<title>{% block title %}council-book{% endblock %} · council-book</title>
+<link rel="stylesheet" href="{{ root }}static/style.css">
+</head>
+<body data-last-cycle="{{ status.last_cycle_at }}">
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="top-inner">
+    <a class="brand" href="{{ root }}index.html"><span class="brand-mark" aria-hidden="true"></span>council-book</a>
+    <nav class="pages" aria-label="Pages">
+    {% for p in nav %}
+      <a href="{{ root }}{{ p.href }}"{% if p.key == page %} aria-current="page"{% endif %}>{{ p.label }}</a>
+    {% endfor %}
+    </nav>
+    <div class="status-chips">
+      <span class="chip state-{{ status.css }}" title="Project status">{{ status.label }}</span>
+      <span id="stale" class="chip state-warn" hidden title="The last cycle is more than 5 hours old">STALE</span>
+    </div>
+  </div>
+</header>
+<div class="layout">
+  <nav class="toc" aria-label="On this page">
+    <p class="toc-title">On this page</p>
+    <ol>
+    {% block toc %}{% endblock %}
+    </ol>
+  </nav>
+  <main id="main">
+  {% block main %}{% endblock %}
+  </main>
+</div>
+<footer class="foot">
+  <div class="foot-inner">
+    <ul class="foot-list">
+      <li>Not investment advice.</li>
+      <li>Real money is at risk; the author holds the positions shown.</li>
+      <li>Model output may contain hallucinated or outdated facts.</li>
+      <li>Backtests are illustrative and lie inside the models' training window.</li>
+      <li>Not endorsed by the broker.</li>
+    </ul>
+    <p class="muted">Code: Apache-2.0 · Journal, docs and site text: CC BY 4.0 (excluding third-party material).</p>
+  </div>
+</footer>
+<script>{{ stale_script }}</script>
+</body>
+</html>

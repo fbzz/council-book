@@ -1,0 +1,34 @@
+{
+  "_desk_brief": {
+    "id": "council-desk_brief/v1",
+    "sha256": "7099b47ab58e22c1c2f3fa20c9291943369cdf697639c182844627072821afd6"
+  },
+  "bear": {
+    "id": "council-bear/v1",
+    "sha256": "7b041c662938e7e7293d3a2f04fb5b04b90ef4d43213c6d01adbbd4d8d024b46"
+  },
+  "bull_open": {
+    "id": "council-bull_open/v1",
+    "sha256": "b88dc445497ffcb4100c37932751fc1c0deea785d5c8c92903876b52186dec82"
+  },
+  "bull_rebuttal": {
+    "id": "council-bull_rebuttal/v1",
+    "sha256": "b67f422b63130eb06cc8de9a85ca8498733caf8fc708f25726388846ca2459b3"
+  },
+  "macro": {
+    "id": "council-macro/v1",
+    "sha256": "17f6fe283215c7cf6b085483c552b8f885893df29a44fe8a324d010f256ae728"
+  },
+  "news": {
+    "id": "council-news/v1",
+    "sha256": "b4ad67b7b0bc2604c5801eab4fa1a31ac3bc6780d2825f0ff7010e3d7093bb4e"
+  },
+  "pm": {
+    "id": "council-pm/v1",
+    "sha256": "a3eb09fa2dcdcf46b6d4f6bbd87d227aced317ad8d3eef75498b07fb747b4d8f"
+  },
+  "single_agent": {
+    "id": "council-single_agent/v1",
+    "sha256": "8f340cd44de9b71d0610a9e152efcda7beab35d18d66bb47fb505fa6660ce77a"
+  }
+}
