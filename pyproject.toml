@@ -1,0 +1,51 @@
+[project]
+name = "council-book"
+version = "0.1.0"
+description = "An LLM agent council proposes trades for a small real-money portfolio every four hours; code enforces the risk limits and a human approves every order."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2.8",
+  "pyyaml>=6.0",
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "typer>=0.12",
+  "rich>=13.7",
+  "jinja2>=3.1",
+]
+
+[project.scripts]
+council = "council.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.2",
+  "respx>=0.21",
+  "hypothesis>=6.100",
+  "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/council"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "live: touches the network or a live model (opt-in, never in CI)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]

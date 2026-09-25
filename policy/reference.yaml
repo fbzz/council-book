@@ -1,0 +1,22 @@
+# Mechanical reference book: the default position, the council's band centre, the fallback, and
+# the primary benchmark (headline metric = council as proposed minus this book).
+version: 1
+vol:
+  ewma_lambda: 0.94          # daily EWMA of squared log returns
+  realised_window: 60        # days
+  realised_floor_mult: 0.8   # sigma = max(ewma, 0.8 * realised_60d), annualised
+  annualisation_days: {crypto: 365, default: 252}
+trend:
+  fast_sma: 50
+  slow_sma: 200               # computed on PRIOR completed daily closes only
+  levels: {up: 1.0, mixed: 0.5, down: 0.25}
+  satellite_level: 1.0        # stocks: momentum is ~random, hold at 1.0 regardless of trend
+level_grid: [-0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0]
+book:
+  target_vol_candidates: [0.15, 0.20, 0.25]   # sigma* chosen by the frozen rule below
+  target_vol_default: 0.20
+  target_vol_rule: "highest candidate whose 2015-2026 mechanical backtest at cost floors has <=20% of rolling 12m windows containing a -25% drawdown"
+  covariance_ewma_days: 90
+  rescale: "Monday 02:40Z slot, or when any sigma moves >30% since last scale"
+  truncation_order: [gross_proposal, ex_ante_vol_hard, stop_budget, margin, caps, broker_minimums]
+  never_short: true

@@ -1,0 +1,26 @@
+# LLM council configuration. Model and flags are recorded in every cycle manifest.
+version: 1
+model: deepseek-v4-flash:cloud
+host: http://localhost:11434
+think: false
+temperature: 0
+num_ctx: 32768
+seeds: {bull: 42, bear: 43, pm: [42, 43, 44]}
+timeouts_s: [40, 60, 90]
+limiter: {calls_per_min: 20, concurrency: 3}
+max_calls_per_cycle: 16
+drop_order_when_over_budget: [sector, macro, news]
+roles:
+  news:     {enabled: true,  replicates: 1, cadence: every_cycle, max_num_predict: 1200}
+  filings:  {enabled: true,  replicates: 1, cadence: per_new_filing, max_per_cycle: 4, max_num_predict: 900}
+  macro:    {enabled: true,  replicates: 1, cadence: daily_0240, max_num_predict: 700}
+  sector:   {enabled: true,  replicates: 1, cadence: daily_1440, max_num_predict: 900}
+  bull:     {enabled: true,  replicates: 1, max_num_predict: 900}
+  bear:     {enabled: true,  replicates: 1, max_num_predict: 900}
+  pm:       {enabled: true,  replicates: 3, max_num_predict: 1400}
+  single_agent_control: {enabled: false, replicates: 3}   # opt-in
+outage_guard: {stage_retry_wait_s: 120, stage_retries: 3}
+slots_utc_hours: [2, 6, 10, 14, 18, 22]
+slot_minute: 40
+late_max_min: 120
+cycle_budget_min: 25

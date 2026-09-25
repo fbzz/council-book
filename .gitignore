@@ -1,0 +1,21 @@
+# never commit private state, secrets or raw data
+.env
+.env.*
+*.sqlite3
+*.sqlite3-*
+*.parquet
+*.csv
+!tests/**/fixtures/**/*.csv
+*.pt
+state/
+raw/
+tests/fixtures_private/
+site-preview/
+_site/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.DS_Store

@@ -1,0 +1,33 @@
+# Universe v1. Pruned at runtime by broker eligibility and minimum position sizes.
+# sleeve: core | crypto | satellite | index | commodity | fx
+# in_reference: the mechanical reference book holds it; otherwise the council may only tilt it inside bands.
+# budget_pct: annualised volatility contribution (% of NAV) for one reference unit u_i = budget / sigma.
+# history: where daily/4h bars come from (etoro first; fallback proxy via tiingo/binance).
+version: 1
+instruments:
+  - {symbol: QQQ,     asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 5.0, history: tiingo,  proxy: QQQ}
+  - {symbol: SOXX,    asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 4.0, history: tiingo,  proxy: SOXX}
+  - {symbol: GLD,     asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 3.0, history: tiingo,  proxy: GLD}
+  - {symbol: DBC,     asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 3.0, history: tiingo,  proxy: DBC}
+  - {symbol: IEF,     asset_class: etf,       sleeve: core,      in_reference: true,  budget_pct: 2.0, history: tiingo,  proxy: IEF}
+  - {symbol: BTC,     asset_class: crypto,    sleeve: crypto,    in_reference: true,  budget_pct: 5.0, history: binance, proxy: BTCUSDT}
+  - {symbol: ETH,     asset_class: crypto,    sleeve: crypto,    in_reference: true,  budget_pct: 3.0, history: binance, proxy: ETHUSDT}
+  - {symbol: SPX500,  asset_class: index,     sleeve: index,     in_reference: false, budget_pct: 3.0, history: etoro,   proxy: SPY}
+  - {symbol: NSDQ100, asset_class: index,     sleeve: index,     in_reference: false, budget_pct: 3.0, history: etoro,   proxy: QQQ}
+  - {symbol: GOLD,    asset_class: commodity, sleeve: commodity, in_reference: false, budget_pct: 2.0, history: etoro,   proxy: GLD}
+  - {symbol: OIL,     asset_class: commodity, sleeve: commodity, in_reference: false, budget_pct: 2.0, history: etoro,   proxy: USO}
+  - {symbol: EURUSD,  asset_class: fx,        sleeve: fx,        in_reference: false, budget_pct: 2.0, history: etoro,   proxy: FXE}
+  - {symbol: GBPUSD,  asset_class: fx,        sleeve: fx,        in_reference: false, budget_pct: 2.0, history: etoro,   proxy: FXB}
+
+# Satellite: single US stocks ranked by the four-line fundamental rule inside peer groups.
+# The reference holds the top `satellite_k` names at level 1.0; the sector analyst may swap within the top 2k.
+satellite:
+  k: 3
+  budget_pct_per_name: 1.0
+  benchmark: SPY
+  peer_groups:
+    semis_ai:            [NVDA, AMD, AVGO, QCOM, MU, MRVL, ARM, INTC, "ON", MPWR, LSCC, AMKR]
+    software_data_ai:    [PLTR, SNOW, DDOG, MDB, CRWD, NET, ZS, APP, TTD, HUBS, TWLO, U]
+    dc_infra_power:      [VRT, VST, CEG, NRG, GEV, ETN, PWR, NVT]
+    networking_optical:  [ANET, CIEN, COHR, LITE, FN, DELL, PSTG]
+    megacap_platforms:   [AAPL, MSFT, GOOGL, AMZN, META]

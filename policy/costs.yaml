@@ -1,0 +1,18 @@
+# Cost floors: per-side cost = max(broker what-if, floor, live half-spread). Floors only ever raise estimates.
+# Recalibrated after the first 10 fills, with a published note.
+version: 1
+per_side_bps:
+  crypto: 100          # real or CFD
+  etf_real: 5
+  stock_real: 5
+  etf_cfd: 15
+  stock_cfd: 15
+  index_cfd: 5
+  commodity_cfd: 8
+  fx_cfd: 3
+slippage_buffer_bps: 10
+overnight_bps_day:
+  long_cfd: 2.2
+  short_cfd: 2.2
+  crypto_cfd: 5.0
+weekend_multiplier: 3

@@ -1,0 +1,7 @@
+# Scheduled macro events (UTC). Sources: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm (Oct 27-28 and Dec 8-9 2026, statement 2:00pm ET); bls.gov release schedule.
+# The event officer blocks ADDS around these; it never forces sells.
+version: 1
+fomc_decisions_utc:
+  - "2026-10-28T18:00:00Z"
+  - "2026-12-09T19:00:00Z"
+notes: "CPI/NFP/PCE dates are loaded from FRED release dates at runtime (release ids 10, 50, 54) when FRED_API_KEY is set; otherwise only FOMC blocks apply."
