@@ -9,8 +9,9 @@
 <meta name="description" content="An LLM agent council proposes trades every four hours; code enforces the risk limits and a human approves every order. The public record.">
 <title>{% block title %}council-book{% endblock %} · council-book</title>
 <link rel="stylesheet" href="{{ root }}static/style.css">
+<link rel="stylesheet" href="{{ root }}static/geometry.css">
 </head>
-<body data-last-cycle="{{ status.last_cycle_at }}">
+<body class="page-{{ page }}" data-last-cycle="{{ status.last_cycle_at }}">
 <a class="skip" href="#main">Skip to content</a>
 <header class="top">
   <div class="top-inner">
@@ -21,8 +22,8 @@
     {% endfor %}
     </nav>
     <div class="status-chips">
-      <span class="chip state-{{ status.css }}" title="Project status">{{ status.label }}</span>
-      <span id="stale" class="chip state-warn" hidden title="The last cycle is more than 5 hours old">STALE</span>
+      {% block status_chip %}<span class="chip state-{{ status.css }}" title="Project status">{{ status.label }}</span>{% endblock %}
+      {% block stale %}<span id="stale" class="chip state-warn" hidden title="The last run is more than 5 hours old">! STALE</span>{% endblock %}
     </div>
   </div>
 </header>
@@ -41,12 +42,16 @@
   <div class="foot-inner">
     <ul class="foot-list">
       <li>Not investment advice.</li>
+      {% if status.prelive %}
+      <li>No money is at risk yet: {{ "this is a rehearsal with no broker account" if status.mode == "rehearsal" else "no broker account is connected" }}. Once live, real money is at risk and the author holds the positions shown.</li>
+      {% else %}
       <li>Real money is at risk; the author holds the positions shown.</li>
+      {% endif %}
       <li>Model output may contain hallucinated or outdated facts.</li>
       <li>Backtests are illustrative and lie inside the models' training window.</li>
       <li>Not endorsed by the broker.</li>
     </ul>
-    <p class="muted">Code: Apache-2.0 · Journal, docs and site text: CC BY 4.0 (excluding third-party material).</p>
+    <p class="muted">Code: Apache-2.0 · Journal, docs and site text: CC BY 4.0 (excluding third-party material). Page built {{ status.built }}. <a href="{{ root }}record.html#disclaimer">All disclaimers</a>.</p>
   </div>
 </footer>
 <script>{{ stale_script }}</script>

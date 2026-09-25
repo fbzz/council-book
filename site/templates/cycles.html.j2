@@ -1,54 +1,53 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
-{% block title %}Cycles{% endblock %}
+{% block title %}Runs{% endblock %}
 {% block toc %}
-{{ m.toc_item("list", "All cycles", "proposed") }}
-{{ m.toc_item("read", "How to read a cycle", "code") }}
+{{ m.toc_item("list", "All runs", "proposed") }}
+{{ m.toc_item("read", "How to read a run", "code") }}
 {% endblock %}
 {% block main %}
 <header class="hero">
-  <p class="eyebrow">Cycles</p>
-  <h1>Every sealed cycle, newest first</h1>
-  <p class="lede">A cycle is revealed once its decision is final. Its commitment was published before any order could be approved.</p>
+  <p class="eyebrow">Runs</p>
+  <h1>Every council run, newest first</h1>
+  <p class="lede">The council meets every four hours. A run is revealed here once its decision is final; its seal was published before any order could be approved.</p>
 </header>
 
-{% call m.section("list", 1, "All cycles", "proposed") %}
+{% call m.section("list", 1, "All runs", "proposed") %}
 {% if cycles %}
-<div class="table-wrap">
-<table class="wide">
-  <thead><tr><th>Cycle</th><th>Run</th><th>Basis</th><th>Legs</th><th>Cost</th><th>Lowest agreement</th><th>Control</th><th>Decision</th><th>Seal</th></tr></thead>
+{{ m.wrap_open("All runs") }}
+<table class="wide stack runs" role="table">
+  <thead><tr role="row"><th role="columnheader">When</th><th role="columnheader">Mode</th><th role="columnheader">What changed</th><th role="columnheader">Decision</th><th role="columnheader" class="n">Agreement</th><th role="columnheader">Control</th><th role="columnheader">Seal</th></tr></thead>
   <tbody>
-  {% for cv in cycles %}
+  {% for cv, r in cycles %}
   {% set c = cv.doc %}
-  <tr>
-    <td class="n"><a href="cycles/{{ c.cycle_id }}.html">{{ c.cycle_id }}</a></td>
-    <td>{{ c.status | replace("_", " ") }}{% if c.late_by_min %} <span class="muted small">+{{ c.late_by_min }} min</span>{% endif %}</td>
-    <td>{{ (c.basis or "—") | replace("_", " ") }}</td>
-    <td class="n">{{ c.plan.legs | length if c.plan else 0 }}</td>
-    <td class="n">{{ c.plan.cost_bp_total | bp if c.plan else "—" }}</td>
-    <td class="n">{{ cv.min_agreement_pct | pct }}</td>
-    <td>{% if cv.control_agrees is none %}—{% elif cv.control_agrees %}same{% else %}<strong>differs</strong>{% endif %}</td>
-    <td>{{ m.chip(cv.chip) }}{% if cv.human_outcome not in ("none", "pending") %} <span class="muted small">{{ cv.human_outcome | replace("_", " ") }}</span>{% endif %}</td>
-    <td>{% if cv.verified %}<span class="chip state-executed">VERIFIED</span>{% elif cv.commitment %}<span class="chip state-sealed">SEALED</span>{% else %}<span class="chip state-warn">NO SEAL</span>{% endif %}</td>
+  <tr role="row">
+    <td role="cell" class="when"><a href="cycles/{{ c.cycle_id }}.html">{{ c.slot | when }}</a>{% if c.late_by_min %}<br><span class="muted small">ran {{ c.late_by_min | late }} late</span>{% endif %}</td>
+    <td role="cell" data-label="Mode">{{ m.chip(cv.mode_chip) }}</td>
+    <td role="cell" class="text push" data-label="What changed">{{ r.change_words }}</td>
+    <td role="cell" data-label="Decision">{{ m.chip(cv.chip) }}{% if cv.human_outcome not in ("none", "pending", "no_action") %}<br><span class="muted small">{{ cv.human_outcome | replace("_", " ") }}</span>{% endif %}</td>
+    <td role="cell" class="n" data-label="Agreement">{% if cv.min_agreement_pct is not none %}<span title="{{ cv.min_agreement_pct | pct }} of valid attempts">{{ agreement_words(cv.min_agreement_pct, c.pm.valid_replicates) }}</span>{% else %}—{% endif %}</td>
+    <td role="cell" data-label="Control">{% if cv.control_agrees is none %}—{% elif cv.control_agrees %}same{% else %}<strong>differs</strong>{% endif %}</td>
+    <td role="cell" data-label="Seal">{% if cv.verified %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span>{% elif cv.commitment %}<span class="chip state-sealed">SEALED</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>NO SEAL</span>{% endif %}</td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
+<p class="small muted">Agreement: of the valid portfolio-manager attempts, how many made the same call as the one used, on the line where they agreed least. Control: whether one agent without analysts or debate landed on the same book.</p>
 {% else %}
-{{ m.empty("No cycles yet", "The account does not exist yet, so no cycle has been sealed. The first one will appear here.") }}
+{{ m.empty("No runs yet", "No run has been published. The first one will appear here.") }}
 {% endif %}
 {% endcall %}
 
-{% call m.section("read", 2, "How to read a cycle", "code") %}
+{% call m.section("read", 2, "How to read a run", "code") %}
 <ol class="steps">
-  <li><strong>Why we met</strong> — the code's reasons for this cycle.</li>
-  <li><strong>Evidence cards</strong> — analysts' claims, each citing facts by id. Broker news is cited by id only.</li>
-  <li><strong>Bull vs bear</strong> — the debate, with the bear's rebuttals.</li>
-  <li><strong>PM decision</strong> — three independent replicates, the medoid that was used, how many replicates agreed with its action on each line, and the single-agent control.</li>
-  <li><strong>Raw → final</strong> — what the PM asked for, what the bands allowed, and what the risk engine kept.</li>
-  <li><strong>Costs and legs</strong> — every leg in multiples of NAV, with its cost in basis points.</li>
-  <li><strong>Human outcome</strong> — approved, rejected or expired, and for executed decisions every leg's target and filled weight, slippage and cost. The cycle is sealed before the decision, so the outcome is published separately.</li>
+  <li><strong>The run at a glance</strong> — three sentences on what happened, a diagram of the nine steps, and the single-agent control.</li>
+  <li><strong>What changed</strong> — only the lines where the council or the risk engine moved away from the mechanical reference, and why.</li>
+  <li><strong>The debate</strong> — the bull's case, the bear's answer claim by claim, and the bull's reply. Short first; the full text is one click away.</li>
+  <li><strong>The portfolio manager</strong> — three separate attempts, the one used, and how many agreed.</li>
+  <li><strong>Risk checks</strong> — how many rules passed; only failures and held lines are shown up front.</li>
+  <li><strong>Costs and orders</strong> — every order as a share of the portfolio, with its cost.</li>
+  <li><strong>Decision</strong> — approved, rejected or expired, and what was filled. The run is sealed before the decision, so the outcome is published separately.</li>
 </ol>
 {% endcall %}
 {% endblock %}

@@ -1,0 +1,108 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}How it works{% endblock %}
+{% block toc %}
+{{ m.toc_item("what", "What is it?", "analyst") }}
+{{ m.toc_item("who", "Who's on the council?", "pm") }}
+{{ m.toc_item("stop", "What can code stop?", "risk") }}
+{{ m.toc_item("button", "Who presses the button?", "human") }}
+{{ m.toc_item("hindsight", "How do we know it isn't hindsight?", "code") }}
+{{ m.toc_item("never", "What can this never prove?", "bear") }}
+{{ m.toc_item("llm", "Roster: language models", "pm") }}
+{{ m.toc_item("code", "Roster: code and people", "code") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">How it works</p>
+  <h1>An LLM council proposes. Code limits. A human decides.</h1>
+  <p class="lede">Every four hours a council of language-model agents looks at a small multi-asset portfolio and may propose a few changes. Deterministic code enforces every risk limit, a person approves every order, and every decision is sealed before it can be executed.</p>
+</header>
+
+{% call m.section("what", 1, "What is it?", "analyst") %}
+<p class="big">A forward-only test of whether a council of language models, boxed in by code, can run a small real-money portfolio without fooling itself.</p>
+<p>The portfolio holds exposure <em>lines</em>, not stock picks:
+{% for l in lines %}<span class="chip line-chip">{{ l.name }}</span>{% endfor %}.
+A mechanical <strong>reference book</strong> is the default position and the benchmark: {{ reference_gloss }}. It invests about {{ (reference_gross_max * 100) | round(0) | int }}% of the portfolio, never borrows and never goes short. The council can only propose a few changes to it.</p>
+{% endcall %}
+
+{% call m.section("who", 2, "Who's on the council?", "pm") %}
+<ul class="roles">
+  <li><span class="dot accent-code"></span><strong>Code roles</strong> build the facts, the reference book, the event and volatility cards and the costs. Every number comes from code.</li>
+  <li><span class="dot accent-analyst"></span><strong>Analysts</strong> (language models) write evidence cards that must cite facts from the pack.</li>
+  <li><span class="dot accent-bull"></span><strong>A bull</strong> and <span class="dot accent-bear"></span><strong>a bear</strong> debate: the bear has to answer the bull's claims one by one.</li>
+  <li><span class="dot accent-pm"></span><strong>A portfolio manager</strong> makes three independent attempts, each proposing at most {{ max_deviations }} changes. The most typical attempt — the one closest to the others, called the <em>medoid</em> — is used: a real decision, never an average.</li>
+</ul>
+{{ m.flow(flow_empty, "The steps of every run", states=false) }}
+{{ m.flow_key(flow_empty) }}
+<p class="small">The <a href="index.html#latest">Portfolio page</a> shows this diagram filled in for the latest run.</p>
+{% endcall %}
+
+{% call m.section("stop", 3, "What can code stop?", "risk") %}
+<p class="big">Everything that matters. Prompts explain the rules; code enforces them.</p>
+<ul class="ticks">
+  <li>Total exposure at most <span class="n">{{ invariants.gross }}x</span> the portfolio, hard-coded.</li>
+  <li>Kill switch, measured from the best value ever reached: {{ kill_phrase }}.</li>
+  <li>Every opening order carries a catastrophe stop-loss.</li>
+  <li>Borrowing and shorts only through the council, and only when the order passes a net-of-cost gate.</li>
+  <li>Allowed ranges, a deadband, minimum holds, turnover and cost budgets, event blocks and an anti-chase rule. <a href="rules.html">All the rules →</a></li>
+</ul>
+{% endcall %}
+
+{% call m.section("button", 4, "Who presses the button?", "human") %}
+<p class="big">A person, every time.</p>
+<p>The unattended runner can only read. Orders are approved in a separate operator terminal that refuses to run under automation or an agent, asks for a typed confirmation code, and unlocks a separate, auto-locking keychain. Notifications carry percentages only. Nothing trades on its own.</p>
+{% endcall %}
+
+{% call m.section("hindsight", 5, "How do we know it isn't hindsight?", "code") %}
+<p class="big">Each run is sealed before any order can be approved.</p>
+<p>A hash commitment of the full run is published first; the run itself and the salt that opens the seal are published once the decision is final. Anyone can re-hash the revealed file. Only forward, sealed runs count as evidence. Language models have read the history we could backtest on, so no council backtest is ever shown.</p>
+{% endcall %}
+
+{% call m.section("never", 6, "What can this never prove?", "bear") %}
+<p class="big">A small edge.</p>
+<p>Even a real but small edge takes about 16 years of results to tell apart from luck, so this record can show rule-keeping and costs, not skill. It can also show how deep the falls are and how often the council disagrees with the reference.</p>
+{% endcall %}
+
+{% call m.section("llm", 7, "Roster: language models", "pm") %}
+<p class="small muted">Model <code>{{ roster.model }}</code>, thinking {{ "on" if roster.think else "off" }}, temperature {{ roster.temperature }}. Runs at {% for h in roster.slots %}{{ "%02d" | format(h) }}:{{ "%02d" | format(roster.slot_minute) }}{% if not loop.last %}, {% endif %}{% endfor %} UTC.</p>
+{{ m.wrap_open("Roster (scrolls sideways)") }}
+<table class="wide">
+  <thead><tr><th>Role</th><th>Kind</th><th>Authority</th><th class="n">Runs</th><th>Prompt</th></tr></thead>
+  <tbody>
+  {% for r in roster.llm %}
+  <tr{% if not r.enabled %} class="disabled"{% endif %}>
+    <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
+    <td><span class="chip kind-llm">LLM</span></td>
+    <td><span class="chip auth-{{ r.authority | lower }}">{{ r.authority }}</span></td>
+    <td class="n">{{ r.replicates }}{% if r.cadence != "every run" %}<br><span class="muted small">{{ r.cadence }}</span>{% endif %}</td>
+    <td>{% for p in r.prompts %}<code>{{ p.prompt_id }}</code> <span class="n muted small">{{ p.sha | sha }}</span><br>{% else %}<span class="muted small">not yet in the manifest</span>{% endfor %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted small">DECIDES = sole author of the council's changes, inside ranges that code enforces. ADVISES = evidence or argument the decider may use. CONTEXT = background only.</p>
+{% endcall %}
+
+{% call m.section("code", 8, "Roster: code and people", "code") %}
+{{ m.wrap_open("Roster (scrolls sideways)") }}
+<table class="wide">
+  <thead><tr><th>Role</th><th>Kind</th><th>Authority</th></tr></thead>
+  <tbody>
+  {% for r in roster.code %}
+  <tr>
+    <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
+    <td><span class="chip kind-code">CODE</span></td>
+    <td><span class="chip auth-code">CODE</span></td>
+  </tr>
+  {% endfor %}
+  <tr>
+    <td class="text"><span class="dot accent-human" aria-hidden="true"></span><strong>Human operator</strong><br><span class="muted small">Approves or rejects every order in a separate terminal. Nothing trades without this step.</span></td>
+    <td><span class="chip kind-human">HUMAN</span></td>
+    <td><span class="chip auth-decides">DECIDES</span></td>
+  </tr>
+  </tbody>
+</table>
+</div>
+{% endcall %}
+{% endblock %}

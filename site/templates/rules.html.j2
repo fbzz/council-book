@@ -1,0 +1,45 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}Rules{% endblock %}
+{% block toc %}
+{{ m.toc_item("invariants", "Hard-coded limits", "code") }}
+{{ m.toc_item("rules", "Risk rules", "risk") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">Rules</p>
+  <h1>The numbers the council cannot change</h1>
+  <p class="lede">Prompts explain these rules to the models; code enforces them. A change to any number is a policy change, recorded in every sealed run by the policy file's hash.</p>
+</header>
+
+{% call m.section("invariants", 1, "Hard-coded limits", "code") %}
+<p>These are constants in the code. The policy file may be stricter, never looser, and a test enforces it.</p>
+<ul class="ticks">
+  <li>Total exposure at most <span class="n">{{ invariants.gross }}x</span> the portfolio.</li>
+  <li>Kill switch, measured from the best value ever reached: {{ kill_phrase }}. Whatever the policy file says, code stops at a fall of <span class="n">{{ ((1 - invariants.halt) * 100) | round(0) | int }}%</span> at the latest.</li>
+  <li>Stop-loss on every opening order: <strong>{{ "required" if invariants.stop else "not required" }}</strong>.</li>
+  <li>Human approval of every order: <strong>{{ "required" if invariants.human else "not required" }}</strong>.</li>
+  <li>Only the dedicated agent portfolio is ever touched: <strong>{{ "yes" if invariants.main_account else "no" }}</strong>.</li>
+</ul>
+{% endcall %}
+
+{% call m.section("rules", 2, "Risk rules", "risk") %}
+<p>Every rule the risk engine checks on every run. <em>x</em> means a multiple of the portfolio's value (0.5x = half of it).</p>
+{{ m.wrap_open("Risk rules") }}
+<table class="rules wide stack" role="table">
+  <thead><tr role="row"><th role="columnheader">Rule</th><th role="columnheader">In plain words</th><th role="columnheader">What it is</th><th role="columnheader">Numbers</th></tr></thead>
+  <tbody>
+  {% for r in rules %}
+  <tr role="row">
+    <td role="cell" class="n"><strong>{{ r.rule_id or "—" }}</strong></td>
+    <td role="cell" class="text">{{ r.plain or r.title }}</td>
+    <td role="cell" class="text" data-label="What it is">{{ r.title }}<br><code class="muted small">{{ r.key }}</code></td>
+    <td role="cell" class="numbers text" data-label="Numbers">{% for k, v in r.numbers %}<span class="kv"><span class="k">{{ k }}</span> <span class="n">{{ v }}</span></span>{% endfor %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted small">Source: <code>policy/risk.yaml</code>. Its hash is recorded in every sealed run.</p>
+{% endcall %}
+{% endblock %}

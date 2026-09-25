@@ -4,26 +4,33 @@
 
 {% macro section(id, num, title, accent) %}
 <section class="card accent-{{ accent }}" id="{{ id }}" aria-labelledby="{{ id }}-h">
-  <h2 id="{{ id }}-h"><span class="num">{{ num }}</span>{{ title }}</h2>
+  <h2 id="{{ id }}-h"><span class="num" aria-hidden="true">{{ num }}</span>{{ title }}</h2>
   {{ caller() }}
 </section>
 {% endmacro %}
 
-{% macro chip(c) %}<span class="chip state-{{ c.css }}">{{ c.label }}</span>{% endmacro %}
+{% macro chip(c) %}<span class="chip state-{{ c.css }}"{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.label }}</span>{% endmacro %}
 
+{# Polarity colours (teal/orange) are reserved for the literal long and short; a change in size is
+   a neutral chip with an arrow. #}
 {% macro direction_chip(direction) %}
-{% if direction in ("long", "risk_up", "add", "lever", "cover") %}<span class="chip dir-long">{{ direction | replace("_", " ") }}</span>
-{% elif direction in ("short", "risk_down", "cut") %}<span class="chip dir-short">{{ direction | replace("_", " ") }}</span>
-{% else %}<span class="chip dir-cash">{{ direction | replace("_", " ") }}</span>{% endif %}
+{% if direction == "long" %}<span class="chip dir-long">long</span>
+{% elif direction == "short" %}<span class="chip dir-short">short</span>
+{% elif direction in ("cut", "risk_down") %}<span class="chip state-stone"><span aria-hidden="true">↓ </span>{{ direction | replace("_", " ") }}</span>
+{% elif direction in ("add", "lever", "cover", "risk_up") %}<span class="chip state-stone"><span aria-hidden="true">↑ </span>{{ direction | replace("_", " ") }}</span>
+{% else %}<span class="chip state-stone">{{ direction | replace("_", " ") }}</span>{% endif %}
 {% endmacro %}
 
+{% macro trend_chip(trend) %}
+{% if trend == "up" %}<span class="chip trend"><span aria-hidden="true">↑ </span>up</span>
+{% elif trend == "down" %}<span class="chip trend"><span aria-hidden="true">↓ </span>down</span>
+{% elif trend == "mixed" %}<span class="chip trend"><span aria-hidden="true">→ </span>mixed</span>
+{% else %}<span class="chip trend">no trend</span>{% endif %}
+{% endmacro %}
+
+{# Evidence ids read as plain labels; the raw id stays in the title attribute for auditors. #}
 {% macro evidence(refs) %}
-{% for r in refs %}
-{% if r.kind == "broker_feed" %}<span class="ev ev-feed" title="Broker feed item: cited by id, text not republished">{{ r.id }}</span>
-{% elif r.kind == "fred" %}<span class="ev ev-fred" title="FRED series{% if not r.publishable %}; value not publishable{% endif %}">FRED {{ r.series }}{% if r.measure %} {{ r.measure }}{% endif %}{% if r.as_of %} {{ r.as_of }}{% endif %}{% if r.publishable and r.value is not none %} = {{ r.value }}{% if r.unit == "pct" %}%{% elif r.unit %} {{ r.unit }}{% endif %}{% endif %}</span>
-{% else %}<span class="ev ev-{{ r.kind }}">{{ r.id }}</span>
-{% endif %}
-{% endfor %}
+{% for r in refs %}{% set e = ev(r) %}<span class="ev ev-{{ e.css }}" title="{{ e.raw }}">{{ e.label }}</span>{% endfor %}
 {% endmacro %}
 
 {% macro empty(title, text) %}
@@ -32,3 +39,65 @@
   <p class="muted">{{ text }}</p>
 </div>
 {% endmacro %}
+
+{% macro rehearsal_banner(text) %}
+<div class="banner" role="note">
+  <span class="banner-icon" aria-hidden="true">R</span>
+  <p><strong>Rehearsal — no broker account is connected yet.</strong> {{ text }}</p>
+</div>
+{% endmacro %}
+
+{# The run diagram: nine nodes, each with its role colour, kind, a state mark with a word, and
+   one result line computed from the cycle JSON. Pure HTML/CSS; it stacks vertically on phones.
+   What each step does is written out under the diagram (touch screens have no hover). #}
+{% macro flow(nodes, label, states=true) %}
+<ol class="flow" role="list" aria-label="{{ label }}">
+{% for n in nodes %}
+  <li class="node accent-{{ n.accent }}" title="{{ n.title }}">
+    <p class="node-head"><span class="node-step">{{ loop.index }}</span><span class="node-kind kind-{{ n.kind | lower }}">{{ n.kind }}</span></p>
+    <p class="node-name">{{ n.name }}</p>
+    <p class="node-result">{{ n.result }}</p>
+    {% if n.detail %}<p class="node-detail">{{ n.detail }}</p>{% endif %}
+    {% if states %}<p class="node-state"><span class="mark mark-{{ n.state }}"><span aria-hidden="true">{{ n.mark }}</span> {{ n.word }}</span></p>{% endif %}
+  </li>
+{% endfor %}
+</ol>
+{% endmacro %}
+
+{% macro flow_key(nodes) %}
+<p class="flow-legend small muted"><span class="node-kind kind-code">CODE</span> fixed rules in code · <span class="node-kind kind-llm">LLM</span> a language model · <span class="node-kind kind-human">HUMAN</span> a person.</p>
+<p class="flow-roles small"><strong>Bull</strong> makes the case for a set of positions (it may still cut a line) · <strong>Bear</strong> attacks it, claim by claim · <strong>Portfolio manager</strong> decides, within limits · <strong>Risk engine</strong> is code that checks every limit.</p>
+<details class="more">
+  <summary>What each step does</summary>
+  <ol class="steps">{% for n in nodes %}<li><strong>{{ n.name }}</strong> — {{ n.what }}</li>{% endfor %}</ol>
+</details>
+{% endmacro %}
+
+{# A bar on one shared scale: long to the right (teal), short to the left (orange), a thin tick at
+   the mechanical reference, the value at the bar tip on a halo. Geometry comes from classes. #}
+{% macro dbar(b, title) %}
+<div class="dbar" role="img" aria-label="{{ title }}" title="{{ title }}">
+  <span class="dzero {{ b.zero }}" aria-hidden="true"></span>
+  {% if b.ref %}<span class="dref {{ b.ref }}" aria-hidden="true"></span>{% endif %}
+  <span class="dfill {{ b.side }} {{ b.start }} {{ b.w }}" aria-hidden="true"></span>
+  <span class="dval {{ 'to-left' if b.side == 'short' else 'to-right' }}{{ ' zero' if b.side == 'zero' }} {{ b.at }}" aria-hidden="true">{{ b.label }}</span>
+</div>
+{% endmacro %}
+
+{% macro control_strip(control) %}
+{% if control %}
+<div class="control-strip{% if control.differs %} differs{% endif %}">
+  <span class="chip state-stone">CONTROL</span>
+  <p><strong>One agent, no analysts or debate:</strong> {{ control.text }} <span class="muted small">It never trades.</span></p>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro story(sentences) %}
+<div class="story">
+{% for s in sentences %}<p>{{ s }}</p>{% endfor %}
+</div>
+{% endmacro %}
+
+{# A table wrapper that scrolls sideways when it must: focusable, named, with scroll shadows. #}
+{% macro wrap_open(label) %}<div class="table-wrap" tabindex="0" role="region" aria-label="{{ label }}">{% endmacro %}

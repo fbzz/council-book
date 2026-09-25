@@ -1,80 +1,221 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
-{% block title %}What this is{% endblock %}
+{% block title %}Portfolio{% endblock %}
+{# the hero below carries the mode and the STALE badge, so the top bar does not repeat them #}
+{% block status_chip %}{% endblock %}
+{% block stale %}{% endblock %}
 {% block toc %}
-{{ m.toc_item("status", "Status", "code") }}
-{{ m.toc_item("what", "What is it?", "analyst") }}
-{{ m.toc_item("who", "Who's on the council?", "pm") }}
-{{ m.toc_item("stop", "What can code stop?", "risk") }}
-{{ m.toc_item("button", "Who presses the button?", "bull") }}
-{{ m.toc_item("hindsight", "How do we know it isn't hindsight?", "code") }}
-{{ m.toc_item("never", "What can this never prove?", "bear") }}
+{{ m.toc_item("holdings", "Holdings by line", "long") }}
+{{ m.toc_item("latest", "Latest council run", "pm") }}
+{{ m.toc_item("recent", "Recent runs", "proposed") }}
+{{ m.toc_item("performance", "Performance vs controls", "code") }}
 {% endblock %}
 {% block main %}
+{% set target = portfolio and portfolio.basis == "target" %}
 <header class="hero">
-  <p class="eyebrow">A public experiment</p>
-  <h1>An LLM council proposes. Code limits. A human decides.</h1>
-  <p class="lede">Every four hours a council of language-model agents looks at a small multi-asset book and may propose a few changes. Deterministic code enforces every risk limit, a person approves every order, and every decision is sealed here before it can be executed.</p>
+  <p class="eyebrow">Portfolio</p>
+  <h1>What the council holds</h1>
+  <p class="lede">A council of language models reviews a small multi-asset portfolio every four hours. Code enforces every limit, and a person approves every order.</p>
+  <div class="status-row">
+    <span class="chip chip-lg state-{{ status.mode_chip.css }}" title="Mode">{{ status.mode_chip.label }}</span>
+    {% set k = kill_chip(status.kill) %}
+    <span class="chip chip-lg state-{{ k.css }}" title="Kill switch: {{ kill_phrase }}"><span aria-hidden="true">{{ "✓ " if status.kill == "NORMAL" else "! " }}</span>kill switch: {{ k.label | lower }}</span>
+    {% if status.last_when %}<span class="lastrun">Last run {{ status.last_when }}{% if status.last_late %} ({{ status.last_late }}){% endif %} · page built {{ status.built_clock }}</span>{% endif %}
+    <span id="stale" class="chip chip-lg state-warn" hidden title="The last run is more than 5 hours old">! STALE</span>
+  </div>
 </header>
 
-{% call m.section("status", "●", "Status", "code") %}
-<div class="status-row">
-  <span class="chip chip-lg state-{{ status.css }}">{{ status.label }}</span>
-  <span class="chip chip-lg state-{{ kill_chip(status.kill).css }}">kill switch: {{ kill_chip(status.kill).label }}</span>
-</div>
-{% if status.state == "AWAITING_ACCOUNT" %}
-<p>The system is being built in public. There is no broker account yet, so nothing trades and no cycle has been sealed. The first sealed cycle will appear under <a href="cycles.html">Cycles</a>.</p>
-{% elif status.note %}
-<p>{{ status.note }}</p>
+{% if latest and latest.rehearsal %}
+{{ m.rehearsal_banner("These are the weights the council would hold; nothing has been traded.") }}
 {% endif %}
-<dl class="facts">
-  <div><dt>Cycles published</dt><dd class="n">{{ cycles_count }}</dd></div>
-  <div><dt>Last cycle</dt><dd class="n">{% if latest %}<a href="cycles/{{ latest.doc.cycle_id }}.html">{{ latest.doc.cycle_id }}</a>{% else %}none yet{% endif %}</dd></div>
-  <div><dt>Last decision</dt><dd>{% if status.last_decision %}{{ m.chip(status.last_decision) }}{% if status.last_cycle_id and not status.last_cycle_revealed %} <span class="muted small">{{ status.last_cycle_id }}, sealed</span>{% endif %}{% else %}—{% endif %}</dd></div>
-  <div><dt>On time</dt><dd class="n">{% if ops_count %}{{ ops_on_time }} of {{ ops_count }}{% else %}—{% endif %}</dd></div>
+{% if run %}
+<p class="headline">{{ run.headline }} <a href="#latest">See the run ↓</a></p>
+{% endif %}
+{% if status.last_cycle_id and not status.last_cycle_revealed and status.last_decision %}
+<p class="note-line">The run of {{ status.last_slot_when }} is sealed: {{ m.chip(status.last_decision) }}. It is revealed here once its decision is final.</p>
+{% endif %}
+
+{% if portfolio %}
+{% set t = portfolio.tiles %}
+<div class="tiles">
+  <div class="tile">
+    <p class="tile-label">Invested{% if target %} · target{% endif %}</p>
+    <p class="tile-value">{{ t.invested }}</p>
+    <p class="tile-sub">{{ "all long, no shorts" if t.all_long else "all positions, long and short" }}</p>
+  </div>
+  {% if t.all_long %}
+  <div class="tile">
+    <p class="tile-label">Lines held{% if target %} · target{% endif %}</p>
+    <p class="tile-value">{{ t.held }} <span class="tile-of">of {{ t.n_lines }}</span></p>
+    <p class="tile-sub">lines with a position</p>
+  </div>
+  {% else %}
+  <div class="tile">
+    <p class="tile-label">Net exposure{% if target %} · target{% endif %}</p>
+    <p class="tile-value">{{ t.net }}</p>
+    <p class="tile-sub">long minus short</p>
+  </div>
+  {% endif %}
+  <div class="tile">
+    <p class="tile-label">Cash{% if target %} · target{% endif %}</p>
+    <p class="tile-value">{{ t.cash }}</p>
+    <p class="tile-sub">not invested</p>
+  </div>
+  {% set mt = t.meter %}
+  <div class="tile">
+    <p class="tile-label">Fall from peak vs the {{ mt.halt_label }} stop</p>
+    <p class="tile-value">{{ mt.value }}{% if mt.state == "none" %} <span class="tile-of">{{ mt.sub }}</span>{% endif %}{% if mt.word %} <span class="mark mark-{{ 'ok' if mt.state == 'ok' else 'fallback' if mt.state == 'warn' else 'failed' }} tile-mark"><span aria-hidden="true">{{ "✓" if mt.state == "ok" else "!" }}</span> {{ mt.word }}</span>{% endif %}</p>
+    <div class="meter" role="img" aria-label="{{ mt.aria }}">
+      <span class="meter-fill meter-{{ mt.state }} {{ mt.fill }}"></span>
+      <span class="meter-tick {{ mt.warn_at }}"></span>
+    </div>
+    <p class="meter-scale" aria-hidden="true"><span>0</span><span>{{ mt.halt_label }}</span></p>
+    <p class="tile-sub">Tick {{ mt.warn_label }}: no new risk · {{ mt.halt_label }}: stop{% if mt.state != "none" %} · {{ mt.sub }}{% endif %}</p>
+  </div>
+</div>
+<p class="tiles-note small muted">
+{% if portfolio.basis == "target" %}Target weights from the rehearsal run of {{ portfolio.when }}. Percent of the portfolio: 35% means 0.35x the portfolio's value.
+{% elif portfolio.basis == "book" %}Positions after the run of {{ portfolio.when }}. Percent of the portfolio's value.
+{% else %}Positions at the start of the latest run ({{ portfolio.when }}). Percent of the portfolio's value.{% endif %}
+</p>
+{% endif %}
+
+{% call m.section("holdings", 1, "Holdings by line", "long") %}
+{% if portfolio %}
+<p>The portfolio is split into {{ portfolio.rows | length }} <strong>lines</strong>, each a market it can hold, such as the Nasdaq-100 or gold. Each bar is a line's weight{% if target %} in the target the council would hold{% endif %}, as a share of the portfolio. The thin tick marks the <strong>mechanical reference</strong>: {{ reference_gloss }}.</p>
+<p class="small"><strong>Size</strong> is how much of a line's full allocation is held: 1.00 is the full amount the rules give it, 0.25 a quarter.</p>
+<div class="holdings{% if portfolio.one_sided %} one-sided{% endif %}">
+  <div class="hrow axis-row" aria-hidden="true">
+    <div class="hname muted small">Line and trend</div>
+    <div class="hbar"><div class="axis">{% for a in portfolio.axis %}<span class="tick {{ a.cls }} {{ a.at }}">{{ a.label }}</span>{% endfor %}</div></div>
+  </div>
+  {% for g in portfolio.groups %}
+  <h3 class="hgroup">{{ g.label }} <span class="muted">· {{ g.share }}{% if target %} target{% endif %}</span></h3>
+  {% if g.note %}<p class="hgnote">{{ g.note }}</p>{% endif %}
+  <ul class="hrows" role="list">
+  {% for r in g.rows %}
+    <li class="hrow">
+      <div class="hname"><strong>{{ r.name }}</strong> {{ m.trend_chip(r.trend) }}{% if r.marker %} <span class="hmark">{{ r.marker }}</span>{% endif %}</div>
+      <div class="hbar">{{ m.dbar(r.bar, r.title) }}</div>
+      {% for n in r.notes %}<p class="hnote">{{ n }}</p>{% endfor %}
+    </li>
+  {% endfor %}
+  </ul>
+  {% endfor %}
+</div>
+<ul class="legend small">
+  <li><span class="swatch sw-long"></span>long{% if portfolio.one_sided %} (this book holds no shorts){% endif %}</li>
+  {% if portfolio.has_short %}<li><span class="swatch sw-short"></span>short</li>{% endif %}
+  <li><span class="swatch sw-ref"></span>mechanical reference</li>
+  <li class="muted">Trend: the line's price trend, which sets the reference.</li>
+</ul>
+<details class="more">
+  <summary>Show as table</summary>
+  {{ m.wrap_open("Holdings by line (scrolls sideways)") }}
+  <table class="wide">
+    <thead><tr><th>Line</th><th>Trend</th><th class="n">Reference size</th><th class="n">Council size</th><th class="n">Weight</th><th class="n">Share</th><th class="n">Reference weight</th></tr></thead>
+    <tbody>
+    {% for r in portfolio.rows %}
+    <tr>
+      <td><strong>{{ r.name }}</strong> <span class="muted small">{{ r.line }}</span></td>
+      <td>{{ r.trend or "—" }}</td>
+      <td class="n">{{ r.ref_level | level }}</td>
+      <td class="n">{{ r.council_level | level }}</td>
+      <td class="n">{{ r.weight | x }}</td>
+      <td class="n">{{ r.share }}</td>
+      <td class="n">{{ r.ref | x }} ({{ r.ref_share }})</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="small muted">Size: how much of the line's full allocation is held (1.00 = full). Weight: a multiple of the portfolio's value (x); 0.35x is 35%.</p>
+</details>
+{% else %}
+{{ m.empty("Nothing held yet", "No broker account is connected and the council has not run. After the first run, each line's weight appears here.") }}
+<p class="small muted">The lines it will hold: {% for l in lines %}<span class="chip line-chip">{{ l.name }}</span>{% endfor %}</p>
+{% endif %}
+{% endcall %}
+
+{% call m.section("latest", 2, "Latest council run", "pm") %}
+{% if latest %}
+<div class="run-head">
+  <p class="run-when">{{ run.when }}</p>
+  {{ m.chip(latest.mode_chip) }} {{ m.chip(latest.chip) }}
+</div>
+{{ m.story(run.summary) }}
+{{ m.flow(run.nodes, "The latest run, step by step") }}
+{{ m.flow_key(run.nodes) }}
+{{ m.control_strip(run.control) }}
+<p><a class="cta" href="cycles/{{ latest.doc.cycle_id }}.html">Open the full run →</a></p>
+{% else %}
+<p>No run yet. When the council first meets, this diagram fills in with what each step did.</p>
+{{ m.flow(flow_empty, "The steps of a run") }}
+{{ m.flow_key(flow_empty) }}
+<p class="small"><a href="how.html">How it works →</a></p>
+{% endif %}
+{% endcall %}
+
+{% call m.section("recent", 3, "Recent runs", "proposed") %}
+{% if recent %}
+{{ m.wrap_open("Recent runs") }}
+<table class="wide stack runs" role="table">
+  <thead><tr role="row"><th role="columnheader">When</th><th role="columnheader">Mode</th><th role="columnheader">What changed</th><th role="columnheader">Decision</th></tr></thead>
+  <tbody>
+  {% for cv, r in recent %}
+  <tr role="row">
+    <td role="cell" class="when"><a href="cycles/{{ cv.doc.cycle_id }}.html">{{ cv.doc.slot | when }}</a></td>
+    <td role="cell" data-label="Mode">{{ m.chip(cv.mode_chip) }}</td>
+    <td role="cell" class="text push" data-label="What changed">{{ r.change_words }}</td>
+    <td role="cell" data-label="Decision">{{ m.chip(cv.chip) }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p><a href="cycles.html">All runs →</a></p>
+{% else %}
+{{ m.empty("No runs yet", "The first run will appear here, with what changed and what was decided.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("performance", 4, "Performance vs controls", "code") %}
+{% if chart %}
+<figure class="chart">
+  <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img" aria-label="Index of the book and its controls, base 100 at the start">
+    {% for g in chart.grid %}
+    <line class="{{ 'chart-base' if g.base else 'chart-grid' }}" x1="{{ chart.x0 }}" x2="{{ chart.x1 }}" y1="{{ g.y }}" y2="{{ g.y }}"></line>
+    <text class="chart-tick" x="{{ chart.x0 - 6 }}" y="{{ g.y }}" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>
+    {% endfor %}
+    {% for s in chart.series %}
+    <polyline class="series series-{{ s.css }}" points="{{ s.points }}"><title>{{ s.label }}: {{ "%.1f" | format(s.last) }}</title></polyline>
+    <text class="series-end" x="{{ s.end_x }}" y="{{ s.label_y }}" dominant-baseline="middle">{{ s.short }} {{ "%.1f" | format(s.last) }}</text>
+    {% endfor %}
+  </svg>
+  <figcaption class="small">Index, base 100 at the start ({{ chart.first }} to {{ chart.last }}). The darker line is 100.</figcaption>
+</figure>
+<ul class="legend">
+{% for s in chart.series %}<li><span class="swatch sw-line sw-{{ s.css }}"></span>{{ s.label }} <span class="n">{{ "%.1f" | format(s.last) }}</span></li>{% endfor %}
+</ul>
+<details class="more">
+  <summary>Show as table</summary>
+  {{ m.wrap_open("Performance by day (scrolls sideways)") }}
+  <table class="wide">
+    <thead><tr><th>Day</th>{% for key, label, css, short, what in controls %}<th class="n">{{ label }}</th>{% endfor %}<th class="n">Fall from peak</th></tr></thead>
+    <tbody>
+    {% for p in points %}
+    <tr><td class="n">{{ p.as_of | day }}</td>{% for key, label, css, short, what in controls %}<td class="n">{% set v = p[key] %}{{ "%.1f" | format(v) if v is not none else "—" }}</td>{% endfor %}<td class="n">{{ p.drawdown_pct | pct }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</details>
+<dl class="defs">
+  {% for key, label, css, short, what in controls %}<dt><span class="swatch sw-line sw-{{ css }}"></span>{{ label }}</dt><dd>{{ what }}</dd>{% endfor %}
 </dl>
-{% endcall %}
-
-{% call m.section("what", 1, "What is it?", "analyst") %}
-<p class="big">A forward-only test of whether a council of language models, boxed in by code, can run a small real-money book without fooling itself.</p>
-<p>The book holds exposure <em>lines</em>, not stock picks:
-{% for l in lines %}<span class="chip line-chip">{{ l.name }}</span>{% endfor %}.
-A mechanical <strong>reference book</strong> (trend times volatility, about {{ reference_gross_max }}x gross, never levered, never short) is the default position and the benchmark. The council can only propose sparse deviations from it.</p>
-{% endcall %}
-
-{% call m.section("who", 2, "Who's on the council?", "pm") %}
-<ul class="roles">
-  <li><span class="dot accent-code"></span><strong>Code roles</strong> build the facts, the reference book, the event and volatility cards and the costs. Every number comes from code.</li>
-  <li><span class="dot accent-analyst"></span><strong>Analysts</strong> (language models) write evidence cards that must cite facts from the pack.</li>
-  <li><span class="dot accent-bull"></span><strong>A bull</strong> and <span class="dot accent-bear"></span><strong>a bear</strong> debate: the bear has to rebut the bull's specific claims.</li>
-  <li><span class="dot accent-pm"></span><strong>A portfolio manager</strong>, run three times independently, proposes at most {{ max_deviations }} deviations. The medoid replicate is used — a real decision, never an average.</li>
-</ul>
-<p><a href="council.html">Full roster and rules →</a></p>
-{% endcall %}
-
-{% call m.section("stop", 3, "What can code stop?", "risk") %}
-<p class="big">Everything that matters. Prompts explain the rules; code enforces them.</p>
-<ul class="ticks">
-  <li>Gross exposure at most <span class="n">{{ invariants.gross }}x</span> NAV, hard-coded.</li>
-  <li>Soft kill: at <span class="n">{{ (kill.warn_at * 100) | round(0) | int }}%</span> of the lifetime peak no new risk is added; at <span class="n">{{ (kill.halt_at * 100) | round(0) | int }}%</span> an urgent flatten proposal is raised (a human still approves it).</li>
-  <li>Every opening order carries a catastrophe stop-loss.</li>
-  <li>Leverage and shorts only through the council, and only when the leg passes a net-of-cost gate.</li>
-  <li>Bands, deadbands, minimum holds, turnover and cost budgets, event blocks and an anti-chase rule.</li>
-</ul>
-{% endcall %}
-
-{% call m.section("button", 4, "Who presses the button?", "bull") %}
-<p class="big">A person, every time.</p>
-<p>The unattended runner can only read. Orders are approved in a separate operator terminal that refuses to run under automation or an agent, asks for a typed confirmation code, and unlocks a separate, auto-locking keychain. Notifications carry percentages only. Nothing trades on its own.</p>
-{% endcall %}
-
-{% call m.section("hindsight", 5, "How do we know it isn't hindsight?", "code") %}
-<p class="big">Each cycle is sealed before any order can be approved.</p>
-<p>A hash commitment of the full cycle is published first; the cycle itself and the salt that opens the seal are published once the decision is final. Anyone can re-hash the revealed file. Only forward, sealed cycles count as evidence. Language models have read the history we could backtest on, so no council backtest is ever shown.</p>
-{% endcall %}
-
-{% call m.section("never", 6, "What can this never prove?", "bear") %}
-<p class="big">A small edge.</p>
-<p>The standard error of a Sharpe ratio is roughly one over the square root of the number of years. Telling an information ratio of 0.5 from zero at two standard errors takes about 16 years. The record can show rule-keeping, costs, drawdown behaviour and how often the council disagrees with the reference — not that it is skilful.</p>
+<p class="small muted">Descriptive only. Differences over months are mostly noise; see <a href="how.html#never">what this can never prove</a>.</p>
+{% else %}
+{{ m.empty("No performance data yet", "The index starts with the first executed run. Rehearsal runs never count: nothing was traded.") }}
+{% endif %}
 {% endcall %}
 {% endblock %}

@@ -1,0 +1,56 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}Record{% endblock %}
+{% block toc %}
+{{ m.toc_item("incidents", "Incidents", "halted" if incidents else "stone") }}
+{{ m.toc_item("withdrawn", "Withdrawn claims", "stone") }}
+{{ m.toc_item("disclaimer", "Disclaimers", "code") }}
+{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">Record</p>
+  <h1>What went wrong, and what this is not</h1>
+  <p class="lede">Failures, fallbacks, withheld runs and withdrawn claims are part of the record.</p>
+</header>
+
+{% call m.section("incidents", 1, "Incidents", "halted" if incidents else "stone") %}
+{% if incidents %}
+{{ m.wrap_open("Incidents") }}
+<table class="wide stack" role="table">
+  <thead><tr role="row"><th role="columnheader">Incident</th><th role="columnheader">Opened</th><th role="columnheader">Severity</th><th role="columnheader">Status</th><th role="columnheader">What happened</th></tr></thead>
+  <tbody>
+  {% for i in incidents %}
+  <tr role="row">
+    <td role="cell" class="n"><strong>{{ i.incident_id }}</strong>{% if i.withheld %}<br><span class="chip state-warn">run withheld</span>{% endif %}</td>
+    <td role="cell" class="n" data-label="Opened">{{ i.opened_slot | when }}</td>
+    <td role="cell" data-label="Severity"><span class="chip sev-{{ i.severity }}">{{ i.severity }}</span></td>
+    <td role="cell" data-label="Status">{% if i.status == "resolved" %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>resolved</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>{{ i.status }}</span>{% endif %}</td>
+    <td role="cell" class="text"><strong>{{ i.title }}</strong><br><span class="small">{{ i.summary }}</span>{% if i.cycles %}<br><span class="small muted">Runs: {% for cid in i.cycles %}<a href="cycles/{{ cid }}.html">{{ cid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+{{ m.empty("No incidents", "Nothing has gone wrong in public yet — mostly because nothing has run for real yet.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("withdrawn", 2, "Withdrawn claims", "stone") %}
+<p>Claims from the research that preceded this project which were later withdrawn. They are kept here so they are not repeated.</p>
+{% for w in withdrawn %}
+<article class="withdrawn">
+  <h3><span class="chip state-stone">WITHDRAWN</span> {{ w.claim }}</h3>
+  <p>{{ w.why }}</p>
+</article>
+{% else %}
+<p class="muted">None.</p>
+{% endfor %}
+{% endcall %}
+
+{% call m.section("disclaimer", 3, "Disclaimers", "code") %}
+<ul class="disclaimer">
+{% for d in disclaimer %}<li><strong>{{ d.title }}</strong> {{ d.text }}</li>{% endfor %}
+</ul>
+{% endcall %}
+{% endblock %}
