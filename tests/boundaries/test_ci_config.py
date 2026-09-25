@@ -28,7 +28,7 @@ def test_ci_is_read_only_and_runs_every_gate():
     for needle in ("astral-sh/setup-uv", "uv sync", "ruff check", 'pytest -m "not live"',
                    "python -m council.publish.leakscan journal docs site README.md"):
         assert needle in test, needle
-    assert "gitleaks/gitleaks-action" in _steps(ci["jobs"]["gitleaks"])
+    assert "/tmp/gitleaks git" in _steps(ci["jobs"]["gitleaks"])
     identity = _steps(ci["jobs"]["identity"])
     assert "@users" in identity and "noreply" in identity and "council-publisher" in identity
 
