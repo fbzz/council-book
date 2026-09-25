@@ -1,0 +1,7 @@
+{
+  "algo": "sha256(salt||canonical_json)",
+  "commitment_sha256": "7facaec3e096861a6ff187bec135e9d5dba2f1909917ccd2f2ecc6b23594b249",
+  "cycle_id": "2026-09-25T1440Z",
+  "salt": "2300a594a1fe23fb711ed5cc7cf0a1fd860072363794f6e658787f966a49972f",
+  "schema_id": "council-book/reveal/v1"
+}
