@@ -116,7 +116,8 @@ def read_broker(settings: Settings) -> Any | None:
 
 def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = False,
                   publish: PublishMode = "preview", sources: Sources | None = None,
-                  state_dir: Path | None = None, settings: Settings | None = None) -> CycleContext:
+                  state_dir: Path | None = None, settings: Settings | None = None,
+                  publisher_dir: Path | None = None) -> CycleContext:
     from council.invariants import check_policy
     from council.ledger.db import Ledger
     from council.llm.prompts import PromptRegistry
@@ -145,8 +146,8 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
     elif publish == "push":
         from council.publish.gitops import Publisher
 
-        publisher = Publisher(root / "publisher-clone", push=True,
-                              ssh_command=_ssh_command(root))
+        clone = publisher_dir or (root / "publisher-clone")
+        publisher = Publisher(clone, push=True, ssh_command=_ssh_command(clone.parent))
 
     notifier = None
     if mode == "live" and settings.ntfy_topic:

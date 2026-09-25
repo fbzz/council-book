@@ -26,6 +26,7 @@ def _ctx(*, mode: str, stub_llm: bool = False, publish: str = "preview"):
 def cycle(
     slot: str = typer.Option("auto", help="'auto' runs the due slot (late <= 120 min)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="No pushes, no notifications; publish to site-preview/."),
+    rehearsal: bool = typer.Option(False, "--rehearsal", help="No broker: run the council and PUBLISH the cycle labelled REHEARSAL (own ledger, nothing traded)."),
     stub_llm: bool = typer.Option(False, "--stub-llm", help="Canned replies that hold the reference (no model calls)."),
     force: bool = typer.Option(False, help="Re-run a slot that already has a record."),
 ) -> None:
@@ -34,7 +35,14 @@ def cycle(
     from council.settings import Settings
 
     settings = Settings.from_env()
-    if dry_run or settings.mode != "live":
+    if rehearsal:
+        from council import paths
+        from council.context import build_context
+
+        ctx = build_context(mode="dry_run", stub_llm=stub_llm, publish="push",
+                            state_dir=paths.state_dir() / "rehearsal",
+                            publisher_dir=paths.state_dir() / "publisher-clone")
+    elif dry_run or settings.mode != "live":
         ctx = _ctx(mode="dry_run", stub_llm=stub_llm, publish="preview")
     else:
         ctx = _ctx(mode="live", stub_llm=stub_llm, publish="push")

@@ -236,6 +236,7 @@ class PublicCheck(PublicModel):
 
 
 class PublicRisk(PublicModel):
+    base_x: dict[Line, X] = Field(default_factory=dict)       # the book the cycle started from
     raw_levels: dict[Line, Level] = Field(default_factory=dict)
     banded_levels: dict[Line, Level] = Field(default_factory=dict)
     raw_x: dict[Line, X] = Field(default_factory=dict)
@@ -302,6 +303,7 @@ class PublicCycleV1(PublicModel):
     schema_id: Literal["council-book/cycle/v1"] = "council-book/cycle/v1"
     cycle_id: CycleId
     slot: UtcDatetime
+    mode: Literal["live", "rehearsal"] = "live"     # rehearsal = no broker account, nothing traded
     status: CycleStatus
     late_by_min: int = Field(ge=0, le=100_000)
     input_hash: Sha = ""

@@ -431,6 +431,7 @@ def _risk(risk: RiskDecision | None, unit_w: dict[str, float], lm: LineMap) -> P
     raw_levels = lm.first_by_line(risk.raw_levels)
     banded_levels = lm.first_by_line(risk.banded_levels)
     return PublicRisk(
+        base_x=lm.sum_by_line(risk.base_w),
         raw_levels=raw_levels,
         banded_levels=banded_levels,
         raw_x={k: _x(v * unit_w[k]) for k, v in raw_levels.items() if k in unit_w},
@@ -602,6 +603,7 @@ def public_cycle(
     fields: dict[str, Any] = {
         "cycle_id": rec.cycle_id,
         "slot": rec.slot,
+        "mode": "live" if rec.mode == "live" else "rehearsal",
         "status": rec.status if rec.status in _STATUS else "aborted",
         "late_by_min": max(0, round(rec.late_by_s / 60)),
         "input_hash": _sha(rec.input_hash),
