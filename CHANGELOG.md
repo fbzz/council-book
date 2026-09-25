@@ -1,5 +1,11 @@
 # Changelog
 
+## model — policy change (2026-09-25)
+- Ollama Cloud retired `deepseek-v4-flash` (version 0731) on 2026-09-25; every call returned HTTP 410
+  and the outage guard correctly fell back to the reference. The council now runs on its official
+  successor `deepseek-v4.1-flash:cloud` (same family, `think:false`, JSON mode). Replicate agreement
+  and parse rates are re-measured from scratch; nothing measured on v4 is carried over.
+
 ## reference v2 — policy change (2026-09-25)
 - The reference-spec-v1 backtest showed 21-25 trend flips per line per year (764% turnover, 2.1%/yr
   cost drag, 59% mean gross). Seven variants and a selection rule were pre-registered (tag

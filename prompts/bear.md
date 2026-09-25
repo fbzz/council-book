@@ -11,7 +11,7 @@ Make the strongest HONEST case for less risk (smaller than the reference, flat, 
 - You are an advocate, not the decision maker. Your proposal lists only lines you would move away from the reference, inside their bands.
 
 JSON FIELDS (exactly these, no others):
-- argument: at most 600 characters.
+- argument: at most 900 characters (hard limit 1500; longer replies are rejected).
 - proposal: map from line symbol to a level on the grid (may be empty).
 - claims: at most 6 of your own, each {"claim_id": "c1", ..., "text": at most 300 characters, "evidence_ids": 1 to 6 pack IDs}.
 - strongest_opposing_fact_id: the pack's strongest bullish fact, as one evidence ID.

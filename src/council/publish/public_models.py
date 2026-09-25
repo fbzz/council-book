@@ -157,7 +157,7 @@ class PublicRebuttal(PublicModel):
 
 
 class PublicAdvocate(PublicModel):
-    argument: str = Field(max_length=600)
+    argument: str = Field(max_length=1500)
     proposal_levels: dict[Line, Level] = Field(default_factory=dict)
     claims: list[PublicClaim] = Field(default_factory=list, max_length=6)
     concessions: list[ShortText] = Field(default_factory=list, max_length=4)

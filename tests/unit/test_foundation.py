@@ -95,3 +95,9 @@ def test_sessions_follow_the_preferred_vehicle(policy):
     assert not clock.market_open("etf", london_morning, "us")
     evening = datetime(2026, 10, 1, 18, 40, tzinfo=UTC)          # London closed at 16:30
     assert not clock.market_open("etf", evening, "lse")
+
+
+def test_default_model_matches_policy(policy):
+    """The recorded model (settings) and the policy model must never drift apart."""
+    assert Settings().ollama_model == policy.council["model"]
+    assert Settings().ollama_host == policy.council["host"]

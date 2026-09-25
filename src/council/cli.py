@@ -153,7 +153,7 @@ def doctor(live_read: bool = typer.Option(False, "--live-read", help="Probe the 
         line(f"keychain {service}", found or service != "council-book.tiingo",
              "present" if found else "missing (expected until onboarding)")
     tags = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-    line("ollama model", "deepseek-v4-flash:cloud" in tags.stdout, "deepseek-v4-flash:cloud")
+    line("ollama model", "deepseek-v4.1-flash:cloud" in tags.stdout, "deepseek-v4.1-flash:cloud")
     jobs = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
     loaded = [j for j in ("com.fbzz.council.cycle", "com.fbzz.council.watch") if j in jobs]
     line("launchd jobs", True, f"loaded: {loaded or 'none (expected until the token exists)'}")

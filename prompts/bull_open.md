@@ -11,7 +11,7 @@ Make the strongest HONEST case for holding risk over the next cycles: for keepin
 - You are an advocate, not the decision maker. Propose levels only for lines where you want something other than the reference, inside their bands.
 
 JSON FIELDS (exactly these, no others):
-- argument: at most 600 characters.
+- argument: at most 900 characters (hard limit 1500; longer replies are rejected).
 - proposal: map from line symbol to a level on the grid; only lines you would move away from the reference (may be empty).
 - claims: at most 6, each {"claim_id": "c1", "c2", ..., "text": at most 300 characters, "evidence_ids": 1 to 6 pack IDs}. The bear will answer these claims by claim_id, so make each one specific.
 - strongest_opposing_fact_id: one evidence ID from the pack.

@@ -16,7 +16,7 @@ class Claim(Strict):
 class AdvocateCase(Strict):
     """Bull opening / bull rebuttal output."""
 
-    argument: str = Field(max_length=600)
+    argument: str = Field(max_length=1500)
     proposal: dict[str, float]                 # symbol -> level on the grid
     claims: list[Claim] = Field(max_length=6)
     strongest_opposing_fact_id: str

@@ -500,8 +500,10 @@ def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: 
     lines = ctx.policy.universe
     public = redact.public_cycle(rec, pack, lines=lines)
     commitment, salt, sealed = _seal(commit_reveal, public, rec, ctx)
+    # private, 0600; a forced re-run may replace a seal only outside live mode (a published live
+    # commitment is never re-sealed)
     commit_reveal.save_sealed(commit_reveal.SealedCycle.build(commitment, salt, sealed),
-                              ctx.state_dir / "salts")   # private, 0600, never overwritten
+                              ctx.state_dir / "salts", replace=ctx.settings.mode != "live")
     files: dict[str, bytes] = {}
     files.update(journal.commitment_files(commitment))
     if reveal_now:

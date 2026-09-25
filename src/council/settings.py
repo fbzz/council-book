@@ -32,7 +32,7 @@ class Settings:
     role: Role = "dev"
     mode: Mode = "stub"
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "deepseek-v4-flash:cloud"
+    ollama_model: str = "deepseek-v4.1-flash:cloud"
     agent_portfolio_id: str | None = None
     etoro_base_url: str = "https://public-api.etoro.com"
     tiingo_token_service: str = "council-book.tiingo"

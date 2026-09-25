@@ -1,6 +1,6 @@
 # LLM council configuration. Model and flags are recorded in every cycle manifest.
 version: 1
-model: deepseek-v4-flash:cloud
+model: deepseek-v4.1-flash:cloud      # v4-flash (0731) was retired by Ollama Cloud on 2026-09-25
 host: http://localhost:11434
 think: false
 temperature: 0
@@ -14,8 +14,8 @@ format: json                   # Ollama Cloud ignores JSON schemas: JSON mode + 
 roles:
   news:     {enabled: true,  replicates: 1, cadence: every_cycle, max_num_predict: 1200}
   macro:    {enabled: true,  replicates: 1, cadence: first_cycle_of_utc_day, max_num_predict: 700}
-  bull:     {enabled: true,  replicates: 1, max_num_predict: 900}
-  bear:     {enabled: true,  replicates: 1, max_num_predict: 900}
+  bull:     {enabled: true,  replicates: 1, max_num_predict: 2000}
+  bear:     {enabled: true,  replicates: 1, max_num_predict: 2000}
   pm:       {enabled: true,  replicates: 3, max_num_predict: 1200}
   single_agent_control: {enabled: true, replicates: 3, max_num_predict: 1200}   # opted in (control C10)
   # v1.1 (with single stocks): filings, sector

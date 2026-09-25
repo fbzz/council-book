@@ -9,7 +9,7 @@ You opened the debate; the bear has answered. Your opening and the bear's reply 
 - You are still an advocate, not the decision maker.
 
 JSON FIELDS (exactly these, no others; the same shape as your opening):
-- argument: at most 600 characters.
+- argument: at most 900 characters (hard limit 1500; longer replies are rejected).
 - proposal: map from line symbol to a level on the grid (may be empty).
 - claims: at most 6, each {"claim_id": "c1", ..., "text": at most 300 characters, "evidence_ids": 1 to 6 pack IDs}.
 - strongest_opposing_fact_id: one evidence ID from the pack.
