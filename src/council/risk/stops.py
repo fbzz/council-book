@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from council.models.broker import LeverageConfig
 from council.models.facts import MarketState
 from council.policy import LineSpec, Policy
-from council.risk.config import risk_limits
+from council.risk.config import CatastropheStopConfig, risk_limits
 
 GOLD_LINES: frozenset[str] = frozenset({"GOLD"})
 DEFAULT_SL_BUFFER_PP = 0.5  # mirrors risk.yaml catastrophe_stop.margin_pct_buffer_pp (tested)
@@ -45,10 +45,13 @@ def sigma_daily_of(state: MarketState, asset_class: str) -> float | None:
     return None
 
 
-def catastrophe_stop_distance(state: MarketState, line: LineSpec, policy: Policy) -> float:
+def catastrophe_stop_distance(
+    state: MarketState, line: LineSpec, policy: Policy, *, cfg: CatastropheStopConfig | None = None
+) -> float:
     """d = min(cap, max(floor, sigma_mult x sigma_daily x sqrt(horizon))). Raises ValueError if
-    the state carries no volatility at all (no open may happen without a stop)."""
-    cfg = risk_limits(policy).catastrophe_stop
+    the state carries no volatility at all (no open may happen without a stop). `cfg` is the
+    policy's already-validated catastrophe_stop section (saves re-parsing risk.yaml in loops)."""
+    cfg = cfg if cfg is not None else risk_limits(policy).catastrophe_stop
     key = floor_key(line)
     if key not in cfg.floors:
         raise ValueError(f"no catastrophe-stop floor for {key}")

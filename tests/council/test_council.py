@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from council.deliberation.council import plan_stages, run_council
+from council.deliberation.officers import event_cards, vol_cards
 from council.llm.stub import StubFailure, StubGateway
+from council.models.cycle import CycleRecord
 
 from .factories import (
     REF_LEVELS,
+    SEMIS_CUT,
     SLOT,
     build_bands,
     build_pack,
@@ -27,11 +32,12 @@ class Sleeper:
         self.calls.append(s)
 
 
-def council(gw, reg, policy, *, enforce=clip_enforce, sleep=None, **kw):
+def council(gw, reg, policy, *, enforce=clip_enforce, sleep=None, bands=None, **kw):
     lines = list(policy.universe.lines)
     hints = {ln.symbol: {"per_side_bps": 5.0, "carry_bps_day": 0.0} for ln in lines}
     return asyncio.run(run_council(
-        gw=gw, reg=reg, pack=build_pack(), ref=build_ref(), bands=build_bands(),
+        gw=gw, reg=reg, pack=build_pack(), ref=build_ref(),
+        bands=build_bands() if bands is None else bands,
         current_levels={**REF_LEVELS, "OIL": -0.25}, cost_hints=hints, lines=lines, policy=policy,
         enforce=enforce, now=SLOT, sleep=sleep or Sleeper(), **kw,
     ))
@@ -48,8 +54,8 @@ def test_end_to_end_decision(reg, policy):
     assert res.aggregate.levels == {**REF_LEVELS, "SEMIS": 0.5}
     assert res.aggregate.medoid_index == 0
     ids = [c.card_id for c in res.cards]
-    assert ids == ["K:vol:1", "K:event:1", "K:event:2", "K:news:1", "K:news:2"]
-    news_material = res.cards[3]
+    assert ids == ["K:vol:1", "K:event:1", "K:news:1", "K:news:2"]   # one market-wide event card
+    news_material = res.cards[2]
     assert news_material.qualifying and news_material.corroborated_by == ["K:vol:1"]
     assert [c.role for c in res.calls] == [
         "news", "bull_open", "bear", "bull_rebuttal", "pm", "pm", "pm",
@@ -224,3 +230,111 @@ def test_line_dropped_by_enforcer_goes_to_reference(reg, policy):
     res = council(StubGateway({**stub_responses(), "pm": pm}), reg, policy, enforce=drops_gold)
     assert all(r.enforced_levels["GOLD"] == REF_LEVELS["GOLD"] for r in res.pm)
     assert res.aggregate.levels["GOLD"] == REF_LEVELS["GOLD"]
+
+
+# ------------------------------------------------------------------------------- code cards
+def test_given_code_cards_are_used_not_rebuilt(reg, policy):
+    pack = build_pack()
+    only_vol = vol_cards(pack, policy)
+    res = council(StubGateway(stub_responses()), reg, policy, code_cards=only_vol)
+    assert [c.card_id for c in res.cards] == ["K:vol:1", "K:news:1", "K:news:2"]
+    assert res.cards[1].qualifying and res.cards[1].corroborated_by == ["K:vol:1"]
+
+
+def test_empty_code_cards_mean_no_corroboration(reg, policy):
+    res = council(StubGateway(stub_responses()), reg, policy, code_cards=[])
+    assert [c.card_id for c in res.cards] == ["K:news:1", "K:news:2"]
+    assert not res.cards[0].qualifying and res.cards[0].corroborated_by == []
+
+
+def test_code_cards_equal_rebuild_at_the_slot(reg, policy):
+    pack = build_pack()
+    cards = vol_cards(pack, policy) + event_cards(pack, SLOT, policy)
+    a = council(StubGateway(stub_responses()), reg, policy, code_cards=cards).model_dump_json()
+    b = council(StubGateway(stub_responses()), reg, policy).model_dump_json()
+    assert a == b
+
+
+# -------------------------------------------------------------------------------- bands_fn
+def pinned_semis_bands(qualifying: list[str] | None = None):
+    """Bands where SEMIS may be cut to 0.5 only when a qualifying card is listed."""
+    bands = build_bands()
+    q = qualifying or []
+    bands["SEMIS"] = bands["SEMIS"].model_copy(
+        update={"lo": 0.5 if q else 1.0, "qualifying_cards": q})
+    return bands
+
+
+class UnlockBands:
+    """bands_fn stand-in: a qualifying NEWS card on SEMIS unlocks the cut (the code cards alone
+    were deemed not to)."""
+
+    def __init__(self):
+        self.seen: list[list[str]] = []
+
+    def __call__(self, cards):
+        self.seen.append([c.card_id for c in cards])
+        q = [c.card_id for c in cards if c.role == "news" and c.qualifying and "SEMIS" in c.scope]
+        return pinned_semis_bands(q)
+
+
+def semis_cutter(user, replicate):
+    return pm_decision([SEMIS_CUT], fact="K:vol:1")
+
+
+def row(text, symbol):
+    return next(r for r in text.splitlines() if r.startswith(symbol + " "))
+
+
+def test_bands_fn_recomputes_bands_after_the_specialists(reg, policy):
+    gw = StubGateway({**stub_responses(), "single_agent": semis_cutter})
+    fn = UnlockBands()
+    res = council(gw, reg, policy, bands=pinned_semis_bands(), bands_fn=fn)
+    assert fn.seen == [["K:vol:1", "K:event:1", "K:news:1", "K:news:2"]]    # once, ALL cards
+    assert res.bands["SEMIS"].lo == 0.5 and res.bands["SEMIS"].qualifying_cards == ["K:news:1"]
+    assert res.aggregate.levels["SEMIS"] == 0.5 and res.basis == "council"   # enforce used them
+    by_role = {e.role: e.user for e in gw.log}
+    assert "band [+0.50, +1.00] qualifying K:news:1" in row(by_role["pm"], "SEMIS")
+    assert "band [+0.50, +1.00]" in row(by_role["bull_open"], "SEMIS")
+    assert "band [+1.00, +1.00]" in row(by_role["news"], "SEMIS")      # before the news cards
+    # the single-agent control keeps the code-card bands (its information set)
+    assert "band [+1.00, +1.00]" in row(by_role["single_agent"], "SEMIS")
+    assert all(r.enforced_levels["SEMIS"] == 1.0 for r in res.single_agent)
+
+
+def test_without_bands_fn_the_given_bands_are_final(reg, policy):
+    bands = pinned_semis_bands()
+    res = council(StubGateway(stub_responses()), reg, policy, bands=bands)
+    assert res.bands == bands
+    assert res.aggregate.levels["SEMIS"] == 1.0          # the cut is clipped to the pinned band
+
+
+def test_bands_fn_sees_code_cards_only_when_news_is_dropped(reg, policy):
+    fn = UnlockBands()
+    res = council(StubGateway(stub_responses()), reg, with_council(policy, max_calls_per_cycle=6),
+                  bands=pinned_semis_bands(), bands_fn=fn)
+    assert fn.seen == [["K:vol:1", "K:event:1"]]
+    assert res.bands["SEMIS"].lo == 1.0 and res.aggregate.levels["SEMIS"] == 1.0
+
+
+def test_broken_bands_fn_keeps_given_bands(reg, policy):
+    def broken(cards):
+        raise ValueError("bug")
+
+    bands = pinned_semis_bands()
+    res = council(StubGateway(stub_responses()), reg, policy, bands=bands, bands_fn=broken)
+    assert "bands_fn_error ValueError" in res.flags
+    assert res.bands == bands and res.aggregate.levels["SEMIS"] == 1.0
+
+
+# ------------------------------------------------------------------------------- agreement
+def test_agreement_is_per_line_and_fits_the_cycle_record(reg, policy):
+    res = council(StubGateway(stub_responses()), reg, policy)
+    agreement = res.aggregate.agreement
+    assert set(agreement) == set(REF_LEVELS)
+    assert agreement["SEMIS"] == pytest.approx(2 / 3, abs=1e-6)       # r0, r1 cut; r2 holds
+    assert agreement["NDX"] == 1.0
+    rec = CycleRecord(cycle_id="c", slot=SLOT, started_at=SLOT, status="dry_run", mode="test",
+                      policy_sha="x", model="m", agreement=agreement,
+                      medoid_replicate=res.aggregate.medoid_index)
+    assert rec.agreement == agreement

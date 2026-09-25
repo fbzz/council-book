@@ -3,7 +3,8 @@
 Rules:
   - one reference line per exposure line (name, trend, distance to SMA-50/200 %, momentum,
     drawdown from the 52-week high, vol ratio, reference level, current level, band, the deviation
-    directions code will accept, cost bps per side and carry bps per day);
+    directions code will accept, cost bps per side and carry bps per day; levels below 0 are
+    offered only when a citable risk_down card covers the line);
   - the evidence IDs with short labels, so roles cite IDs that exist (facts and news stamped
     available after the slot are never shown: no lookahead);
   - the cards (optional);
@@ -17,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from council.deliberation.audit import short_card_ids
 from council.llm.sanitize import sanitize_text, scrub_amounts
 from council.models.cards import EvidenceCard
 from council.models.common import LEVEL_GRID
@@ -77,12 +79,22 @@ def fmt_fact_value(fact: Fact) -> str:
 
 
 def allowed_directions(
-    *, band: Band | None, ref: float, current: float, line: LineSpec, admitted: bool
+    *,
+    band: Band | None,
+    ref: float,
+    current: float,
+    line: LineSpec,
+    admitted: bool,
+    short_card: bool = True,
 ) -> list[str]:
-    """Deviation directions that can pass the auditor AND stay inside the band (grid levels only)."""
+    """Deviation directions that can pass the auditor AND stay inside the band (grid levels only).
+    `short_card` False (no citable risk_down card on the line) removes every level below 0,
+    because the auditor reverts those (`audit.short_card_ids`)."""
     if not admitted or not line.council_deviations or band is None:
         return []
     opts = [g for g in LEVEL_GRID if band.lo - EPS <= g <= band.hi + EPS]
+    if not short_card:
+        opts = [g for g in opts if g >= -EPS]
     dirs = []
     if any(-EPS <= g < ref - EPS for g in opts):
         dirs.append("cut")
@@ -132,13 +144,17 @@ def line_row(
     band: Band | None,
     current: float,
     cost_hints: Mapping[str, Any],
+    cards: Sequence[EvidenceCard] = (),
 ) -> str:
     st = _state_for(pack, line)
     entry = ref.entries.get(line.symbol)
     ref_level = float(entry.level_ref) if entry is not None else 0.0
     trend = (st.trend if st is not None else None) or (entry.trend if entry is not None else None)
     admitted = line.symbol in pack.admitted
-    dirs = allowed_directions(band=band, ref=ref_level, current=current, line=line, admitted=admitted)
+    dirs = allowed_directions(
+        band=band, ref=ref_level, current=current, line=line, admitted=admitted,
+        short_card=bool(short_card_ids(cards, line.symbol)),
+    )
     if not admitted:
         may = "none (not admitted this cycle)"
     elif not line.council_deviations:
@@ -225,6 +241,7 @@ def desk_pack(
                 band=bands.get(line.symbol),
                 current=float(current_levels.get(line.symbol, 0.0)),
                 cost_hints=cost_hints.get(line.symbol, {}),
+                cards=cards,
             )
         )
 

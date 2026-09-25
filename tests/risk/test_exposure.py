@@ -8,7 +8,9 @@ import copy
 import pytest
 
 from council.risk.exposure import (
+    exposure_with_source,
     levels_from_weights,
+    parse_position,
     position_exposure,
     snapshot_from_pnl,
 )
@@ -53,7 +55,8 @@ def test_spec_example_parses(now):
     pos = s.positions[0]
     assert pos.symbol == "EQQQ.L" and pos.leverage == 2 and pos.settlement == "cfd"
     assert pos.sl_rate == 1.2 and pos.opened_at is not None
-    assert s.unmapped == [] and s.hedged == []
+    assert pos.exposure_usd == 2100.0 and pos.close_rate == 1.25
+    assert s.unmapped == [] and s.hedged == [] and s.flags == []
 
 
 def test_casing_variants_parse_identically(now):
@@ -166,3 +169,48 @@ def test_levels_from_weights():
     assert levels == {"NDX": pytest.approx(1.0), "SPX": pytest.approx(-0.5), "GOLD": 0.0}
     with pytest.raises(ValueError):
         levels_from_weights({"OIL": 0.1}, {"OIL": 0.0})
+
+
+def test_positions_carry_the_exposure_used_and_fallbacks_are_flagged(now):
+    payload = spec_payload()
+    port = payload["clientPortfolio"]
+    del port["positions"][0]["unrealizedPnL"]["exposureInAccountCurrency"]      # units x rate
+    port["positions"].append({                                                  # amount x leverage
+        "positionID": 9005, "instrumentID": 102, "isBuy": False, "amount": 200.0, "leverage": 2,
+    })
+    port["positions"].append({                                                  # unmapped, amount only
+        "positionID": 9006, "instrumentID": 4242, "isBuy": True, "amount": 50.0,
+    })
+    s = snap(payload, now)
+    by_id = {p.position_id: p for p in s.positions}
+    assert by_id[9001].exposure_usd == pytest.approx(10.5 * 1.25) and by_id[9001].close_rate == 1.25
+    assert by_id[9005].exposure_usd == pytest.approx(400.0) and by_id[9005].close_rate is None
+    assert by_id[9006].exposure_usd == pytest.approx(50.0)
+    assert s.signed_w["NDX"] == pytest.approx(by_id[9001].exposure_usd / s.equity_usd)
+    assert s.signed_w["SPX"] == pytest.approx(-400.0 / s.equity_usd)
+    assert s.gross * s.equity_usd == pytest.approx(sum(p.exposure_usd for p in s.positions))
+    assert s.flags == [
+        "exposure_fallback:amount_x_leverage:SPX",
+        "exposure_fallback:amount_x_leverage:UNMAPPED",
+        "exposure_fallback:units_x_close_rate:NDX",
+    ]
+    assert not any("4242" in f for f in s.flags)                                 # no instrument IDs
+
+
+def test_mirror_fallbacks_are_flagged_too(now):
+    payload = spec_payload()
+    payload["clientPortfolio"]["mirrors"] = [{
+        "mirrorID": 55, "availableAmount": 0.0,
+        "positions": [{"positionID": 1, "instrumentID": 101, "isBuy": True, "amount": 100.0}],
+    }]
+    assert snap(payload, now).flags == ["exposure_fallback:amount_x_leverage:UNMAPPED"]
+
+
+def test_parse_position_without_any_exposure_leaves_it_unset():
+    raw = {"positionID": 1, "instrumentID": 101, "isBuy": True, "units": 2.0}
+    pos = parse_position(raw, "EQQQ.L")
+    assert pos.exposure_usd is None and pos.close_rate is None
+    assert exposure_with_source(raw) is None
+    raw["unrealizedPnL"] = {"closeRate": 0.0}                                    # not a rate
+    assert parse_position(raw, "EQQQ.L").close_rate is None
+    assert exposure_with_source(raw) is None                                     # never exposure 0

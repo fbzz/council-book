@@ -112,6 +112,27 @@ def test_pnl_casing_variants_and_fallbacks():
     assert read.equity_usd == pytest.approx(500.0 + 50.0 - 1.5)
 
 
+def test_pnl_keeps_the_broker_exposure_and_close_rate_on_positions():
+    (p,) = parse_pnl(PNL, {101: "AAPL"}).positions
+    assert (p.exposure_usd, p.close_rate) == (2100.0, 1.25)
+    payload = {"clientPortfolio": {"credit": 500.0, "positions": [
+        {"positionId": 1, "instrumentId": 7, "isBuy": False, "openRate": 10.0, "units": 3.0,
+         "amount": 30.0, "unrealizedPnL": {"closeRate": 10.5, "closeConversionRate": 2.0}},
+        {"positionID": 2, "instrumentID": 8, "isBuy": True, "openRate": 4.0, "units": 5.0, "amount": 20.0},
+        {"positionID": 3, "instrumentID": 9, "isBuy": True, "openRate": 4.0, "units": 5.0, "amount": 20.0,
+         "unrealizedPnL": {"exposureInAccountCurrency": -21.0, "closeRate": 0.0}},
+    ]}}
+    read = parse_pnl(payload, {8: "SPX500"})
+    converted, fallback, negative = read.positions
+    assert converted.exposure_usd == pytest.approx(63.0) and converted.close_rate == 10.5
+    assert fallback.exposure_usd is None and fallback.close_rate is None      # open-rate fallback
+    assert read.exposure_usd[2] == pytest.approx(20.0)
+    assert negative.exposure_usd == pytest.approx(21.0) and negative.close_rate is None
+    snap = snapshot_from_portfolio(read, NOW)
+    assert snap.flags == ["SPX500: exposure_from_open_rate"]
+    assert snapshot_from_portfolio(parse_pnl(PNL, {101: "AAPL"}), NOW).flags == []
+
+
 def test_pnl_rejects_malformed_payloads():
     with pytest.raises(ValueError):
         parse_pnl({"clientPortfolio": {"positions": []}})             # no credit

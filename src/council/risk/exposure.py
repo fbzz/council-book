@@ -3,7 +3,13 @@
 Rules (see tests/contract/specs/ETORO_ROUTES.md, GET /api/v1/trading/info/real/pnl):
 - Keys are matched case-insensitively (`positionID`, `positionId`, `PositionId` all parse).
 - Exposure of a position = `unrealizedPnL.exposureInAccountCurrency` when present, else
-  units x closeRate x closeConversionRate, else (last resort) amount x leverage. Signed by isBuy.
+  units x closeRate x closeConversionRate (a positive close rate only), else (last resort)
+  amount x leverage. Signed by isBuy. The unsigned exposure used is stored on `Position.exposure_usd` (with `Position.close_rate`),
+  and every fallback is recorded in `ExposureSnapshot.flags` as
+  `exposure_fallback:<units_x_close_rate|amount_x_leverage>:<line>` (the line is `UNMAPPED` for
+  an unmapped instrument, so flags never carry an instrument ID).
+- This is the one broker P&L parser the cycle uses for the risk engine (keyed by LINE).
+  A position without a boolean isBuy is refused (fail closed; the direction is never guessed).
 - Equity = credit + sum(amount) + unrealized P&L, where unrealized P&L is the portfolio-level
   `unrealizedPnL` when present, else the sum of the positions' `unrealizedPnL.pnL`.
 - signed_w is keyed by LINE (e.g. NDX), not by broker symbol. An instrument we cannot map becomes
@@ -104,27 +110,55 @@ def position_pnl(raw: Mapping[str, Any]) -> float:
     return _num(upnl) or 0.0
 
 
-def position_exposure(raw: Mapping[str, Any]) -> float:
-    """Unsigned exposure in account currency (see module rules for the fallback order)."""
+EXPOSURE_BROKER = "broker"
+EXPOSURE_UNITS_X_RATE = "units_x_close_rate"
+EXPOSURE_AMOUNT_X_LEVERAGE = "amount_x_leverage"
+
+
+def _close_rate(raw: Mapping[str, Any]) -> float | None:
+    rate = _num(_ci(_ci(raw).get("unrealizedpnl")).get("closerate"))
+    return rate if rate is not None and rate > 0 else None
+
+
+def exposure_with_source(raw: Mapping[str, Any]) -> tuple[float, str] | None:
+    """(unsigned exposure in account currency, how it was obtained), or None when the position
+    has no exposure, close rate or amount. Sources: "broker" (exposureInAccountCurrency),
+    "units_x_close_rate", "amount_x_leverage" (see module rules for the order)."""
     pos = _ci(raw)
     upnl = _ci(pos.get("unrealizedpnl"))
     exposure = _num(upnl.get("exposureinaccountcurrency"))
     if exposure is not None:
-        return abs(exposure)
+        return abs(exposure), EXPOSURE_BROKER
     units = _num(pos.get("units"))
-    close_rate = _num(upnl.get("closerate"))
+    close_rate = _close_rate(raw)
     if units is not None and close_rate is not None:
         conversion = _num(upnl.get("closeconversionrate"))
-        return abs(units * close_rate * (1.0 if conversion is None else conversion))
+        return abs(units * close_rate * (1.0 if conversion is None else conversion)), EXPOSURE_UNITS_X_RATE
     amount = _num(pos.get("amount"))
-    leverage = _num(pos.get("leverage")) or 1.0
     if amount is None:
+        return None
+    leverage = _num(pos.get("leverage")) or 1.0
+    return abs(amount * leverage), EXPOSURE_AMOUNT_X_LEVERAGE
+
+
+def position_exposure(raw: Mapping[str, Any]) -> float:
+    """Unsigned exposure in account currency (see module rules for the fallback order)."""
+    found = exposure_with_source(raw)
+    if found is None:
         raise ValueError("position has no exposure, rate or amount")
-    return abs(amount * leverage)
+    return found[0]
+
+
+def exposure_flag(source: str, line: str) -> str:
+    """Quality flag for an exposure fallback (no instrument IDs: unmapped lines are `UNMAPPED`)."""
+    return f"exposure_fallback:{source}:{'UNMAPPED' if is_unmapped(line) else line}"
 
 
 def parse_position(raw: Mapping[str, Any], symbol: str) -> Position:
-    """One broker position -> Position (private). Requires ids and a direction."""
+    """One broker position -> Position (private). Requires ids and a direction.
+
+    `exposure_usd` is the unsigned exposure the snapshot uses (None when the payload has no
+    exposure, close rate or amount); `close_rate` the broker's current close rate, if any."""
     pos = _ci(raw)
     position_id = _int(pos.get("positionid"))
     instrument_id = _int(pos.get("instrumentid"))
@@ -139,6 +173,7 @@ def parse_position(raw: Mapping[str, Any], symbol: str) -> Position:
         tp_rate = None
     settlement_id = _int(pos.get("settlementtypeid"))
     settlement: Settlement = SETTLEMENT_BY_ID.get(settlement_id, "cfd") if settlement_id is not None else "cfd"
+    exposure = exposure_with_source(raw)
     return Position(
         position_id=position_id,
         instrument_id=instrument_id,
@@ -152,6 +187,8 @@ def parse_position(raw: Mapping[str, Any], symbol: str) -> Position:
         tp_rate=tp_rate,
         settlement=settlement,
         opened_at=_parse_time(pos.get("opendatetime")),
+        exposure_usd=None if exposure is None else exposure[0],
+        close_rate=_close_rate(raw),
     )
 
 
@@ -173,9 +210,18 @@ def snapshot_from_pnl(
     positions: list[Position] = []
     signed: dict[str, float] = {}
     directions: dict[str, set[bool]] = {}
+    flags: list[str] = []
     gross_usd = 0.0
     invested = 0.0
     pnl_sum = 0.0
+
+    def exposure_of(raw: Mapping[str, Any], line: str) -> float:
+        found = exposure_with_source(raw)
+        if found is None:
+            raise ValueError("position has no exposure, rate or amount")
+        if found[1] != EXPOSURE_BROKER:
+            flags.append(exposure_flag(found[1], line))
+        return found[0]
 
     for raw in port.get("positions") or []:
         instrument_id = _int(_ci(raw).get("instrumentid"))
@@ -183,7 +229,7 @@ def snapshot_from_pnl(
             raise ValueError("position without instrumentID")
         line, vehicle = line_for_instrument(instrument_id, vehicle_by_instrument, line_by_vehicle)
         pos = parse_position(raw, vehicle)
-        exposure = position_exposure(raw)
+        exposure = exposure_of(raw, line)
         sign = 1.0 if pos.is_buy else -1.0
         positions.append(pos)
         signed[line] = signed.get(line, 0.0) + sign * exposure
@@ -197,7 +243,7 @@ def snapshot_from_pnl(
         line = f"{UNMAPPED_PREFIX}MIRROR_{_int(m.get('mirrorid')) or 0}"
         invested += _num(m.get("availableamount")) or 0.0
         for raw in m.get("positions") or []:
-            exposure = position_exposure(raw)
+            exposure = exposure_of(raw, line)
             is_buy = _ci(raw).get("isbuy") is not False
             signed[line] = signed.get(line, 0.0) + (exposure if is_buy else -exposure)
             directions.setdefault(line, set()).add(is_buy)
@@ -223,6 +269,7 @@ def snapshot_from_pnl(
         margin_use=invested / equity,
         unmapped=sorted(line for line in signed if is_unmapped(line)),
         hedged=sorted(line for line, dirs in directions.items() if len(dirs) > 1),
+        flags=sorted(set(flags)),
     )
 
 

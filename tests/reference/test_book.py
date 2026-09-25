@@ -12,12 +12,15 @@ from hypothesis import strategies as st
 
 from council.reference.book import (
     apply_caps,
+    book_covariance,
     build_reference,
     ewma_covariance,
     ex_ante_vol,
     reference_levels,
     unit_weights,
+    vol_fn,
 )
+from council.risk.stops import catastrophe_stop_distance
 from tests.reference.conftest import all_states, gaussian_returns, state, variant
 
 REF = ["NDX", "SEMIS", "SPX", "GOLD", "BTC", "ETH"]
@@ -317,3 +320,44 @@ def test_book_is_never_short_levered_or_over_vol(policy, trends, ratios, sd, see
     for sym, cap in policy.risk["caps"]["line"].items():
         assert w[sym] <= cap + 1e-12
     assert all(w[s] == 0.0 for s in OVERLAY)
+
+
+# ------------------------------------------------------------------------------------ engine seams
+
+
+def test_book_covariance_is_the_one_the_book_scales_with(policy):
+    lines, states, returns = policy.universe.lines, all_states(policy), _calm_returns()
+    book = build_reference(cycle_id="c", lines=lines, states=states, returns=returns, policy=policy)
+    notes: list[str] = []
+    cov = book_covariance(returns, lines, states, policy, notes=notes)
+    assert list(cov.index) == [ln.symbol for ln in lines] and np.isfinite(cov.to_numpy()).all()
+    assert vol_fn(cov)(book.weights()) == pytest.approx(book.ex_ante_vol)
+    sub = book_covariance(returns, lines, states, policy, symbols=REF)
+    pd.testing.assert_frame_equal(sub, cov.loc[REF, REF])
+    assert any(n.startswith("OIL: no return history") for n in notes)       # overlay: sigma_ann
+    with pytest.raises(ValueError):
+        book_covariance(returns, lines, states, policy, symbols=["UNMAPPED_12"])
+
+
+def test_vol_fn_ignores_keys_missing_from_the_covariance(policy):
+    cov = book_covariance(_calm_returns(), policy.universe.lines, all_states(policy), policy)
+    vol = vol_fn(cov)
+    w = {"NDX": 0.35, "BTC": 0.13, "EURUSD": -0.1}
+    assert vol({**w, "UNMAPPED_77": 0.2, "UNMAPPED_MIRROR_3": 0.1}) == pytest.approx(ex_ante_vol(w, cov))
+    assert vol({"UNMAPPED_77": 0.5}) == 0.0
+    broken = cov.copy()
+    broken.loc["NDX", "BTC"] = np.nan
+    with pytest.raises(ValueError):                                          # known lines still checked
+        vol_fn(broken)(w)
+
+
+def test_entries_carry_the_catastrophe_stop_distance(policy):
+    states = all_states(policy, GOLD={"sigma": None})
+    book = build_reference(cycle_id="c", lines=policy.universe.lines, states=states,
+                           returns=_calm_returns(), policy=policy)
+    ndx = next(ln for ln in policy.universe.lines if ln.symbol == "NDX")
+    assert book.entries["NDX"].stop_distance == pytest.approx(catastrophe_stop_distance(states["NDX"], ndx, policy))
+    assert book.entries["NDX"].stop_distance == pytest.approx(3 * 0.2 / math.sqrt(252) * math.sqrt(5))
+    assert book.entries["BTC"].stop_distance == pytest.approx(0.20)              # crypto floor
+    assert book.entries["OIL"].stop_distance is not None                         # overlay lines too
+    assert book.entries["GOLD"].stop_distance is None                            # no vol: no stop

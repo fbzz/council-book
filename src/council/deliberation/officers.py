@@ -7,11 +7,19 @@ Rules:
   - Event officer: an `event_binary` card for every binary scheduled event whose block window
     [event - macro_before_h, event + macro_after_h] contains `now`. It is NOT qualifying: it only
     blocks adds (R16) and never justifies a cut or forces a sell. Market-wide events cover every
-    admitted line; a card's scope holds at most 6 lines, so a wide event is split into several cards.
+    admitted line; a card's scope holds at most `MAX_SCOPE` lines (= `CardDraft.scope` max_length,
+    9 = the whole v1 universe), so only a wider universe splits an event into several cards.
   - Card IDs are `K:vol:<n>` / `K:event:<n>`, numbered in universe line order (events: by time),
-    so any module that calls these functions gets the same IDs.
-  - Expiry: an event card expires `macro_after_h` after the event; a vol card expires once the
-    ratio is back under `CARD_EXPIRY_RATIO` (1.5); any other card after `horizon_days`.
+    so any module that calls these functions with the same pack and `now` gets the same IDs.
+    IDs are PER CYCLE (no cycle namespace): a card from an earlier cycle must never be mixed
+    with this cycle's cards. The orchestrator builds the code cards once, with `now = slot`, and
+    passes them to both `compute_bands` and `run_council(code_cards=...)`.
+  - No vol-card hysteresis in v1: cards are rebuilt from the current pack every cycle, so a
+    `vol_shock` card exists exactly while EWMA5/EWMA60 >= `card_ratio` (2.0). Nothing carries a
+    card forward, so the 1.5 expiry ratio below never extends a card's life inside the council.
+  - Expiry (`card_expired` / `card_expires_at`, for callers that keep cards across cycles): an
+    event card expires `macro_after_h` after the event; a vol card once the ratio is back under
+    `CARD_EXPIRY_RATIO` (1.5); any other card after `horizon_days`.
 """
 
 from __future__ import annotations
@@ -20,13 +28,24 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from council.deliberation.common import admissible_ids
-from council.models.cards import EvidenceCard
+from council.models.cards import CardDraft, EvidenceCard
 from council.models.facts import FactPack, MarketState
 from council.policy import Policy
 
 CARD_EXPIRY_RATIO = 1.5
-MAX_SCOPE = 6
 VOL_CARD_HORIZON_DAYS = 5
+
+
+def _scope_max_length() -> int:
+    """`CardDraft.scope` max_length, so officer cards and analyst drafts share one scope limit."""
+    for meta in CardDraft.model_fields["scope"].metadata:
+        limit = getattr(meta, "max_length", None)
+        if limit is not None:
+            return int(limit)
+    raise RuntimeError("CardDraft.scope has no max_length")
+
+
+MAX_SCOPE = _scope_max_length()
 
 
 def _state(pack: FactPack, symbol: str, policy: Policy) -> MarketState | None:

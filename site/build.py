@@ -8,6 +8,8 @@ Rules:
 - A strict Content-Security-Policy meta tag on every page; no external fonts, scripts or trackers.
 - The site must build with zero cycles (status AWAITING ACCOUNT) and every output file must pass
   the leak scan, otherwise the build fails and nothing is deployed.
+- A cycle file is the exact sealed document, sealed BEFORE the human decision. The final outcome
+  shown for a cycle comes from its execution file, else its ops row, else the sealed document.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from council.publish.public_models import (
     PublicBook,
     PublicCommitment,
     PublicCycleV1,
+    PublicExecution,
     PublicIncident,
     PublicOpsRow,
     PublicPerformancePoint,
@@ -218,10 +221,56 @@ class CycleView:
     commitment: PublicCommitment | None = None
     reveal: PublicReveal | None = None
     verified: bool = False
+    ops: PublicOpsRow | None = None
+    execution: PublicExecution | None = None
+    execution_path: str | None = None
+
+    # The sealed document predates the human decision: later sources win.
+    @property
+    def final_state(self) -> str | None:
+        if self.execution is not None:
+            return self.execution.decision_state
+        if self.ops is not None and self.ops.decision_state is not None:
+            return self.ops.decision_state
+        return self.doc.decision.state
+
+    @property
+    def human_outcome(self) -> str:
+        if self.ops is not None and self.ops.human_outcome != "none":
+            return self.ops.human_outcome
+        if self.execution is not None:
+            return "approved"
+        return self.doc.decision.human_outcome
+
+    @property
+    def decision_reason(self) -> str:
+        return (self.ops.decision_reason if self.ops is not None else "") or self.doc.decision.reason
+
+    @property
+    def approved_slot(self) -> datetime | None:
+        for value in (self.execution.approved_slot if self.execution else None,
+                      self.ops.approved_slot if self.ops else None, self.doc.decision.approved_slot):
+            if value is not None:
+                return value
+        return None
+
+    @property
+    def min_agreement_pct(self) -> float | None:
+        values = list(self.doc.pm.agreement_pct.values())
+        return min(values) if values else None
+
+    @property
+    def control_agrees(self) -> bool | None:
+        """Did the single-agent control land on the council's levels? None without a control."""
+        control = self.doc.single_agent
+        if control is None or not control.levels or not self.doc.pm.levels:
+            return None
+        lines = set(control.levels) & set(self.doc.pm.levels)
+        return all(abs(control.levels[k] - self.doc.pm.levels[k]) < 1e-9 for k in lines)
 
     @property
     def chip(self) -> dict[str, str]:
-        return chip(DECISION_CHIP, self.doc.decision.state)
+        return chip(DECISION_CHIP, self.final_state)
 
 
 @dataclass
@@ -245,14 +294,26 @@ def load_journal(journal_dir: Path) -> JournalView:
     status_file = journal_dir / "status.json"
     status = PublicStatus.model_validate_json(status_file.read_text()) if status_file.exists() else PublicStatus()
     view = JournalView(status=status)
+    view.ops = [PublicOpsRow.model_validate(r) for r in _jsonl(journal_dir / "ops" / "cycles.jsonl")]
+    ops_by_cycle = {r.cycle_id: r for r in view.ops}
+    executions: dict[str, tuple[PublicExecution, str]] = {}
+    executions_dir = journal_dir / "executions"
+    for file in sorted(executions_dir.rglob("*.json")) if executions_dir.exists() else []:
+        execution = PublicExecution.model_validate_json(file.read_text())
+        rel = f"journal/{file.relative_to(journal_dir).as_posix()}"
+        executions[execution.cycle_id] = (execution, rel)
+        view.copies[rel] = file
     cycles_dir = journal_dir / "cycles"
     for file in sorted(cycles_dir.rglob("*.json")) if cycles_dir.exists() else []:
         if file.name.endswith(".reveal.json"):
             continue
-        raw = json.loads(file.read_text())
+        data = file.read_bytes()
+        raw = json.loads(data)
         doc = PublicCycleV1.model_validate(raw)
         rel = file.relative_to(journal_dir).as_posix()
-        cv = CycleView(doc=doc, path=f"journal/{rel}")
+        cv = CycleView(doc=doc, path=f"journal/{rel}", ops=ops_by_cycle.get(doc.cycle_id))
+        if doc.cycle_id in executions:
+            cv.execution, cv.execution_path = executions[doc.cycle_id]
         view.copies[cv.path] = file
         reveal_file = file.with_name(file.name[: -len(".json")] + ".reveal.json")
         month = f"{doc.cycle_id[0:4]}/{doc.cycle_id[5:7]}"
@@ -264,7 +325,9 @@ def load_journal(journal_dir: Path) -> JournalView:
             cv.commitment = PublicCommitment.model_validate_json(commitment_file.read_text())
             view.copies[f"journal/{commitment_file.relative_to(journal_dir).as_posix()}"] = commitment_file
         if cv.reveal and cv.commitment and cv.reveal.commitment_sha256 == cv.commitment.commitment_sha256:
-            cv.verified = commit_reveal.verify(raw, cv.reveal.salt, cv.commitment.commitment_sha256)
+            # The file is the exact sealed bytes; an older pretty-printed file re-hashes canonically.
+            cv.verified = commit_reveal.verify_bytes(data, cv.reveal.salt, cv.commitment.commitment_sha256) or \
+                commit_reveal.verify(raw, cv.reveal.salt, cv.commitment.commitment_sha256)
         view.cycles.append(cv)
     view.cycles.sort(key=lambda c: c.doc.slot, reverse=True)
     book_file = journal_dir / "book" / "latest.json"
@@ -274,7 +337,6 @@ def load_journal(journal_dir: Path) -> JournalView:
         (PublicPerformancePoint.model_validate(r) for r in _jsonl(journal_dir / "performance" / "index.jsonl")),
         key=lambda p: p.as_of,
     )
-    view.ops = [PublicOpsRow.model_validate(r) for r in _jsonl(journal_dir / "ops" / "cycles.jsonl")]
     incidents_dir = journal_dir / "incidents"
     if incidents_dir.exists():
         view.incidents = sorted(
@@ -461,10 +523,21 @@ def _status_context(view: JournalView) -> dict[str, Any]:
     st = view.status
     last_at = st.last_cycle_at or (view.cycles[0].doc.slot if view.cycles else None)
     label, css = STATUS_CHIP[st.state]
+    last_id = st.last_cycle_id or (view.cycles[0].doc.cycle_id if view.cycles else None)
+    last_view = next((c for c in view.cycles if c.doc.cycle_id == last_id), None)
+    last_ops = next((r for r in view.ops if r.cycle_id == last_id), None)
+    if last_view is not None:
+        last_decision: dict[str, str] | None = last_view.chip
+    elif last_ops is not None:
+        last_decision = chip(DECISION_CHIP, last_ops.decision_state)
+    else:
+        last_decision = None
     return {
         "state": st.state, "label": label, "css": css, "note": st.note, "kill": st.kill_state,
-        "last_cycle_id": st.last_cycle_id or (view.cycles[0].doc.cycle_id if view.cycles else None),
+        "last_cycle_id": last_id,
         "last_cycle_at": last_at.strftime("%Y-%m-%dT%H:%M:%SZ") if last_at else "",
+        "last_cycle_revealed": last_view is not None,
+        "last_decision": last_decision,
     }
 
 

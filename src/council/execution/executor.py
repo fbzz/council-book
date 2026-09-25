@@ -27,12 +27,20 @@ Rules (each one has a chaos test against broker/fake.py):
 - `resume` does lookups and reconcile ONLY and never sends an order. A leg that provably never
   reached the broker (clean not-found) is marked skipped: it needs a fresh proposal and approval.
 - One executor at a time: an exclusive lock file in the private state dir.
+- Constructing an executor WITH a write client runs `operator.guards.assert_operator_context` on
+  the real process context (env, TTYs, ancestor processes) and raises GuardError outside a human
+  operator's terminal. Only tests may pass `_skip_guard_for_tests=True`. Without a write client
+  (resume) there is no guard and no way to send an order.
+- A leg's line is `Leg.line` (else the vehicle map); open units are floored to whole units when
+  `Leg.whole_units` says so. Decision events are logged with actor "executor".
 """
 
 from __future__ import annotations
 
 import fcntl
 import math
+import os
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -76,6 +84,7 @@ from council.ledger.states import LEG_ACTIVE_STATES, can_transition
 from council.models.common import Direction, Strict
 from council.models.cycle import DecisionState
 from council.models.plan import Leg, Plan
+from council.operator import guards
 from council.paths import state_dir
 from council.policy import Policy, default_policy
 
@@ -87,6 +96,7 @@ MAX_WRITE_ATTEMPTS = 3
 UNITS_REFRESH_CAP = 1.02
 CLOSE_UNITS_TOLERANCE = 0.01
 LOCK_FILE = "exec.lock"
+ACTOR = "executor"
 
 T = TypeVar("T")
 
@@ -175,6 +185,7 @@ class _LegCtx:
     sl_rate: float | None
     position_id: int | None
     depends_on: tuple[int, ...]
+    whole_units: bool = False
 
     @property
     def planned_price(self) -> float | None:
@@ -189,6 +200,7 @@ class _LegCtx:
             instrument_id=leg.instrument_id, direction=leg.direction, settlement=leg.settlement,
             leverage=leg.leverage, units=leg.units, amount_usd=leg.amount_usd,
             sl_rate=leg.sl_rate, position_id=leg.position_id, depends_on=tuple(leg.depends_on),
+            whole_units=leg.whole_units,
         )
 
     @classmethod
@@ -198,7 +210,7 @@ class _LegCtx:
             instrument_id=row.instrument_id, direction=row.direction,  # type: ignore[arg-type]
             settlement=row.settlement, leverage=row.leverage, units=row.units,
             amount_usd=row.amount_usd, sl_rate=row.sl_rate, position_id=row.position_id,
-            depends_on=tuple(row.depends_on),
+            depends_on=tuple(row.depends_on), whole_units=bool(row.detail.get("whole_units", False)),
         )
 
 
@@ -250,7 +262,15 @@ class Executor:
         symbol_for: Mapping[int, str] | Callable[[int], str | None] | None = None,
         whole_units: Mapping[str, bool] | None = None,
         lock_path: Path | None = None,
+        _skip_guard_for_tests: bool = False,
     ) -> None:
+        if write is not None and not _skip_guard_for_tests:
+            guards.assert_operator_context(
+                env=os.environ,
+                stdin_isatty=bool(sys.stdin is not None and sys.stdin.isatty()),
+                stdout_isatty=bool(sys.stdout is not None and sys.stdout.isatty()),
+                ancestors=guards.process_ancestors(),
+            )
         self.write = write
         self.read = read
         self.ledger = ledger
@@ -282,7 +302,7 @@ class Executor:
         if decision.state != "approved":
             raise ExecutionError(f"{decision_id} is {decision.state}, not approved")
         ordered = sorted(plan.legs, key=lambda leg: leg.seq)
-        legs = [_LegCtx.from_leg(leg, self._line(leg.symbol)) for leg in ordered]
+        legs = [_LegCtx.from_leg(leg, leg.line or self._line(leg.symbol)) for leg in ordered]
         with self._lock():
             self._load_symbols(legs)
             before = self._portfolio()            # a failing read changes nothing
@@ -290,9 +310,11 @@ class Executor:
             now = self.clock()
             self.ledger.record_positions(now, before.positions, decision_id=decision_id, source="pre_execution")
             self.ledger.add_equity_mark(now, before.equity_usd, credit_usd=before.credit_usd, source="pre_execution")
-            self.ledger.transition(decision_id, "executing", "approved plan: execution started", now=now)
+            # legs first (idempotent when the cycle already wrote the same ones): a mismatch
+            # raises here, with nothing sent and the decision still `approved`
+            self.ledger.insert_legs(decision_id, ordered, line_of=self._line, now=now)
+            self.ledger.transition(decision_id, "executing", "approved plan: execution started", actor=ACTOR, now=now)
             try:
-                self.ledger.insert_legs(decision_id, ordered, line_of=self._line, now=now)
                 self._run_closes(run)
                 self._run_modifies(run)
                 self._run_opens(run, nav_usd)
@@ -361,7 +383,8 @@ class Executor:
                 self._skip(run, leg, "invalid open leg (stop-loss, units, instrument or settlement missing)")
                 run.stop_opens = True
                 continue
-            units = self._rederive_units(leg.units, scale, whole=self._whole_units.get(leg.symbol, False))
+            whole = leg.whole_units or self._whole_units.get(leg.symbol, False)
+            units = self._rederive_units(leg.units, scale, whole=whole)
             if units <= 0:
                 self._skip(run, leg, "no units left after the equity refresh")
                 continue
@@ -730,9 +753,9 @@ class Executor:
         current = self.ledger.get_decision(run.decision_id).state
         reason = "; ".join(run.reasons) or final
         if current != final and can_transition(current, final):
-            self.ledger.transition(run.decision_id, final, reason, now=now)
+            self.ledger.transition(run.decision_id, final, reason, actor=ACTOR, now=now)
         else:
-            self.ledger.note(run.decision_id, f"resume: still {current}: {reason}", now=now)
+            self.ledger.note(run.decision_id, f"resume: still {current}: {reason}", actor=ACTOR, now=now)
             final = current  # type: ignore[assignment]
         return self._report(run, final, rec, after)  # type: ignore[arg-type]
 
@@ -794,7 +817,7 @@ class Executor:
                     self.ledger.update_leg(run.decision_id, row.seq, state="unknown", error=label)
             state = self.ledger.get_decision(run.decision_id).state
             if can_transition(state, "execution_unknown"):
-                self.ledger.transition(run.decision_id, "execution_unknown", label)
+                self.ledger.transition(run.decision_id, "execution_unknown", label, actor=ACTOR)
         except Exception:  # pragma: no cover - never mask the original failure
             pass
 

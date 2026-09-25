@@ -1,7 +1,7 @@
 """PROMPT LINT: no performance or backtest claims in any prompt (raw files and rendered text).
 
-AGENTS.md rule 6: prompts carry no backtest claims. The lab's prompts quoted results ("turned ...
-into ...", Sharpe, out-of-sample scores); the council's prompts must not."""
+AGENTS.md rule 6 names this file: prompts carry no backtest claims. The lab's prompts quoted
+results ("turned ... into ...", Sharpe, out-of-sample scores); the council's prompts must not."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import re
 import pytest
 
 from council.deliberation.common import prompt_context
+from council.llm.prompts import PromptRegistry
 from council.paths import PROMPTS_DIR
 
 FORBIDDEN = [
@@ -39,8 +40,10 @@ def test_raw_prompt_files_are_clean(path):
     assert lint(path.read_text(encoding="utf-8")) == []
 
 
-def test_rendered_prompts_are_clean(reg, policy):
+def test_rendered_prompts_are_clean(policy):
+    reg = PromptRegistry()
     ctx = prompt_context(policy)
+    assert reg.roles(), "no prompt roles registered"
     for role in reg.roles():
         assert lint(reg.render(role, **ctx)) == [], role
 

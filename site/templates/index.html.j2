@@ -30,6 +30,7 @@
 <dl class="facts">
   <div><dt>Cycles published</dt><dd class="n">{{ cycles_count }}</dd></div>
   <div><dt>Last cycle</dt><dd class="n">{% if latest %}<a href="cycles/{{ latest.doc.cycle_id }}.html">{{ latest.doc.cycle_id }}</a>{% else %}none yet{% endif %}</dd></div>
+  <div><dt>Last decision</dt><dd>{% if status.last_decision %}{{ m.chip(status.last_decision) }}{% if status.last_cycle_id and not status.last_cycle_revealed %} <span class="muted small">{{ status.last_cycle_id }}, sealed</span>{% endif %}{% else %}—{% endif %}</dd></div>
   <div><dt>On time</dt><dd class="n">{% if ops_count %}{{ ops_on_time }} of {{ ops_count }}{% else %}—{% endif %}</dd></div>
 </dl>
 {% endcall %}

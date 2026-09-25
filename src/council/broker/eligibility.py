@@ -6,8 +6,9 @@ Rules:
 - Fail closed on missing permissions: an absent `allowOpenPosition` or `allowPartialClosePosition`
   counts as False.
 - `select_config` keeps configs whose direction matches, whose `leverageValues` contain the
-  leverage, that are not `isPotential` (questionnaire needed = unavailable) and that allow a
-  stop-loss (every open carries one). A long at 1x prefers `real` when it is offered.
+  leverage, that are not `isPotential` (questionnaire needed = unavailable) and that allow setting
+  a stop-loss (`allowStopLossTakeProfit` and `allowEditStopLoss`: every open carries our own
+  stop, see `risk.stops.fit_to_eligibility`). A long at 1x prefers `real` when it is offered.
 - `resolve_vehicle` walks a line's ordered candidates for the direction and returns the eligible
   candidate with the LOWEST expected cost; ties go to the earlier candidate.
 """
@@ -123,6 +124,7 @@ def select_config(
         and leverage in c.leverage_values
         and not c.is_potential
         and c.allow_sl_tp
+        and c.allow_edit_stop_loss
         and (settlement is None or c.settlement == settlement)
     ]
     if not usable:

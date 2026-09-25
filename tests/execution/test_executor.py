@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import uuid
 
 import pytest
 
 from council.broker.fake import SimulatedCrash
+from council.broker.parsing import parse_pnl, snapshot_from_portfolio
 from council.execution.executor import (
     ExecutionError,
     ExecutionLocked,
     Executor,
     leg_request_id,
 )
+from council.execution.planner import build_flatten_plan
 from council.models.plan import Leg
-from tests.execution.helpers import NAV, close_leg, open_leg, plan_of
+from council.operator import guards
+from council.operator.guards import GuardError
+from tests.execution.helpers import INSTRUMENTS, NAV, close_leg, open_leg, plan_of
 
 OPEN_PATH = "/api/v3/trading/execution/orders"
 CLOSE_PATH = "/api/v1/trading/execution/market-close-orders/positions/"
@@ -306,6 +312,23 @@ def test_open_units_floor_to_whole_units_when_required(fake, make_executor, appr
     assert post.body["units"] == 10.0
 
 
+def test_open_units_floor_to_whole_units_from_the_leg(fake, make_executor, approve, ledger):
+    leg = open_leg(1, "SPX500", units=10).model_copy(update={"whole_units": True})
+    decision = approve()
+    make_executor().execute(decision, plan_of(leg), nav_usd=NAV / 2)
+    (post,) = _open_posts(fake)
+    assert post.body["units"] == 10.0                       # 10.2 floored because the leg says so
+    assert ledger.get_leg(decision, 1).detail["whole_units"] is True
+
+
+def test_leg_line_is_stored_and_reported(fake, make_executor, approve, ledger):
+    leg = open_leg(1, "SPX500").model_copy(update={"line": "SPX"})
+    decision = approve()
+    report = make_executor().execute(decision, plan_of(leg), nav_usd=NAV)
+    assert ledger.get_leg(decision, 1).line == "SPX" and report.legs[0].line == "SPX"
+    assert report.final_state == "completed"
+
+
 def test_partial_close_deducts_units(fake, make_executor, approve, ledger):
     pos = fake.add_position("SPX500", units=10, sl_rate=90.0)
     decision = approve()
@@ -410,6 +433,43 @@ def test_unknown_instrument_position_blocks_reconcile(fake, make_executor, appro
     assert report.reconcile is not None and report.reconcile.unknown_positions == ["UNMAPPED_999"]
 
 
+def test_flatten_plan_closes_everything_including_unmapped(fake, make_executor, approve, ledger, read_client, fclock, policy):
+    fake.add_instrument("MYSTERY", 999, bid=10.0, ask=10.01)
+    fake.add_position("MYSTERY", units=5, sl_rate=9.0)
+    for _ in range(3):
+        fake.add_position("SPX500", units=2, sl_rate=90.0)
+        fake.add_position("NSDQ100", units=1, sl_rate=180.0)
+        fake.add_position("GOLD", units=3, is_buy=False, sl_rate=55.0)
+    known = {iid: sym for sym, (iid, _b, _a) in INSTRUMENTS.items()}
+    snap = snapshot_from_portfolio(parse_pnl(read_client.pnl(), known), fclock.now())
+    plan = build_flatten_plan(snapshot=snap, quotes={}, eligibility={}, nav_usd=snap.equity_usd, policy=policy)
+    assert len(plan.legs) == 10 > policy.risk["proposal"]["max_legs"]
+    decision = approve(kind="flatten")
+    report = make_executor(symbol_for=known).execute(decision, plan, nav_usd=snap.equity_usd)
+    assert report.final_state == "completed", report.reasons
+    assert fake.positions == {}
+    assert {row.line for row in ledger.legs(decision)} == {"SPX", "NDX", "GOLD", "UNMAPPED_999"}
+
+
+def test_legs_written_at_proposal_are_reused(fake, make_executor, approve, ledger):
+    plan = plan_of(open_leg(1, "SPX500"))
+    decision = approve()
+    ledger.insert_legs(decision, plan.legs)                   # what the cycle does at proposal
+    report = make_executor().execute(decision, plan, nav_usd=NAV)
+    assert report.final_state == "completed" and len(ledger.legs(decision)) == 1
+
+
+def test_legs_that_differ_from_the_proposal_are_never_sent(fake, make_executor, approve, ledger):
+    from council.ledger.db import LedgerError
+
+    decision = approve()
+    ledger.insert_legs(decision, [open_leg(1, "SPX500", units=10)])
+    with pytest.raises(LedgerError):
+        make_executor().execute(decision, plan_of(open_leg(1, "SPX500", units=20)), nav_usd=NAV)
+    assert ledger.get_decision(decision).state == "approved"   # nothing started, nothing sent
+    assert not _open_posts(fake)
+
+
 def test_empty_plan_completes(make_executor, approve):
     assert make_executor().execute(approve(), plan_of(), nav_usd=NAV).final_state == "completed"
 
@@ -421,6 +481,55 @@ def test_invalid_open_without_stop_is_never_sent(fake, make_executor, approve, l
     assert ledger.get_leg(decision, 1).state == "skipped"
     assert report.final_state == "completed_partial"
     assert not _open_posts(fake)
+
+
+# ------------------------------------------------------------------------------ operator guard
+_AGENT_ENV = ("CI", "GITHUB_ACTIONS", "CLAUDECODE", "COUNCIL_AGENT_CONTEXT", "XPC_SERVICE_NAME")
+
+
+def test_write_executor_refuses_outside_an_operator_terminal(
+    fake, write_client, read_client, ledger, limiter, fclock, policy, monkeypatch,
+):
+    monkeypatch.setattr(guards, "process_ancestors", lambda: ["zsh"])
+    with pytest.raises(GuardError, match="COUNCIL_ROLE"):
+        Executor(write_client, read_client, ledger, limiter, clock=fclock.now, sleep=fclock.sleep, policy=policy)
+    assert fake.requests == []                              # nothing reached the broker
+
+
+def test_write_executor_runs_the_guard_on_the_real_process_context(
+    write_client, read_client, ledger, limiter, fclock, policy, monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(guards, "assert_operator_context", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(guards, "process_ancestors", lambda: ["zsh", "Terminal"])
+    Executor(write_client, read_client, ledger, limiter, clock=fclock.now, policy=policy)
+    (call,) = calls
+    assert call["env"] is os.environ and call["ancestors"] == ["zsh", "Terminal"]
+    assert isinstance(call["stdin_isatty"], bool) and isinstance(call["stdout_isatty"], bool)
+    Executor(None, read_client, ledger, limiter, clock=fclock.now, policy=policy)
+    Executor(write_client, read_client, ledger, limiter, policy=policy, _skip_guard_for_tests=True)
+    assert len(calls) == 1                                  # no writer or the test flag: no guard
+
+
+def test_write_executor_is_allowed_in_an_operator_terminal(
+    write_client, read_client, ledger, limiter, fclock, policy, monkeypatch,
+):
+    class _Tty:
+        def isatty(self):
+            return True
+
+    for name in list(os.environ):
+        if name in _AGENT_ENV or name.startswith("CLAUDE_CODE_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("COUNCIL_ROLE", "operator")
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    monkeypatch.setattr(sys, "stdout", _Tty())
+    monkeypatch.setattr(guards, "process_ancestors", lambda: ["-zsh", "login", "Terminal", "launchd"])
+    executor = Executor(write_client, read_client, ledger, limiter, clock=fclock.now, policy=policy)
+    assert executor.write is write_client
+    monkeypatch.setattr(guards, "process_ancestors", lambda: ["python", "node", "zsh"])
+    with pytest.raises(GuardError, match="agent runtime"):
+        Executor(write_client, read_client, ledger, limiter, clock=fclock.now, policy=policy)
 
 
 def test_resume_is_writer_free_by_construction(read_client, ledger, limiter, fclock, policy):

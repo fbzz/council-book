@@ -160,6 +160,7 @@ def test_ret1d_sigma(policy):
 def test_data_age_by_source(policy):
     btc = _state(policy, "BTC", from_log_returns(alternating(80, 0.01)), now=utc(2026, 10, 1, 5, 0))
     assert btc.data_age_h == pytest.approx(5.0)                        # Sep 30 bar closed 00:00
+    assert btc.bar_available_at == utc(2026, 10, 1, 0, 0)
     spx = _state(policy, "SPX", from_log_returns(alternating(80, 0.01)))
     assert spx.data_age_h == pytest.approx(14.667, abs=1e-3)          # available 20:00 NY = 00:00Z
     assert spx.history_source == "tiingo:SPY" and btc.history_source == "binance:BTCUSDT"
@@ -187,6 +188,7 @@ def test_short_history_and_empty_input(policy):
     assert s.sigma_daily is not None and s.vol_ratio_1y is None
     empty = F.market_state(_line(policy, "NDX"), pd.DataFrame(), now=NOW, policy=policy)
     assert empty.trend is None and empty.data_age_h is None and empty.history_source == "tiingo:QQQ"
+    assert empty.bar_available_at is None
 
 
 def test_source_override_switches_availability_rule(policy):
@@ -196,6 +198,7 @@ def test_source_override_switches_availability_rule(policy):
     as_etoro = F.market_state(line, bars, now=NOW, policy=policy, source="etoro")
     assert as_etoro.history_source == "etoro" and as_etoro.data_age_h == pytest.approx(14.667, abs=1e-3)
     assert F.last_bar_available_at(line, bars, now=NOW, source="etoro") == utc(2026, 10, 1, 0, 0)
+    assert as_etoro.bar_available_at == utc(2026, 10, 1, 0, 0)          # the pack's fact timestamp
 
 
 def test_market_states_skips_lines_without_history(policy):

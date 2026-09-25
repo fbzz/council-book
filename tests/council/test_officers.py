@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 
+from council.deliberation import officers
 from council.deliberation.officers import (
     card_expired,
     card_expires_at,
@@ -13,7 +14,7 @@ from council.deliberation.officers import (
     vol_cards,
     vol_fact_id,
 )
-from council.models.cards import EvidenceCard
+from council.models.cards import CardDraft, EvidenceCard
 from council.models.facts import EventItem
 
 from .factories import SLOT, build_pack
@@ -73,14 +74,29 @@ def test_event_window(policy, hours, fires):
     assert bool(event_cards(pack, SLOT, policy)) is fires
 
 
-def test_event_card_never_qualifies_and_splits_scope(policy):
+def test_max_scope_matches_card_draft_schema():
+    limits = [m.max_length for m in CardDraft.model_fields["scope"].metadata
+              if getattr(m, "max_length", None) is not None]
+    assert limits == [officers.MAX_SCOPE] and officers.MAX_SCOPE == 9
+
+
+def test_market_wide_event_is_one_card(policy):
+    pack = build_pack(events=[fomc(10)])
+    cards = event_cards(pack, SLOT, policy)
+    assert [c.card_id for c in cards] == ["K:event:1"]
+    assert cards[0].scope == [ln.symbol for ln in policy.universe.lines]
+    assert not cards[0].qualifying and cards[0].card_type == "event_binary"
+    assert cards[0].evidence_ids == ["E:fomc@x"] and cards[0].direction == "neutral"
+
+
+def test_event_card_splits_scope_wider_than_max(policy, monkeypatch):
+    monkeypatch.setattr(officers, "MAX_SCOPE", 6)
     pack = build_pack(events=[fomc(10)])
     cards = event_cards(pack, SLOT, policy)
     assert [c.card_id for c in cards] == ["K:event:1", "K:event:2"]
     assert all(len(c.scope) <= 6 for c in cards)
     assert [s for c in cards for s in c.scope] == [ln.symbol for ln in policy.universe.lines]
     assert all(not c.qualifying and c.card_type == "event_binary" for c in cards)
-    assert cards[0].evidence_ids == ["E:fomc@x"] and cards[0].direction == "neutral"
 
 
 def test_event_card_symbol_scope_and_non_binary(policy):

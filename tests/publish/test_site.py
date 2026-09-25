@@ -11,7 +11,12 @@ import pytest
 
 from council.paths import POLICY_DIR, PROMPTS_DIR, REPO_ROOT
 from council.publish import commit_reveal, journal, leakscan
-from council.publish.public_models import PublicIncident, PublicPerformancePoint
+from council.publish.public_models import (
+    PublicExecution,
+    PublicFill,
+    PublicIncident,
+    PublicPerformancePoint,
+)
 from council.publish.redact import public_book, public_cycle, public_ops_row, public_status
 from tests.publish.conftest import CANARIES, CYCLE_ID, SLOT
 
@@ -35,16 +40,32 @@ def _pages(out: Path) -> dict[str, str]:
     return {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.html")}
 
 
-def _populated_journal(root: Path, record, pack, policy) -> Path:
-    doc = public_cycle(record, pack, lines=policy.universe)
-    commitment, salt = commit_reveal.seal(doc, sealed_at=datetime(2026, 10, 1, 15, 0, tzinfo=UTC))
+def _execution() -> PublicExecution:
+    return PublicExecution(
+        cycle_id=CYCLE_ID, decision_state="completed", approved_slot=SLOT, completed_slot=SLOT,
+        fills=[PublicFill(seq=1, kind="partial_close", line="SEMIS", direction="long", settlement="real", leverage=1,
+                          state="filled", weight_target_x=-0.075, cost_bp=0.6)],
+        achieved_x={"SEMIS": 0.075}, achieved_drift_x=0.004, cost_bp_total=0.6,
+    )
+
+
+def _populated_journal(root: Path, record, pack, policy, *, sealed_state: str | None = None,
+                       execution: bool = False) -> Path:
+    """Seal (optionally while the decision is still pending), reveal the exact sealed bytes, and
+    publish the final outcome in the ops row (and the execution file)."""
+    sealed_rec = record if sealed_state is None else record.model_copy(
+        update={"decision_state": sealed_state, "decision_reason": "", "approved_at": None})
+    doc = public_cycle(sealed_rec, pack, lines=policy.universe)
+    commitment, salt, sealed = commit_reveal.seal_bytes(doc, sealed_at=datetime(2026, 10, 1, 15, 0, tzinfo=UTC))
     files = {}
     files |= journal.commitment_files(commitment)
-    files |= journal.reveal_files(doc, commit_reveal.reveal(commitment, salt))
+    files |= journal.reveal_files(sealed, salt, commitment)
     files |= journal.status_files(public_status("LIVE", last_cycle_id=CYCLE_ID, last_cycle_at=SLOT))
     files |= journal.book_files(public_book(CYCLE_ID, doc.risk.final_x, lines=policy.universe,
                                             reference_weights={k: v.weight_ref_x for k, v in doc.reference.items()}))
     files |= journal.ops_files(None, [public_ops_row(record)])
+    if execution:
+        files |= journal.execution_files(_execution())
     files |= journal.performance_files(None, [
         PublicPerformancePoint(as_of=date(2026, 10, 1), c0=100.0, c2=100.0, c3=100.0, c4_spy=100.0),
         PublicPerformancePoint(as_of=date(2026, 10, 2), c0=100.4, c2=100.1, c3=99.8, c4_spy=100.9, drawdown_pct=0.0),
@@ -128,7 +149,9 @@ def test_builds_with_one_cycle_and_passes_the_leak_scan(site, tmp_path, record, 
 def test_tampered_cycle_is_not_shown_as_verified(site, tmp_path, record, pack, policy):
     journal_dir = _populated_journal(tmp_path / "pub", record, pack, policy)
     cycle_file = journal_dir / "cycles" / "2026" / "10" / f"{CYCLE_ID}.json"
-    cycle_file.write_text(cycle_file.read_text().replace('"human_outcome": "approved"', '"human_outcome": "rejected"'))
+    original = cycle_file.read_text()
+    assert '"human_outcome":"approved"' in original                     # the exact canonical bytes
+    cycle_file.write_text(original.replace('"human_outcome":"approved"', '"human_outcome":"rejected"'))
     out = tmp_path / "out"
     site.build(journal_dir, PROMPTS_DIR, POLICY_DIR, out)
     assert "SEAL VERIFIED" not in _pages(out)[f"cycles/{CYCLE_ID}.html"]
@@ -197,3 +220,65 @@ def test_cli_entry_point(site, tmp_path):
 def test_stale_badge_threshold_is_five_hours(site):
     assert "Date.now()-t>5*36e5" in site.STALE_SCRIPT          # 5 x 3,600,000 ms
     assert site.script_hash().startswith("sha256-")
+
+
+def test_revealed_cycle_file_is_the_exact_sealed_bytes(tmp_path, record, pack, policy):
+    journal_dir = _populated_journal(tmp_path / "pub", record, pack, policy)
+    doc = public_cycle(record, pack, lines=policy.universe)
+    data = (journal_dir / "cycles" / "2026" / "10" / f"{CYCLE_ID}.json").read_bytes()
+    assert data == commit_reveal.canonical_json(doc)
+
+
+def test_cycle_sealed_pending_shows_the_final_outcome_from_ops_and_execution(site, tmp_path, record, pack, policy):
+    journal_dir = _populated_journal(tmp_path / "pub", record, pack, policy, sealed_state="awaiting_publication",
+                                     execution=True)
+    out = tmp_path / "out"
+    site.build(journal_dir, PROMPTS_DIR, POLICY_DIR, out)
+    pages = _pages(out)
+    cycle_page = pages[f"cycles/{CYCLE_ID}.html"]
+    assert "SEAL VERIFIED" in cycle_page and "EXECUTED" in cycle_page
+    assert "sealed while the decision was pending" in cycle_page and "execution record" in cycle_page
+    assert "Reason given: Agree with the cut" in cycle_page
+    assert "2026-10-01 14:40Z" in cycle_page and "<h3>Execution</h3>" in cycle_page
+    assert f"journal/executions/2026/10/{CYCLE_ID}.json" in cycle_page
+    assert (out / "journal" / "executions" / "2026" / "10" / f"{CYCLE_ID}.json").exists()
+    assert "EXECUTED" in pages["cycles.html"] and "approved" in pages["cycles.html"]
+    assert "EXECUTED" in pages["index.html"]                             # status: last decision
+    assert leakscan.scan_paths([out], canaries=CANARIES) == []
+
+
+def test_final_outcome_from_the_ops_row_without_an_execution(site, tmp_path, record, pack, policy):
+    rejected = record.model_copy(update={"decision_state": "rejected", "decision_reason": "Too soon after the stop",
+                                         "approved_at": None})
+    journal_dir = _populated_journal(tmp_path / "pub", rejected, pack, policy, sealed_state="proposed")
+    out = tmp_path / "out"
+    site.build(journal_dir, PROMPTS_DIR, POLICY_DIR, out)
+    page = _pages(out)[f"cycles/{CYCLE_ID}.html"]
+    assert "REJECTED" in page and "operations log" in page and "Too soon after the stop" in page
+    assert "<h3>Execution</h3>" not in page
+
+
+def test_cycle_page_renders_agreement_control_and_fingerprint(site, tmp_path, record, pack, policy):
+    journal_dir = _populated_journal(tmp_path / "pub", record, pack, policy)
+    out = tmp_path / "out"
+    site.build(journal_dir, PROMPTS_DIR, POLICY_DIR, out)
+    pages = _pages(out)
+    page = pages[f"cycles/{CYCLE_ID}.html"]
+    doc = public_cycle(record, pack, lines=policy.universe)
+    assert "medoid's action class" in page and "66.67%" in page and "100.00%" in page
+    assert "Control: single agent, no debate" in page and "<th>Single agent</th>" in page
+    assert "Material facts" in page and doc.material_fingerprint[:12] in page
+    assert "FRED DGS10 chg20 2026-09-30 = -12.5 bps" in page
+    assert "66.67%" in pages["cycles.html"] and "differs" in pages["cycles.html"]
+
+
+def test_status_names_a_sealed_but_unrevealed_last_cycle(site, tmp_path, record):
+    root = tmp_path / "pub"
+    files = journal.status_files(public_status("LIVE", last_cycle_id=CYCLE_ID, last_cycle_at=SLOT))
+    files |= journal.ops_files(None, [public_ops_row(record.model_copy(update={"decision_state": "proposed"}))])
+    journal.write_files(root, files)
+    out = tmp_path / "out"
+    site.build(root / "journal", PROMPTS_DIR, POLICY_DIR, out)
+    index = _pages(out)["index.html"]
+    assert "PROPOSED" in index and f"{CYCLE_ID}, sealed" in index
+    assert "No cycles yet" in _pages(out)["cycles.html"]

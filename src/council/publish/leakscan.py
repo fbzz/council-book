@@ -2,7 +2,8 @@
 
 Rules:
 - VALUE patterns: money amounts, 7+ digit ids, UUIDs, IPv4, e-mails, local home paths, GitHub /
-  API tokens, JWTs, bearer credentials, broker header names and private artifact links.
+  API tokens, JWTs, bearer credentials, broker header names, private artifact links and
+  `UNMAPPED_<instrument id>` keys (redaction publishes them as `UNMAPPED`).
 - KEY denylist (structured documents only): a key naming money, prices, units, margin or a
   broker/account/order/request id is refused unless it ends in `_pct`, `_bp` or `_x`.
 - CANARIES: exact private values (NAV, cash, ...) in several formats (1234.56, 1,234.56, 1234).
@@ -59,6 +60,7 @@ VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")),
     ("broker_header", re.compile(r"(?i)\bx-user-key\b|\bx-api-key\s*[:=]")),
     ("private_artifact", re.compile(r"(?i)claude\.ai/code/artifact")),
+    ("unmapped_id", re.compile(r"(?i)UNMAPPED_\d")),
 )
 
 # ------------------------------------------------------------------------------ key denylist

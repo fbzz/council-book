@@ -30,6 +30,8 @@ PRIVATE_POSITION_ID = 2951234567
 PRIVATE_INSTRUMENT_ID = 100123
 PRIVATE_DECISION_ID = "5b0f2c4e-9a1d-4c3b-8e7f-0123456789ab"
 PRIVATE_NOTE = "equity 1234.56 USD on the main book"
+PRIVATE_FINGERPRINT = "trend:NDX=up|SEMIS=up|cards:K:vol:1|events:none|admitted:NDX,SEMIS"
+APPROVED_AT = datetime(2026, 10, 1, 15, 7, 13, tzinfo=UTC)
 CANARIES = (PRIVATE_NAV, PRIVATE_AMOUNT, PRIVATE_UNITS, PRIVATE_SL_RATE, str(PRIVATE_POSITION_ID),
             str(PRIVATE_INSTRUMENT_ID))
 
@@ -58,6 +60,7 @@ def make_pack() -> FactPack:
         Fact(id="V:SEMIS:vol_ratio", kind="vol", symbol="SEMIS", value=2.3, unit="ratio", available_at=SLOT, source="code"),
         Fact(id="C:SEMIS:bps_side", kind="cost", symbol="SEMIS", value=5.0, unit="bps", available_at=SLOT, source="code"),
         Fact(id="M:DGS10@2026-09-30", kind="macro", value=4.11, unit="pct", available_at=SLOT, source="fred"),
+        Fact(id="M:DGS10.chg20@2026-09-30", kind="macro", value=-12.5, unit="bps", available_at=SLOT, source="fred"),
         Fact(id="M:VIXCLS@2026-09-30", kind="macro", value=17.3, unit="x", available_at=SLOT, source="fred"),
     ]
     news = [NewsItem(id="N:1a2b3c4d", title=LICENSED_TITLE, summary=LICENSED_SUMMARY, symbols=["SEMIS"],
@@ -117,7 +120,8 @@ def make_record(**overrides) -> CycleRecord:
                          horizon_days=5, qualifying=True),
             EvidenceCard(card_id="K:macro:1", role="macro", scope=["market"], card_type="macro_context", direction="neutral",
                          claim="10y yield steady; implied vol calm. See https://example.com/x and @someone",
-                         evidence_ids=["M:DGS10@2026-09-30", "M:VIXCLS@2026-09-30"], horizon_days=20),
+                         evidence_ids=["M:DGS10@2026-09-30", "M:VIXCLS@2026-09-30", "M:DGS10.chg20@2026-09-30"],
+                         horizon_days=20),
         ],
         bands={s: Band(symbol=s, trend=TRENDS[s], ref_level=LEVELS[s], lo=max(-0.5, LEVELS[s] - 0.5), hi=LEVELS[s])
                for s in LEVELS},
@@ -145,6 +149,13 @@ def make_record(**overrides) -> CycleRecord:
             PMReplicate(replicate=2, seed=44, decision=None, valid=False, audit_violations=["parse_fail"]),
         ],
         medoid_replicate=0,
+        agreement={"SEMIS": 1.0, "NDX": 2 / 3},
+        single_agent=[
+            PMReplicate(replicate=0, seed=7, decision=_decision(0.75, "reference"), valid=True),
+            PMReplicate(replicate=1, seed=8, decision=None, valid=False, audit_violations=["parse_fail"]),
+        ],
+        single_agent_levels={**LEVELS, "SEMIS": 0.75},
+        material_fingerprint=PRIVATE_FINGERPRINT,
         risk=RiskDecision(
             raw_levels={**LEVELS, "SEMIS": 0.5},
             banded_levels={**LEVELS, "SEMIS": 0.5},
@@ -169,10 +180,13 @@ def make_record(**overrides) -> CycleRecord:
                 amount_usd=PRIVATE_AMOUNT, units=PRIVATE_UNITS, sl_rate=PRIVATE_SL_RATE, position_id=PRIVATE_POSITION_ID,
             )],
             gross_before=0.93, gross_after=0.855, net_before=0.93, net_after=0.855, cost_bps_nav=0.6,
-            carry_bps_day_nav=0.4, skipped=[f"GOLD: below_broker_minimum ({PRIVATE_AMOUNT} USD)"],
+            carry_bps_day_nav=0.4, skipped=[f"GOLD: below_broker_minimum ({PRIVATE_AMOUNT} USD)",
+                                            f"UNMAPPED_{PRIVATE_INSTRUMENT_ID}: no line"],
         ),
         decision_id=PRIVATE_DECISION_ID,
         decision_state="completed",
+        decision_reason="Agree with the cut",
+        approved_at=APPROVED_AT,
         calls=[
             RoleCall(role="pm", replicate=0, seed=42, prompt_id="pm@v1", prompt_sha=SHA_A, input_hash=SHA_B,
                      latency_ms=2300, tokens_in=9000, tokens_out=400, status="ok"),
@@ -180,8 +194,7 @@ def make_record(**overrides) -> CycleRecord:
                      latency_ms=40000, status="timeout", error="ConnectTimeout http://localhost:11434 /Users/someone/x"),
         ],
         flags=["late"],
-        extras={"approved_at": "2026-10-01T15:07:13Z", "decision_reason": "Agree with the cut",
-                "private_note": PRIVATE_NOTE},
+        extras={"private_note": PRIVATE_NOTE},
     )
     return record.model_copy(update=overrides) if overrides else record
 

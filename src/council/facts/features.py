@@ -17,7 +17,9 @@ Rules (numbers from policy/reference.yaml):
 - mom10d_pct / mom63d_pct: simple return over the last 10 / 63 completed bars, in percent.
 - dd52_pct: last close vs the highest close of the last 364 days, in percent (<= 0).
 - ret1d_sigma: last completed daily log return / sigma_daily.
-- data_age_h: hours from the last bar's availability time to `now`.
+- data_age_h: hours from the last bar's availability time to `now` (raw clock hours; the pack
+  applies the weekend/holiday-aware freshness rule and sets `frozen`).
+- bar_available_at: the availability time of that last bar (None when no bar is usable).
 """
 
 from __future__ import annotations
@@ -221,6 +223,7 @@ def market_state(
         dd52_pct=_r(_dd52(closes), 4),
         ret1d_sigma=_r(ret_last / sigma_d, 4) if sigma_d and ret_last is not None else None,
         data_age_h=_r(age_h, 3),
+        bar_available_at=avail.to_pydatetime(),
     )
 
 

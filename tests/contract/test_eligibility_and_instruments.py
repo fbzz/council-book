@@ -41,6 +41,9 @@ def test_select_config_needs_open_permission_and_stop_support():
     assert select_config(closed, "long", 1) is None
     no_sl = _row("X", 1, [leverage_config(allow_sl_tp=False)])
     assert select_config(no_sl, "long", 1) is None
+    fixed_sl = _row("X", 1, [leverage_config(allow_edit_stop_loss=False)])
+    assert select_config(fixed_sl, "long", 1) is None                     # our stop cannot be set
+    assert select_config(_row("X", 1, [leverage_config()]), "long", 1) is not None
 
 
 # ------------------------------------------------------------------------------ resolve_vehicle

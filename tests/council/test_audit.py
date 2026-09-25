@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from council.deliberation.audit import audit, direction_matches
+from council.deliberation.audit import audit, direction_matches, short_card_ids
 from council.deliberation.officers import vol_cards
+from council.models.cards import EvidenceCard
 from council.models.pm import PMDecision
 
 from .factories import REF_LEVELS, build_pack, pm_decision, with_late_evidence
@@ -149,3 +150,79 @@ def test_late_evidence_is_not_citable(policy, lines, bands, current):
     res = run(pm_decision([dev("GOLD", 0.75, "add", ["F:NDX:late_close"])]), pack=pack,
               policy=policy, lines=lines, bands=bands, current=current)
     assert res.reverted == ["GOLD"] and "unknown_evidence F:NDX:late_close" in res.violations[0]
+
+
+# ------------------------------------------------------- shorts need a cited risk_down card
+def card(card_id, card_type, direction, scope=("OIL",), ids=("F:OIL:trend",)):
+    role = card_id.split(":")[1]
+    return EvidenceCard(card_id=card_id, role=role, scope=list(scope), card_type=card_type,
+                        direction=direction, claim="c", evidence_ids=list(ids), horizon_days=5)
+
+
+def oil_vol_cards(policy):
+    pack = build_pack(ewma={"OIL": 2.5})
+    return pack, vol_cards(pack, policy)          # K:vol:1 SEMIS, K:vol:2 OIL (both risk_down)
+
+
+def test_short_with_risk_down_card_on_the_line_passes(policy, lines, bands, current):
+    pack, cards = oil_vol_cards(policy)
+    res = run(pm_decision([dev("OIL", -0.5, "short", ["K:vol:2"])]), pack=pack, cards=cards,
+              policy=policy, lines=lines, bands=bands, current=current)
+    assert res.valid and res.reverted == [] and res.levels["OIL"] == -0.5
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        ["F:OIL:trend"],                 # no card at all
+        ["K:vol:1"],                     # a risk_down card on ANOTHER line (SEMIS)
+        ["K:macro:1"],                   # macro_context alone is not enough
+        ["K:news:1"],                    # a risk_up card on the line
+        ["K:event:1"],                   # a neutral card on the line
+    ],
+)
+def test_short_without_risk_down_card_is_reverted(policy, lines, bands, current, ids):
+    pack, cards = oil_vol_cards(policy)
+    cards = [c for c in cards if c.card_id != "K:vol:2"] + [
+        card("K:macro:1", "macro_context", "risk_down"),
+        card("K:news:1", "news_material", "risk_up"),
+        card("K:event:1", "event_binary", "neutral"),
+    ]
+    res = run(pm_decision([dev("OIL", -0.5, "short", ids)]), pack=pack, cards=cards,
+              policy=policy, lines=lines, bands=bands, current=current)
+    assert res.reverted == ["OIL"] and not res.valid
+    assert res.violations[0] == "OIL: short_without_risk_down_card level -0.50"
+    assert res.levels["OIL"] == REF_LEVELS["OIL"]
+
+
+def test_macro_card_plus_line_card_passes(policy, lines, bands, current):
+    cards = [card("K:macro:1", "macro_context", "risk_down"),
+             card("K:news:1", "news_context", "risk_down")]
+    res = run(pm_decision([dev("OIL", -0.5, "short", ["K:macro:1", "K:news:1"])]), cards=cards,
+              policy=policy, lines=lines, bands=bands, current=current)
+    assert res.reverted == [] and res.levels["OIL"] == -0.5
+
+
+def test_any_label_landing_below_zero_needs_the_card(policy, lines, bands, current):
+    # a "cut" through zero is a short too
+    cut = run(pm_decision([dev("GBPUSD", -0.25, "cut", ["F:GBPUSD:trend"])]), policy=policy,
+              lines=lines, bands=bands, current=current)
+    assert cut.reverted == ["GBPUSD"] and "short_without_risk_down_card" in cut.violations[0]
+    # a partial cover still holds a short; a full cover to 0 needs no card
+    deep = {**current, "OIL": -0.5}
+    partial = run(pm_decision([dev("OIL", -0.25, "cover", ["F:OIL:trend"])]), policy=policy,
+                  lines=lines, bands=bands, current=deep)
+    assert partial.reverted == ["OIL"] and partial.levels["OIL"] == REF_LEVELS["OIL"]
+    full = run(pm_decision([dev("OIL", 0.0, "cover", ["F:OIL:trend"])]), policy=policy,
+               lines=lines, bands=bands, current=deep)
+    assert full.reverted == [] and full.levels["OIL"] == 0.0
+
+
+def test_short_card_ids():
+    cards = [card("K:vol:1", "vol_shock", "risk_down"),
+             card("K:vol:2", "vol_shock", "risk_down", scope=("SEMIS",)),
+             card("K:macro:1", "macro_context", "risk_down"),
+             card("K:news:1", "news_material", "risk_down", scope=("NDX", "OIL")),
+             card("K:news:2", "news_context", "neutral")]
+    assert short_card_ids(cards, "OIL") == ["K:vol:1", "K:news:1"]
+    assert short_card_ids(cards, "GOLD") == []

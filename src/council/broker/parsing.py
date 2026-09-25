@@ -5,7 +5,9 @@ Rules:
 - equity = credit + Σ position amount (margin) + unrealised PnL (port of the lab's
   `calculate_components`); the per-position PnL sum is used when the total is absent.
 - position exposure = `unrealizedPnL.exposureInAccountCurrency` when present, else
-  units × closeRate × closeConversionRate, else units × openRate.
+  units × closeRate × closeConversionRate, else units × openRate. The first two are the broker's
+  figure and are also kept on the Position (`exposure_usd`, `close_rate`) so the planner sizes
+  from the same number the risk engine used; the open-rate fallback is flagged in the snapshot.
 - `settlementTypeID`: 0 CFD, 1 real, 2 SWAP (treated as CFD), 3 crypto margin trade, 4 future.
 - A position flagged `isNoStopLoss` or with a non-positive stop rate has NO stop-loss (None).
 - An instrument the caller cannot map becomes `UNMAPPED_<instrumentId>` — locked, never cash.
@@ -137,6 +139,20 @@ def _parse_position(raw: Mapping[str, Any], lookup: Callable[[int], str | None])
     tp_rate = as_float(pick(raw, "takeProfitRate"))
     settlement = SETTLEMENT_BY_TYPE_ID.get(as_int(pick(raw, "settlementTypeID", "settlementTypeId"), 0) or 0, "cfd")
     symbol = lookup(instrument_id) or unmapped_symbol(instrument_id)
+    upnl = pick(raw, "unrealizedPnL", "unrealizedPnl")
+    exposure = None
+    close_rate = None
+    pnl = 0.0
+    if isinstance(upnl, Mapping):
+        exposure = as_float(pick(upnl, "exposureInAccountCurrency"))
+        pnl = as_float(pick(upnl, "pnL", "pnl"), 0.0) or 0.0
+        close_rate = as_float(pick(upnl, "closeRate"))
+        if close_rate is not None and close_rate <= 0:
+            close_rate = None
+        if exposure is None and close_rate is not None:
+            conversion = as_float(pick(upnl, "closeConversionRate"), 1.0) or 1.0
+            exposure = units * close_rate * conversion
+    broker_exposure = abs(exposure) if exposure is not None else None
     position = Position(
         position_id=position_id,
         instrument_id=instrument_id,
@@ -150,21 +166,12 @@ def _parse_position(raw: Mapping[str, Any], lookup: Callable[[int], str | None])
         tp_rate=tp_rate if tp_rate and tp_rate > 0 else None,
         settlement=settlement,
         opened_at=as_datetime(pick(raw, "openDateTime", "openDate")),
+        exposure_usd=broker_exposure,
+        close_rate=close_rate,
     )
-    upnl = pick(raw, "unrealizedPnL", "unrealizedPnl")
-    exposure = None
-    pnl = 0.0
-    if isinstance(upnl, Mapping):
-        exposure = as_float(pick(upnl, "exposureInAccountCurrency"))
-        pnl = as_float(pick(upnl, "pnL", "pnl"), 0.0) or 0.0
-        if exposure is None:
-            close_rate = as_float(pick(upnl, "closeRate"))
-            conversion = as_float(pick(upnl, "closeConversionRate"), 1.0) or 1.0
-            if close_rate is not None:
-                exposure = units * close_rate * conversion
-    if exposure is None:
-        exposure = units * open_rate
-    return position, abs(exposure), pnl
+    if broker_exposure is None:
+        broker_exposure = abs(units * open_rate)
+    return position, broker_exposure, pnl
 
 
 def parse_pnl(payload: Any, symbol_for: SymbolFor = None) -> PortfolioRead:
@@ -216,15 +223,21 @@ def parse_pnl(payload: Any, symbol_for: SymbolFor = None) -> PortfolioRead:
 
 def snapshot_from_portfolio(read: PortfolioRead, taken_at: datetime) -> ExposureSnapshot:
     """Signed exposure / equity per vehicle symbol. gross = Σ|exposure|/equity (hedged legs add),
-    net = Σ signed, margin_use = Σ(|w| / leverage)."""
+    net = Σ signed, margin_use = Σ(|w| / leverage). A position whose exposure fell back to
+    units × openRate is flagged (`<symbol>: exposure_from_open_rate`)."""
     equity = read.equity_usd
     if equity <= 0:
         raise ValueError("equity must be positive to express weights")
     signed: dict[str, float] = {}
     sides: dict[str, set[bool]] = {}
+    flags: list[str] = []
     gross = 0.0
     margin = 0.0
     for p in read.positions:
+        if p.exposure_usd is None:
+            note = f"{p.symbol}: exposure_from_open_rate"
+            if note not in flags:
+                flags.append(note)
         w = read.exposure_usd.get(p.position_id, p.units * p.open_rate) / equity
         signed[p.symbol] = signed.get(p.symbol, 0.0) + (w if p.is_buy else -w)
         sides.setdefault(p.symbol, set()).add(p.is_buy)
@@ -241,6 +254,7 @@ def snapshot_from_portfolio(read: PortfolioRead, taken_at: datetime) -> Exposure
         margin_use=margin,
         unmapped=sorted(s for s in signed if s.startswith("UNMAPPED_")),
         hedged=sorted(s for s, seen in sides.items() if len(seen) == 2),
+        flags=flags,
     )
 
 

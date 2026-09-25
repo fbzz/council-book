@@ -36,7 +36,6 @@ packages = ["src/council"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
 markers = [
   "live: touches the network or a live model (opt-in, never in CI)",
 ]
@@ -49,3 +48,6 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/council/cli.py" = ["B008"]   # typer.Option defaults are the idiomatic typer pattern

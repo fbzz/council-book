@@ -1,4 +1,5 @@
-"""Planner cases: new, add tranche, 4th-tranche skip, partial, full, flip, minimums, leg cap, stops."""
+"""Planner cases: new, add tranche, 4th-tranche skip, partial, full, flip, minimums, leg cap, stops,
+snapshot exposure, target-lines-only, flatten."""
 
 from __future__ import annotations
 
@@ -7,10 +8,23 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from council.broker.eligibility import parse_eligibility, resolve_vehicle
+from council.broker.eligibility import (
+    VehicleChoice,
+    parse_eligibility,
+    resolve_vehicle,
+    select_config,
+)
 from council.broker.fake import eligibility_row, leverage_config
-from council.execution.planner import _Draft, _order_and_cap, build_plan, vehicle_to_line
+from council.execution.planner import (
+    _Draft,
+    _order_and_cap,
+    build_flatten_plan,
+    build_plan,
+    changed_targets,
+    vehicle_to_line,
+)
 from council.models.broker import ExposureSnapshot, Position, Quote
+from council.models.risk import RiskDecision
 
 NOW = datetime(2026, 10, 1, 14, 40, tzinfo=UTC)
 NAV = 10_000.0
@@ -32,16 +46,20 @@ def rows(**overrides):
     return {r.symbol: r for r in parse_eligibility({"eligibilities": raw}, NOW)}
 
 
-def quotes():
-    return {s: Quote(symbol=s, instrument_id=i, bid=b, ask=a, at=NOW) for s, (i, b, a) in PRICES.items()}
+def quotes(*, without=()):
+    return {
+        s: Quote(symbol=s, instrument_id=i, bid=b, ask=a, at=NOW)
+        for s, (i, b, a) in PRICES.items() if s not in without
+    }
 
 
-def pos(pid, symbol, units, *, is_buy=True, age_h=0, leverage=1, sl=1.0):
+def pos(pid, symbol, units, *, is_buy=True, age_h=0, leverage=1, sl=1.0, exposure=None, close_rate=None):
     iid, bid, ask = PRICES[symbol]
     return Position(
         position_id=pid, instrument_id=iid, symbol=symbol, is_buy=is_buy, leverage=leverage,
         units=units, open_rate=ask if is_buy else bid, amount=units * ask / leverage,
-        sl_rate=sl, opened_at=NOW - timedelta(hours=age_h),
+        sl_rate=sl, opened_at=NOW - timedelta(hours=age_h), exposure_usd=exposure,
+        close_rate=close_rate,
     )
 
 
@@ -52,15 +70,17 @@ def snapshot(*positions):
     )
 
 
-def build(policy, target, *positions, eligibility=None, leverage=None, stops=None, **kw):
+def build(policy, target, *positions, eligibility=None, leverage=None, stops=None, qs=None,
+          vehicle_for=None, **kw):
     elig = eligibility or rows()
     lines = policy.universe.by_symbol()
 
-    def vehicle_for(line, direction, lev):
+    def default_vehicle_for(line, direction, lev):
         return resolve_vehicle(lines[line], direction, lev, elig, lambda v, r, c: 5.0)
 
     return build_plan(
-        snapshot=snapshot(*positions), target_w=target, vehicle_for=vehicle_for, quotes=quotes(),
+        snapshot=snapshot(*positions), target_w=target,
+        vehicle_for=vehicle_for or default_vehicle_for, quotes=qs if qs is not None else quotes(),
         stop_distance=stops if stops is not None else STOPS, leverage_for=leverage or {},
         eligibility=elig, cost_bps=lambda line, sym, d, lev: (5.0, 1.0 if d == "short" else 0.0),
         nav_usd=NAV, policy=policy, **kw,
@@ -216,9 +236,55 @@ def test_stop_outside_broker_bounds_is_skipped(policy):
     assert len(build(policy, {"SPX": 0.1}, eligibility=ok).legs) == 1     # 8 <= 8.5 - 0.5
 
 
-def test_min_stop_bound_applies_with_buffer(policy):
+def test_min_stop_bound_widens_the_stop_with_buffer(policy):
+    # behaviour change: below the broker minimum (+ buffer) the stop is WIDENED (risk.stops), not skipped
     elig = rows(SPX500=eligibility_row("SPX500", 101, configs=[leverage_config(min_sl_pct=7.6)]))
-    assert "SPX: stop_outside_broker_bounds" in build(policy, {"SPX": 0.1}, eligibility=elig).skipped
+    plan = build(policy, {"SPX": 0.1}, eligibility=elig)
+    (leg,) = plan.legs
+    assert "SPX: stop_outside_broker_bounds" not in plan.skipped
+    assert leg.stop_distance == pytest.approx(0.081)                   # (7.6 + 0.5) / 100
+    assert leg.sl_margin_pct == pytest.approx(8.1)
+    assert leg.sl_rate == pytest.approx(100.1 * (1 - 0.081))
+    assert "stop widened" in leg.reason
+
+
+def test_widened_stop_accounts_for_leverage(policy):
+    configs = [leverage_config(min_sl_pct=20.0)]
+    elig = rows(SPX500=eligibility_row("SPX500", 101, configs=configs))
+    (leg,) = build(policy, {"SPX": 0.1}, eligibility=elig, leverage={"SPX": 2}).legs
+    assert leg.leverage == 2
+    assert leg.stop_distance == pytest.approx(20.5 / 200)              # d × L × 100 = min + buffer
+    assert leg.sl_margin_pct == pytest.approx(20.5)
+
+
+def test_short_widened_stop_sits_above_the_bid(policy):
+    configs = [leverage_config(direction="SHORT", min_sl_pct=6.0)]
+    elig = rows(EURUSD=eligibility_row("EURUSD", 104, configs=configs))
+    (leg,) = build(policy, {"EURUSD": -0.1}, eligibility=elig).legs
+    assert leg.stop_distance == pytest.approx(0.065)
+    assert leg.sl_rate == pytest.approx(1.1 * 1.065)
+
+
+@pytest.mark.parametrize("flags", [{"allow_edit_stop_loss": False}, {"allow_sl_tp": False}])
+def test_config_that_cannot_carry_our_stop_is_skipped(policy, flags):
+    elig = rows(SPX500=eligibility_row("SPX500", 101, configs=[leverage_config(**flags)]))
+    # resolve_vehicle already refuses such a config; a caller-supplied choice is refused by the planner
+    assert "SPX: no_eligible_vehicle" in build(policy, {"SPX": 0.1}, eligibility=elig).skipped
+    config = elig["SPX500"].leverage_configs[0]
+    assert select_config(elig["SPX500"], "long", 1) is None
+
+    def forced(line, direction, lev):
+        return VehicleChoice(symbol="SPX500", instrument_id=101, settlement="cfd", leverage=1, config=config)
+
+    plan = build(policy, {"SPX": 0.1}, eligibility=elig, vehicle_for=forced)
+    assert plan.legs == [] and "SPX: stop_not_allowed" in plan.skipped
+
+
+def test_crossed_quote_never_opens(policy):
+    qs = quotes()
+    qs["SPX500"] = Quote(symbol="SPX500", instrument_id=101, bid=100.2, ask=100.1, at=NOW)
+    plan = build(policy, {"SPX": 0.1}, qs=qs)
+    assert plan.legs == [] and "SPX: crossed_quote" in plan.skipped
 
 
 def test_missing_stop_distance_never_opens(policy):
@@ -322,3 +388,154 @@ def test_nav_must_be_positive(policy):
         build_plan(snapshot=snapshot(), target_w={}, vehicle_for=lambda *a: None, quotes={},
                    stop_distance={}, leverage_for={}, eligibility={}, cost_bps=lambda *a: (0, 0),
                    nav_usd=0.0, policy=policy)
+
+
+# ------------------------------------------------------------------------------ snapshot exposure
+def test_held_line_at_snapshot_exposure_produces_no_legs(policy):
+    # the quote says 10 × 100 = 0.10, the broker says 0.15: the engine held SPX at 0.15
+    held = pos(1, "SPX500", 10, exposure=1_500.0)
+    plan = build(policy, {"SPX": 0.15}, held)
+    assert plan.legs == [] and plan.skipped == []
+    assert plan.gross_before == pytest.approx(0.15) and plan.gross_after == pytest.approx(0.15)
+    # control: without the broker figure the quote-based weight (0.10) would add a tranche
+    assert [leg.kind for leg in build(policy, {"SPX": 0.15}, pos(1, "SPX500", 10)).legs] == ["open"]
+
+
+def test_reduce_is_sized_from_snapshot_exposure(policy):
+    p = pos(1, "SPX500", 10, exposure=2_000.0)            # 200 per unit per the broker
+    (leg,) = build(policy, {"SPX": 0.1}, p).legs
+    assert (leg.kind, leg.position_id) == ("partial_close", 1)
+    assert leg.units == pytest.approx(5.0)                # 1000 / 200, not 1000 / bid 100
+    assert leg.weight_before == pytest.approx(0.2) and leg.weight_after == pytest.approx(0.1)
+
+
+def test_to_zero_lands_exactly_on_zero_with_snapshot_exposure(policy):
+    plan = build(policy, {"SPX": 0.0}, pos(1, "SPX500", 10, exposure=1_234.5))
+    (leg,) = plan.legs
+    assert leg.weight_before == pytest.approx(0.12345) and leg.weight_after == 0.0
+    assert leg.amount_usd == pytest.approx(1_234.5)
+
+
+def test_unquoted_position_falls_back_to_broker_close_rate_then_open_rate(policy):
+    qs = quotes(without=("SPX500",))
+    plan = build(policy, {"NDX": 0.1}, pos(1, "SPX500", 10, close_rate=120.0), qs=qs)
+    assert plan.gross_before == pytest.approx(0.12)       # 10 × close rate 120
+    plan = build(policy, {"NDX": 0.1}, pos(1, "SPX500", 10), qs=qs)
+    assert plan.gross_before == pytest.approx(10 * 100.1 / NAV)   # open rate
+
+
+# ------------------------------------------------------------------------------ target lines only
+def _decision(base_w, final_w):
+    return RiskDecision(
+        raw_levels={}, banded_levels={}, base_w=base_w, proposed_w=final_w, final_w=final_w,
+        checks=[], gross=0.0, net=0.0, margin_use=0.0, stop_budget_used=0.0,
+        stop_budget_limit=0.0, carry_bps_day=0.0, ex_ante_vol=0.0, basis="council",
+    )
+
+
+def test_changed_targets_keeps_only_changed_lines():
+    decision = _decision(
+        base_w={"SPX": 0.15, "NDX": 0.10, "EURUSD": -0.05},
+        final_w={"SPX": 0.15, "NDX": 0.0, "GOLD": 0.05, "EURUSD": -0.05 + 1e-9},
+    )
+    assert changed_targets(decision) == {"GOLD": 0.05, "NDX": 0.0}
+    assert changed_targets(_decision({"SPX": 0.1}, {})) == {"SPX": 0.0}   # dropped from final = 0
+
+
+def test_only_changed_lines_are_planned_from_a_risk_decision(policy):
+    book = (
+        pos(1, "SPX500", 10, exposure=1_500.0),           # held at 0.15
+        pos(2, "NSDQ100", 5, exposure=1_000.0),           # cut to 0
+        pos(3, "EURUSD", 500, is_buy=False, exposure=550.0),   # held short, off its quote value
+    )
+    decision = _decision(
+        base_w={"SPX": 0.15, "NDX": 0.10, "EURUSD": -0.055},
+        final_w={"SPX": 0.15, "NDX": 0.0, "GOLD": 0.05, "EURUSD": -0.055},
+    )
+    plan = build(policy, changed_targets(decision), *book)
+    assert [(leg.kind, leg.line) for leg in plan.legs] == [("close", "NDX"), ("open", "GOLD")]
+
+
+def test_a_line_absent_from_target_never_gets_a_leg(policy):
+    book = (pos(1, "SPX500", 30), pos(2, "NSDQ100", 5), pos(3, "GOLD", 10, is_buy=False))
+    assert build(policy, {}, *book).legs == []
+    for target in ({"NDX": 0.5}, {"NDX": -0.05}, {"NDX": 0.0}):
+        plan = build(policy, target, *book)
+        assert plan.legs and {leg.line for leg in plan.legs} == {"NDX"}
+
+
+def test_every_leg_carries_line_and_whole_units(policy):
+    elig = rows(GOLD=eligibility_row("GOLD", 103, units_quantity_type="WholeUnits"))
+    plan = build(policy, {"SPX": 0.0, "GOLD": 0.1, "EURUSD": -0.05}, pos(1, "SPX500", 10), eligibility=elig)
+    assert {(leg.symbol, leg.line, leg.whole_units) for leg in plan.legs} == {
+        ("SPX500", "SPX", False), ("GOLD", "GOLD", True), ("EURUSD", "EURUSD", False),
+    }
+    close = build(policy, {"GOLD": 0.0}, pos(1, "GOLD", 10), eligibility=elig).legs[0]
+    assert close.kind == "close" and close.line == "GOLD" and close.whole_units
+
+
+def test_unmapped_target_line_is_locked_without_a_second_note(policy):
+    stray = Position(position_id=9, instrument_id=999, symbol="UNMAPPED_999", is_buy=True,
+                     units=10, open_rate=10.0, amount=100.0, sl_rate=9.0)
+    plan = build(policy, {"UNMAPPED_999": 0.0}, stray)
+    assert plan.legs == [] and plan.skipped == ["UNMAPPED_999: unmapped_position_locked"]
+
+
+# ------------------------------------------------------------------------------ flatten
+def flatten(policy, *positions, eligibility=None, symbol_for=None, qs=None):
+    return build_flatten_plan(
+        snapshot=snapshot(*positions), quotes=qs if qs is not None else quotes(),
+        eligibility=eligibility or rows(), nav_usd=NAV, policy=policy, symbol_for=symbol_for,
+    )
+
+
+def test_flatten_closes_every_position_uncapped_including_unmapped(policy):
+    stray = Position(position_id=99, instrument_id=999, symbol="UNMAPPED_999", is_buy=False,
+                     units=10, open_rate=10.0, amount=100.0, sl_rate=11.0, exposure_usd=105.0)
+    book = [pos(i, s, 2, age_h=i) for i, s in enumerate(["SPX500"] * 3 + ["NSDQ100"] * 3 + ["GOLD"] * 3, 1)]
+    book += [pos(20, "EURUSD", 100), pos(21, "EURUSD", 50, is_buy=False), stray]   # hedged + unmapped
+    plan = flatten(policy, *book)
+    assert policy.risk["proposal"]["max_legs"] < len(book)
+    assert len(plan.legs) == len(book) and plan.skipped == []
+    assert {leg.kind for leg in plan.legs} == {"close"}
+    assert not any(leg.risk_increasing for leg in plan.legs)
+    assert sorted(leg.position_id for leg in plan.legs) == sorted(p.position_id for p in book)
+    assert [leg.seq for leg in plan.legs] == list(range(1, len(book) + 1))
+    unmapped = next(leg for leg in plan.legs if leg.position_id == 99)
+    assert (unmapped.symbol, unmapped.line, unmapped.direction) == ("UNMAPPED_999", "UNMAPPED_999", "short")
+    assert unmapped.weight_before == pytest.approx(-0.0105) and unmapped.weight_after == 0.0
+    assert plan.gross_after == pytest.approx(0.0) and plan.net_after == pytest.approx(0.0)
+    assert plan.gross_before == pytest.approx(sum(
+        (p.exposure_usd if p.exposure_usd is not None else p.units * (PRICES[p.symbol][1] if p.is_buy else PRICES[p.symbol][2]))
+        for p in book
+    ) / NAV)
+
+
+def test_flatten_orders_largest_reduction_first_and_uses_snapshot_exposure(policy):
+    plan = flatten(policy, pos(1, "SPX500", 1, exposure=50.0), pos(2, "GOLD", 1, exposure=900.0))
+    assert [leg.symbol for leg in plan.legs] == ["GOLD", "SPX500"]
+    assert plan.legs[0].weight_before == pytest.approx(0.09)
+
+
+def test_flatten_resolves_unmapped_symbols_with_symbol_for(policy):
+    known_late = Position(position_id=7, instrument_id=103, symbol="UNMAPPED_103", is_buy=True,
+                          units=4, open_rate=50.0, amount=200.0, sl_rate=45.0)
+    plan = flatten(policy, known_late, symbol_for={103: "GOLD"})
+    (leg,) = plan.legs
+    assert (leg.symbol, leg.line, leg.instrument_id, leg.position_id) == ("GOLD", "GOLD", 103, 7)
+    assert leg.amount_usd == pytest.approx(4 * 50.0)      # GOLD bid
+    plan = flatten(policy, known_late, symbol_for=lambda iid: None)
+    assert plan.legs[0].line == "UNMAPPED_103"
+
+
+def test_flatten_plans_a_close_even_when_eligibility_forbids_it(policy):
+    elig = rows(SPX500=eligibility_row("SPX500", 101, allow_close=False))
+    (leg,) = flatten(policy, pos(1, "SPX500", 3), eligibility=elig).legs
+    assert leg.kind == "close" and "close not allowed" in leg.reason
+
+
+def test_flatten_of_an_empty_book_is_empty(policy):
+    plan = flatten(policy)
+    assert plan.legs == [] and plan.gross_before == 0.0 and plan.gross_after == 0.0
+    with pytest.raises(ValueError):
+        build_flatten_plan(snapshot=snapshot(), quotes={}, eligibility={}, nav_usd=0.0, policy=policy)

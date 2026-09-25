@@ -8,6 +8,8 @@ Rules:
   - Code assigns `K:<role>:<n>` to kept cards, in the order the model wrote them.
   - A `news_material` card is qualifying only if a code `vol_shock` card on a shared line exists
     within the last 24h; `corroborated_by` lists those vol cards. `news_context` never qualifies.
+    The council passes only THIS cycle's vol cards (card IDs are per cycle; no carry-forward in
+    v1), so in practice the vol card must be live at the slot.
   - Macro drivers citing unknown IDs are dropped; sleeve tilts for unknown sleeves are dropped.
 """
 

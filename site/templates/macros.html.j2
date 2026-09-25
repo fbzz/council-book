@@ -20,7 +20,7 @@
 {% macro evidence(refs) %}
 {% for r in refs %}
 {% if r.kind == "broker_feed" %}<span class="ev ev-feed" title="Broker feed item: cited by id, text not republished">{{ r.id }}</span>
-{% elif r.kind == "fred" %}<span class="ev ev-fred" title="FRED series{% if not r.publishable %}; value not publishable{% endif %}">FRED {{ r.series }}{% if r.as_of %} {{ r.as_of }}{% endif %}{% if r.publishable and r.value is not none %} = {{ r.value }}{% endif %}</span>
+{% elif r.kind == "fred" %}<span class="ev ev-fred" title="FRED series{% if not r.publishable %}; value not publishable{% endif %}">FRED {{ r.series }}{% if r.measure %} {{ r.measure }}{% endif %}{% if r.as_of %} {{ r.as_of }}{% endif %}{% if r.publishable and r.value is not none %} = {{ r.value }}{% if r.unit == "pct" %}%{% elif r.unit %} {{ r.unit }}{% endif %}{% endif %}</span>
 {% else %}<span class="ev ev-{{ r.kind }}">{{ r.id }}</span>
 {% endif %}
 {% endfor %}

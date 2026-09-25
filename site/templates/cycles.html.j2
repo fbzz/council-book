@@ -16,7 +16,7 @@
 {% if cycles %}
 <div class="table-wrap">
 <table class="wide">
-  <thead><tr><th>Cycle</th><th>Run</th><th>Basis</th><th>Legs</th><th>Cost</th><th>Decision</th><th>Seal</th></tr></thead>
+  <thead><tr><th>Cycle</th><th>Run</th><th>Basis</th><th>Legs</th><th>Cost</th><th>Lowest agreement</th><th>Control</th><th>Decision</th><th>Seal</th></tr></thead>
   <tbody>
   {% for cv in cycles %}
   {% set c = cv.doc %}
@@ -26,7 +26,9 @@
     <td>{{ (c.basis or "—") | replace("_", " ") }}</td>
     <td class="n">{{ c.plan.legs | length if c.plan else 0 }}</td>
     <td class="n">{{ c.plan.cost_bp_total | bp if c.plan else "—" }}</td>
-    <td>{{ m.chip(cv.chip) }}</td>
+    <td class="n">{{ cv.min_agreement_pct | pct }}</td>
+    <td>{% if cv.control_agrees is none %}—{% elif cv.control_agrees %}same{% else %}<strong>differs</strong>{% endif %}</td>
+    <td>{{ m.chip(cv.chip) }}{% if cv.human_outcome not in ("none", "pending") %} <span class="muted small">{{ cv.human_outcome | replace("_", " ") }}</span>{% endif %}</td>
     <td>{% if cv.verified %}<span class="chip state-executed">VERIFIED</span>{% elif cv.commitment %}<span class="chip state-sealed">SEALED</span>{% else %}<span class="chip state-warn">NO SEAL</span>{% endif %}</td>
   </tr>
   {% endfor %}
@@ -43,10 +45,10 @@
   <li><strong>Why we met</strong> — the code's reasons for this cycle.</li>
   <li><strong>Evidence cards</strong> — analysts' claims, each citing facts by id. Broker news is cited by id only.</li>
   <li><strong>Bull vs bear</strong> — the debate, with the bear's rebuttals.</li>
-  <li><strong>PM decision</strong> — three independent replicates and the medoid that was used.</li>
+  <li><strong>PM decision</strong> — three independent replicates, the medoid that was used, how many replicates agreed with its action on each line, and the single-agent control.</li>
   <li><strong>Raw → final</strong> — what the PM asked for, what the bands allowed, and what the risk engine kept.</li>
   <li><strong>Costs and legs</strong> — every leg in multiples of NAV, with its cost in basis points.</li>
-  <li><strong>Human outcome</strong> — approved, rejected or expired.</li>
+  <li><strong>Human outcome</strong> — approved, rejected or expired, and for executed decisions every leg's target and filled weight, slippage and cost. The cycle is sealed before the decision, so the outcome is published separately.</li>
 </ol>
 {% endcall %}
 {% endblock %}

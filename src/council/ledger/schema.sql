@@ -39,13 +39,17 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 CREATE INDEX IF NOT EXISTS decisions_by_state ON decisions (state);
 
+-- actor: who moved the decision (operator, executor, runner, system); process_role: the writing
+-- process's COUNCIL_ROLE. Only actor 'operator' may move a decision to 'approved' (schema v2).
 CREATE TABLE IF NOT EXISTS decision_events (
     event_id     INTEGER PRIMARY KEY AUTOINCREMENT,
     decision_id  TEXT NOT NULL REFERENCES decisions (decision_id),
     from_state   TEXT,
     to_state     TEXT NOT NULL,
     reason       TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    actor        TEXT NOT NULL DEFAULT 'system',
+    process_role TEXT
 );
 CREATE INDEX IF NOT EXISTS decision_events_by_decision ON decision_events (decision_id);
 
@@ -80,6 +84,7 @@ CREATE TABLE IF NOT EXISTS legs (
     UNIQUE (decision_id, seq)
 );
 CREATE INDEX IF NOT EXISTS legs_by_state ON legs (state);
+CREATE INDEX IF NOT EXISTS legs_by_line ON legs (line);
 
 CREATE TABLE IF NOT EXISTS positions_observed (
     observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,6 +105,7 @@ CREATE TABLE IF NOT EXISTS broker_events (
     payload_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS broker_events_by_decision ON broker_events (decision_id);
+CREATE INDEX IF NOT EXISTS broker_events_by_kind ON broker_events (kind, at);
 
 CREATE TABLE IF NOT EXISTS equity_marks (
     mark_id     INTEGER PRIMARY KEY AUTOINCREMENT,

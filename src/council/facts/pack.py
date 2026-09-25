@@ -2,14 +2,19 @@
 
 Admission rules (nothing later than the slot is admissible):
 - Market/vol facts carry the availability time of the bar they were computed from. States must be
-  computed as of the slot (features.market_state(now=slot)).
+  computed as of the slot (features.market_state(now=slot)). That time is the state's
+  `bar_available_at`; the `bar_available_at` keyword is a fallback for states without one, and
+  the last resort is slot - data_age_h.
 - News: available_at strictly before the slot (an item stamped at the slot instant can only have
   been read during the cycle) and at most 48 h old; newest 40, de-duplicated by ID.
 - Macro: an observation is used only once fred.available_at(D) <= slot; the newest such value.
+  Licensed series (fred.READ_ONLY) and unknown series get `Fact.publishable = False`: agents
+  read them, public documents never show their values.
 - Events: scheduled events in [slot - 24 h, slot + 7 d] (upcoming events are public by schedule,
   and the event block needs them). An event whose schedule became known after the slot (per
-  `event_known_at`) is dropped.
-- Cost facts: available_at <= slot, and each must be a C: fact of kind "cost".
+  `EventItem.known_at`, else the `event_known_at` keyword) is dropped.
+- Cost facts: available_at <= slot, and each must be a C: fact of kind "cost"
+  (`cost_facts_from_quotes` builds them from the cycle's floored quotes).
 
 Freezing rules (a frozen line is not in `admitted` and gets no legs):
 - no_data: no usable daily bar, or no trend / sigma (history too short).
@@ -35,7 +40,7 @@ from council import clock
 from council.data import fred
 from council.data.bars import to_utc
 from council.data.feeds import sort_news
-from council.facts.evidence_ids import fact_id, macro_id, vol_id
+from council.facts.evidence_ids import cost_id, fact_id, macro_id, vol_id
 from council.models.facts import EventItem, Fact, FactPack, MarketState, NewsItem
 from council.policy import Policy
 
@@ -122,7 +127,8 @@ def market_facts(state: MarketState, *, available_at: datetime, slot: datetime) 
 
 def macro_facts(macro: Mapping[str, pd.Series], *, slot: datetime) -> tuple[list[Fact], list[str]]:
     """M: facts from the newest available observation of each series, plus a 20-observation
-    change (bps for rates, % for indices). Licensed series are marked `fred:no_publish`."""
+    change (bps for rates, % for indices). Licensed and unknown series carry
+    `publishable=False` (fred.is_publishable fails closed); the source stays "fred"."""
     facts: list[Fact] = []
     flags: list[str] = []
     for sid in sorted(macro):
@@ -137,12 +143,13 @@ def macro_facts(macro: Mapping[str, pd.Series], *, slot: datetime) -> tuple[list
         day = pd.Timestamp(usable.index[-1]).date()
         value = float(usable.iloc[-1])
         at = fred.available_at(day)
-        source = "fred" if fred.is_publishable(sid) else "fred:no_publish"
+        source = "fred"
+        publishable = fred.is_publishable(sid)
         kind = fred.series_kind(sid)
         if kind in ("rate", "vol"):
             facts.append(
                 Fact(id=macro_id(sid, day), kind="macro", value=round(value, 3), unit="pct",
-                     available_at=at, source=source)
+                     available_at=at, source=source, publishable=publishable)
             )
         if len(usable) > MACRO_CHANGE_OBS:
             prev = float(usable.iloc[-1 - MACRO_CHANGE_OBS])
@@ -150,13 +157,13 @@ def macro_facts(macro: Mapping[str, pd.Series], *, slot: datetime) -> tuple[list
                 facts.append(
                     Fact(id=macro_id(f"{sid}.chg20", day), kind="macro",
                          value=round((value - prev) * 100.0, 1), unit="bps",
-                         available_at=at, source=source)
+                         available_at=at, source=source, publishable=publishable)
                 )
             elif kind == "index" and prev > 0:
                 facts.append(
                     Fact(id=macro_id(f"{sid}.chg20", day), kind="macro",
                          value=round((value / prev - 1.0) * 100.0, 3), unit="pct",
-                         available_at=at, source=source)
+                         available_at=at, source=source, publishable=publishable)
                 )
         elif kind == "index":
             flags.append(f"macro_short:{sid}")
@@ -176,7 +183,8 @@ def admissible_news(news: Iterable[NewsItem], slot: datetime) -> list[NewsItem]:
 def admissible_events(
     events: Iterable[EventItem], slot: datetime, known_at: Mapping[str, datetime] | None = None
 ) -> list[EventItem]:
-    """Scheduled events inside [slot - 24 h, slot + 7 d] whose schedule was known by the slot."""
+    """Scheduled events inside [slot - 24 h, slot + 7 d] whose schedule was known by the slot
+    (the event's own `known_at` first, else `known_at[event.id]`; unknown = public in advance)."""
     lo, hi = slot - EVENT_LOOKBACK, slot + EVENT_HORIZON
     known = known_at or {}
     unique: dict[str, EventItem] = {}
@@ -184,7 +192,7 @@ def admissible_events(
         when = to_utc(event.at_utc)
         if not lo <= when <= hi:
             continue
-        seen = known.get(event.id)
+        seen = event.known_at if event.known_at is not None else known.get(event.id)
         if seen is not None and to_utc(seen) > slot:
             continue
         unique.setdefault(event.id, event)
@@ -202,9 +210,59 @@ def admissible_costs(cost_facts: Iterable[Fact], slot: datetime) -> list[Fact]:
     return out
 
 
+_COST_FIELDS: tuple[tuple[str, str, int], ...] = (
+    # (quote attribute = id field, unit, digits)
+    ("per_side_bps", "bps", 2),
+    ("carry_bps_day", "bps_day", 3),
+)
+
+
+def _quote_attr(quote: object, name: str) -> object:
+    return quote.get(name) if isinstance(quote, Mapping) else getattr(quote, name, None)
+
+
+def _finite(raw: object) -> float | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def cost_facts_from_quotes(quotes: Mapping[str, object], *, slot: datetime) -> list[Fact]:
+    """C:<line>:per_side_bps (bps) and C:<line>:carry_bps_day (bps_day) facts from the cycle's
+    floored cost quotes, keyed by LINE (a CostQuote, or any object or mapping with those fields).
+
+    Every fact is available at the slot. Missing or non-finite values are skipped; a key that is
+    not a line name raises. The source says what set the price when the quote knows it:
+    "costs:floor" (a policy floor) or "costs:whatif" (the broker what-if), else "costs"."""
+    at = to_utc(slot).to_pydatetime()
+    facts: list[Fact] = []
+    for line in sorted(quotes, key=str):
+        if not isinstance(line, str):
+            raise ValueError(f"cost quotes must be keyed by line, got {line!r}")
+        quote = quotes[line]
+        if quote is None:
+            continue
+        floor = _quote_attr(quote, "floor_applied")
+        source = "costs" if floor is None else ("costs:floor" if floor else "costs:whatif")
+        for field, unit, digits in _COST_FIELDS:
+            value = _finite(_quote_attr(quote, field))
+            if value is not None:
+                facts.append(Fact(id=cost_id(line, field), kind="cost", symbol=line,
+                                  value=round(value, digits), unit=unit,  # type: ignore[arg-type]
+                                  available_at=at, source=source))
+    return facts
+
+
 def _bar_time(sym: str, state: MarketState, slot: datetime, given: Mapping[str, datetime] | None) -> datetime | None:
-    """Newest bar's availability: from `given`, else reconstructed as slot - data_age_h (rounded
-    to the minute; valid because states are computed as of the slot)."""
+    """Newest bar's availability: the state's `bar_available_at`, else from `given`, else
+    reconstructed as slot - data_age_h (rounded to the minute; valid because states are computed
+    as of the slot)."""
+    if state.bar_available_at is not None:
+        return to_utc(state.bar_available_at).to_pydatetime()
     if given and given.get(sym) is not None:
         return to_utc(given[sym]).to_pydatetime()
     if state.data_age_h is None:
@@ -269,8 +327,10 @@ def build_fact_pack(
         }
         if bar_at is not None:
             update["data_age_h"] = round((slot_t - bar_at).total_seconds() / 3600.0, 3)
+            update["bar_available_at"] = bar_at
         elif "future_data" in reasons:
             update["data_age_h"] = None
+            update["bar_available_at"] = None
         new_state = state.model_copy(update=update)
         out_states[sym] = new_state
         if bar_at is not None:

@@ -1,7 +1,8 @@
 """Structural boundaries, checked on the source tree (AST), not by convention.
 
 - Only council/operator/ and council/execution/ may import the broker writer.
-- The public-record packages (publish/, scoring/) import neither the broker nor the Keychain.
+- The public-record packages (publish/, scoring/) import neither the broker nor the Keychain,
+  nor the private execution/ledger layers (the execution report is read by duck typing).
 """
 
 from __future__ import annotations
@@ -82,9 +83,14 @@ def test_public_record_packages_never_touch_the_broker_or_keychain(package):
         if _top_dir(path) != package:
             continue
         for name in imported_names(path):
-            if name.startswith("council.broker") or name.startswith("council.operator.keychain"):
+            if name.startswith(PRIVATE_FOR_PUBLIC_RECORD):
                 offenders.append(f"{path.relative_to(REPO_ROOT)} -> {name}")
     assert offenders == []
+
+
+PRIVATE_FOR_PUBLIC_RECORD = (
+    "council.broker", "council.operator.keychain", "council.execution", "council.ledger",
+)
 
 
 def test_detector_catches_every_import_form(tmp_path):

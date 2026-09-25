@@ -3,16 +3,18 @@
 Layout (every path is under `journal/`; `cycle_id` is the only key):
   journal/status.json
   journal/commitments/YYYY/MM/<cycle>.json         sealed before approval
-  journal/cycles/YYYY/MM/<cycle>.json              revealed cycle document
+  journal/cycles/YYYY/MM/<cycle>.json              revealed cycle: the EXACT sealed bytes
   journal/cycles/YYYY/MM/<cycle>.reveal.json       its salt
-  journal/executions/YYYY/MM/<cycle>.json
+  journal/executions/YYYY/MM/<cycle>.json          final outcome of an executed decision
   journal/book/latest.json
   journal/performance/index.jsonl                  one row per day (as_of)
   journal/ops/cycles.jsonl                         one row per cycle
   journal/incidents/INC-####.md
 
 Writers return `{relpath: bytes}` for `Publisher.publish`; they never touch git themselves.
-A reveal is emitted only if it re-hashes to the published commitment.
+A reveal is emitted only if the exact sealed bytes re-hash to the published commitment. The
+sealed document is never rebuilt: the final decision outcome is published in the ops row
+(`ops_files`) and, for executed decisions, the execution file (`execution_files`).
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from council.publish import commit_reveal
 from council.publish.public_models import (
@@ -96,13 +98,28 @@ def commitment_files(commitment: PublicCommitment) -> dict[str, bytes]:
     return {commitment_path(commitment.cycle_id): dump_json(commitment)}
 
 
-def reveal_files(cycle: PublicCycleV1, reveal: PublicReveal) -> dict[str, bytes]:
-    """The revealed cycle and its salt. Refuses a reveal that does not open the commitment."""
-    if cycle.cycle_id != reveal.cycle_id:
-        raise JournalError("reveal and cycle ids differ")
-    if not commit_reveal.verify(cycle, reveal.salt, reveal.commitment_sha256):
-        raise JournalError(f"reveal for {cycle.cycle_id} does not match its commitment")
-    return {cycle_path(cycle.cycle_id): dump_json(cycle), reveal_path(cycle.cycle_id): dump_json(reveal)}
+def reveal_files(sealed: bytes, salt_hex: str, commitment: PublicCommitment | str) -> dict[str, bytes]:
+    """The revealed cycle (the EXACT sealed bytes, unchanged) and its salt.
+
+    `commitment` is the PUBLISHED commitment (or its sha256). Refuses, before anything is written,
+    bytes that do not open the commitment, that are not the canonical JSON of a valid
+    `PublicCycleV1`, or whose cycle id differs from the commitment's."""
+    if not isinstance(sealed, bytes | bytearray):
+        raise JournalError("a reveal takes the exact sealed bytes")
+    sealed = bytes(sealed)
+    sha = commitment.commitment_sha256 if isinstance(commitment, PublicCommitment) else str(commitment)
+    if not commit_reveal.verify_bytes(sealed, salt_hex, sha):
+        raise JournalError("sealed bytes and salt do not open the commitment")
+    try:
+        cycle = PublicCycleV1.model_validate_json(sealed)
+    except ValidationError as exc:
+        raise JournalError(f"sealed bytes are not a valid public cycle ({exc.error_count()} errors)") from None
+    if commit_reveal.canonical_json(cycle) != sealed:
+        raise JournalError(f"sealed bytes for {cycle.cycle_id} are not the canonical public document")
+    if isinstance(commitment, PublicCommitment) and commitment.cycle_id != cycle.cycle_id:
+        raise JournalError("commitment and cycle ids differ")
+    reveal = PublicReveal(cycle_id=cycle.cycle_id, salt=salt_hex.lower(), commitment_sha256=sha.lower())
+    return {cycle_path(cycle.cycle_id): sealed, reveal_path(cycle.cycle_id): dump_json(reveal)}
 
 
 def status_files(status: PublicStatus) -> dict[str, bytes]:

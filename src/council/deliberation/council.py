@@ -1,7 +1,17 @@
 """One council run: officers -> analysts -> debate -> PM x3 -> audit -> enforce -> medoid.
 
 Rules:
-  - Code officers (vol, event) run first; LLM analysts see their cards.
+  - Code officers (vol, event) run first; LLM analysts see their cards. The orchestrator normally
+    builds them once (with `now = slot`) for its bands and passes them as `code_cards`; the
+    council rebuilds them only when `code_cards` is None. Card IDs are per cycle: there is no
+    vol-card hysteresis in v1 and no card is carried forward from an earlier cycle (news_material
+    corroboration uses this cycle's vol cards only).
+  - Bands: `bands` are the bands for the code cards. They drive the specialists' desk and the
+    single-agent control (whose information set is the code cards). After the specialists,
+    `bands_fn(all cards)` (code + news + macro) recomputes the bands, so a qualifying news card
+    can unlock a cut; those FINAL bands drive the council's desk pack, debate, PM, audit and
+    enforce, and are returned as `CouncilResult.bands`. Without `bands_fn` (or if it raises,
+    flagged `bands_fn_error`) the given bands are final.
   - Call budget: the planned role calls must fit `council.max_calls_per_cycle`; optional stages are
     dropped in `council.drop_order_when_over_budget` order (single-agent control, macro, news).
     The debate and the PM always run. Dropped stages are recorded as `skipped` calls.
@@ -56,6 +66,7 @@ from council.models.risk import Band, DecisionBasis
 from council.policy import LineSpec, Policy
 
 Enforce = Callable[[dict[str, float], dict[str, Band]], tuple[dict[str, float], list[str]]]
+BandsFn = Callable[[list[EvidenceCard]], dict[str, Band]]
 Sleep = Callable[[float], Awaitable[None]]
 OUTAGE_STATUSES = frozenset({"transport", "timeout"})
 DEFAULT_DROP_ORDER = ("single_agent_control", "macro", "news")
@@ -74,6 +85,7 @@ class CouncilResult(Strict):
     dropped: list[str] = Field(default_factory=list)       # card drops, debate normalisation notes
     flags: list[str] = Field(default_factory=list)         # budget drops, outages
     enforce_notes: dict[str, list[str]] = Field(default_factory=dict)
+    bands: dict[str, Band] = Field(default_factory=dict)   # final bands the council actually used
     prompt_manifest_sha: str = ""
     desk_sha: str = ""
     raw: dict[str, str] = Field(default_factory=dict)      # PRIVATE transcripts (never published)
@@ -141,9 +153,15 @@ async def run_council(
     run_single_agent: bool = True,
     run_macro: bool = False,
     sleep: Sleep = asyncio.sleep,
-    prior_vol_cards: Sequence[tuple[EvidenceCard, datetime]] = (),
+    code_cards: list[EvidenceCard] | None = None,
+    bands_fn: BandsFn | None = None,
 ) -> CouncilResult:
-    """Run the council for one cycle. Never raises on LLM failures (they become statuses/flags)."""
+    """Run the council for one cycle. Never raises on LLM failures (they become statuses/flags).
+
+    `code_cards`: this cycle's vol/event officer cards (built once by the orchestrator with
+    `now = slot`); None rebuilds them here from `pack` and `now`.
+    `bands_fn`: called once after the specialists with ALL cards; its bands are the ones the
+    desk pack, debate, PM, audit and enforce use (see the module rules)."""
     ctx = prompt_context(policy)
     ref_levels = reference_levels(ref, lines)
     current = {ln.symbol: float(current_levels.get(ln.symbol, 0.0)) for ln in lines}
@@ -179,18 +197,20 @@ async def run_council(
         flags.append(f"stage_unavailable:{stage}")
         return _Stage(result, stage_calls, True)
 
-    # 1. code officers
-    code_cards = vol_cards(pack, policy) + event_cards(pack, now, policy)
+    # 1. code officers (this cycle only: no card is carried forward, IDs are per cycle)
+    if code_cards is None:
+        code_cards = vol_cards(pack, policy) + event_cards(pack, now, policy)
+    code_cards = list(code_cards)
     corroborators = [(c, now) for c in code_cards if c.card_type == "vol_shock"]
-    corroborators += list(prior_vol_cards)
+    code_bands: dict[str, Band] = dict(bands)
 
-    def desk(cards: Sequence[EvidenceCard]) -> str:
+    def desk(cards: Sequence[EvidenceCard], use_bands: Mapping[str, Band]) -> str:
         return desk_pack(
-            pack=pack, ref=ref, bands=bands, current_levels=current, cost_hints=cost_hints,
+            pack=pack, ref=ref, bands=use_bands, current_levels=current, cost_hints=cost_hints,
             cards=cards, lines=lines,
         )
 
-    code_desk = desk(code_cards)
+    code_desk = desk(code_cards, code_bands)
     outage = False
 
     # 2. specialists
@@ -230,7 +250,16 @@ async def run_council(
             dropped += spec.macro.dropped
 
     all_cards = code_cards + news_cards + macro_cards
-    full_desk = desk(all_cards)
+
+    # 2b. bands for ALL cards (a qualifying news card can unlock a cut)
+    final_bands: dict[str, Band] = code_bands
+    if bands_fn is not None:
+        try:
+            final_bands = dict(bands_fn(list(all_cards)))
+        except Exception as exc:  # a broken band builder keeps the code-card bands, flagged
+            flags.append(f"bands_fn_error {type(exc).__name__}")
+            final_bands = code_bands
+    full_desk = desk(all_cards, final_bands)
 
     # 3. debate
     debate = Debate()
@@ -285,16 +314,21 @@ async def run_council(
     enforce_notes: dict[str, list[str]] = {}
     dbands = deadbands(policy, lines)
 
-    def finish(role: str, reps: list[PMReplicate], cards: Sequence[EvidenceCard]) -> list[PMReplicate]:
+    def finish(
+        role: str,
+        reps: list[PMReplicate],
+        cards: Sequence[EvidenceCard],
+        use_bands: Mapping[str, Band],
+    ) -> list[PMReplicate]:
         out = []
         for rep in reps:
             res = audit(
-                rep.decision, pack=pack, cards=cards, bands=bands, ref_levels=ref_levels,
+                rep.decision, pack=pack, cards=cards, bands=use_bands, ref_levels=ref_levels,
                 current_levels=current, lines=lines, policy=policy,
             )
             valid = res.valid
             try:
-                clipped, notes = enforce(dict(res.levels), dict(bands))
+                clipped, notes = enforce(dict(res.levels), dict(use_bands))
                 # a line the enforcer drops (no band) goes to its reference, never unclipped
                 enforced = {s: float(clipped.get(s, ref_levels.get(s, 0.0))) for s in res.levels}
             except Exception as exc:  # a broken enforcer must not promote an unclipped book
@@ -307,8 +341,8 @@ async def run_council(
             }))
         return out
 
-    pm_reps = finish("pm", pm_reps, all_cards)
-    sa_reps = finish("single_agent", sa_reps, code_cards)
+    pm_reps = finish("pm", pm_reps, all_cards, final_bands)
+    sa_reps = finish("single_agent", sa_reps, code_cards, code_bands)
 
     if outage:
         agg = AggregateResult(levels=dict(ref_levels), medoid_index=None, basis="council_unavailable")
@@ -329,6 +363,7 @@ async def run_council(
         dropped=dropped,
         flags=flags,
         enforce_notes=enforce_notes,
+        bands=final_bands,
         prompt_manifest_sha=reg.manifest_sha(),
         desk_sha=hashlib.sha256(full_desk.encode()).hexdigest(),
         raw=raw,

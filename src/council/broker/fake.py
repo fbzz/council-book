@@ -193,12 +193,13 @@ def leverage_config(
     min_sl_pct: float = 0.0,
     max_sl_pct: float = 100.0,
     allow_sl_tp: bool = True,
+    allow_edit_stop_loss: bool = True,
 ) -> dict[str, Any]:
     """A raw eligibility leverageConfigs entry, in broker casing."""
     return {
         "settlementType": settlement, "direction": direction,
         "leverageValues": list(leverage_values), "isPotential": is_potential,
-        "minPositionAmount": min_position_amount, "allowEditStopLoss": True,
+        "minPositionAmount": min_position_amount, "allowEditStopLoss": allow_edit_stop_loss,
         "minStopLossPercentage": min_sl_pct, "maxStopLossPercentage": max_sl_pct,
         "defaultStopLossPercentage": max_sl_pct, "allowEditTakeProfit": True,
         "minTakeProfitPercentage": 5.0, "maxTakeProfitPercentage": 1000.0,

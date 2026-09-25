@@ -12,9 +12,11 @@ from council.facts.pack import (
     EVENT_HORIZON,
     NEWS_MAX,
     build_fact_pack,
+    cost_facts_from_quotes,
     effective_age_h,
     is_stale,
 )
+from council.models.broker import CostQuote
 from council.models.facts import EventItem, Fact, NewsItem
 from tests.data.synth import daily_bars, universe_history, utc
 
@@ -135,9 +137,28 @@ def test_upstream_reasons_kept_and_own_reasons_recomputed(policy):
 
 
 def test_state_built_from_future_bar_is_frozen(policy):
-    pack = _pack(policy, bar_available_at={"NDX": SLOT + timedelta(hours=1)})
-    assert pack.states["NDX"].frozen_reason == "future_data" and pack.states["NDX"].data_age_h is None
+    states = market_states(policy, universe_history(policy, "2026-10-01"), now=SLOT)
+    states["NDX"] = states["NDX"].model_copy(update={"bar_available_at": SLOT + timedelta(hours=1)})
+    pack = _pack(policy, states=states)
+    ndx = pack.states["NDX"]
+    assert ndx.frozen_reason == "future_data" and ndx.data_age_h is None and ndx.bar_available_at is None
     assert not any(f.id.startswith(("F:NDX:", "V:NDX:")) for f in pack.facts)
+
+
+def test_state_bar_time_wins_and_keyword_is_only_a_fallback(policy):
+    states = market_states(policy, universe_history(policy, "2026-10-01"), now=SLOT)
+    assert states["NDX"].bar_available_at == utc(2026, 10, 1, 0, 0)
+    # the state's own time wins over a (wrong) keyword value
+    pack = _pack(policy, states=states, bar_available_at={"NDX": SLOT + timedelta(hours=1)})
+    assert "NDX" in pack.admitted and pack.states["NDX"].bar_available_at == utc(2026, 10, 1, 0, 0)
+    assert _facts(pack)["F:NDX:dist_sma200"].available_at == utc(2026, 10, 1, 0, 0)
+    # a state without one falls back to the keyword
+    bare = dict(states, NDX=states["NDX"].model_copy(update={"bar_available_at": None}))
+    late = _pack(policy, states=bare, bar_available_at={"NDX": SLOT + timedelta(hours=1)})
+    assert late.states["NDX"].frozen_reason == "future_data"
+    earlier = _pack(policy, states=bare, bar_available_at={"NDX": utc(2026, 9, 30, 0, 0)})
+    assert earlier.states["NDX"].bar_available_at == utc(2026, 9, 30, 0, 0)
+    assert earlier.states["NDX"].data_age_h == pytest.approx(38.667, abs=1e-3)
 
 
 # ------------------------------------------------------------------------------------ admission
@@ -177,6 +198,16 @@ def test_event_window_and_known_at(policy):
     assert [e.id for e in known.events] == [surprise.id]
 
 
+def test_event_own_known_at_wins_over_the_keyword(policy):
+    surprise = _event("fomc", SLOT + timedelta(days=1))
+    late = surprise.model_copy(update={"known_at": SLOT + timedelta(minutes=30)})
+    assert _pack(policy, events=[late]).events == []
+    assert _pack(policy, events=[late], event_known_at={late.id: SLOT}).events == []
+    early = surprise.model_copy(update={"known_at": SLOT - timedelta(days=30)})
+    kept = _pack(policy, events=[early], event_known_at={early.id: SLOT + timedelta(hours=1)})
+    assert [e.id for e in kept.events] == [early.id]
+
+
 def _series(sid, values, end="2026-09-30"):
     idx = pd.date_range(end=end, periods=len(values), freq="D", tz="UTC")
     return pd.Series(values, index=idx, name=sid, dtype="float64")
@@ -197,8 +228,16 @@ def test_macro_facts_availability_units_and_publication(policy):
     assert facts["M:DGS10@2026-09-30"].available_at == utc(2026, 10, 1, 12, 0)
     assert "M:DTWEXBGS@2026-09-30" not in facts                            # index level is not a %
     assert facts["M:DTWEXBGS.chg20@2026-09-30"].value == pytest.approx(1.0)
-    assert facts["M:VIXCLS@2026-09-30"].source == "fred:no_publish"
-    assert facts["M:DGS10@2026-09-30"].source == "fred"
+    assert facts["M:VIXCLS@2026-09-30"].source == "fred" and facts["M:DGS10@2026-09-30"].source == "fred"
+    assert not facts["M:VIXCLS@2026-09-30"].publishable                   # licensed: read-only
+    assert facts["M:DGS10@2026-09-30"].publishable and facts["M:DGS10.chg20@2026-09-30"].publishable
+    assert facts["M:DTWEXBGS.chg20@2026-09-30"].publishable
+    assert all(f.publishable for f in facts.values() if not f.id.startswith("M:VIXCLS"))
+    licensed = _facts(_pack(policy, macro={"BAMLH0A0HYM2": _series("BAMLH0A0HYM2", [3.1] * 30),
+                                          "NEWSERIES": _series("NEWSERIES", [1.0] * 30)}))
+    assert not licensed["M:BAMLH0A0HYM2@2026-09-30"].publishable
+    assert not licensed["M:BAMLH0A0HYM2.chg20@2026-09-30"].publishable
+    assert not licensed["M:NEWSERIES.chg20@2026-09-30"].publishable        # unknown: fail closed
     assert "M:T10Y2Y@2026-09-30" in facts and "M:T10Y2Y.chg20@2026-09-30" not in facts
     flags = _pack(policy, macro=macro).quality_flags
     assert "macro_missing:DGS2" in flags and "macro_missing:DFF" in flags
@@ -218,3 +257,28 @@ def test_cost_facts_admission(policy):
         _pack(policy, cost_facts=[ok.model_copy(update={"id": "F:NDX:bps_side"})])
     with pytest.raises(ValueError):
         _pack(policy, cost_facts=[ok, ok])
+
+
+def test_cost_facts_from_quotes_are_citable_and_admitted(policy):
+    quoted = SLOT + timedelta(minutes=3)
+    quotes = {
+        "NDX": CostQuote(symbol="EQQQ.L", direction="long", settlement="real", leverage=1,
+                         per_side_bps=7.254, what_if_bps=None, carry_bps_day=0.0,
+                         floor_applied=True, quoted_at=quoted),
+        "GOLD": {"per_side_bps": 12.0, "carry_bps_day": 0.41096, "floor_applied": False},
+        "OIL": {"per_side_bps": float("nan"), "carry_bps_day": 1.2},
+        "SPX": None,
+    }
+    facts = cost_facts_from_quotes(quotes, slot=SLOT)
+    by_id = {f.id: f for f in facts}
+    assert sorted(by_id) == ["C:GOLD:carry_bps_day", "C:GOLD:per_side_bps", "C:NDX:carry_bps_day",
+                             "C:NDX:per_side_bps", "C:OIL:carry_bps_day"]
+    ndx = by_id["C:NDX:per_side_bps"]
+    assert ndx.kind == "cost" and ndx.unit == "bps" and ndx.value == 7.25 and ndx.symbol == "NDX"
+    assert ndx.available_at == SLOT and ndx.source == "costs:floor"
+    assert by_id["C:GOLD:carry_bps_day"].unit == "bps_day" and by_id["C:GOLD:carry_bps_day"].value == 0.411
+    assert by_id["C:GOLD:per_side_bps"].source == "costs:whatif" and by_id["C:OIL:carry_bps_day"].source == "costs"
+    pack = _pack(policy, cost_facts=facts)
+    assert {"C:NDX:per_side_bps", "C:GOLD:carry_bps_day"} <= pack.evidence_ids()
+    with pytest.raises(ValueError):
+        cost_facts_from_quotes({("NDX", "long"): quotes["NDX"]}, slot=SLOT)

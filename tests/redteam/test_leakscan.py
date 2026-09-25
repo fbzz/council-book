@@ -37,6 +37,8 @@ CANARY_NAV = 1234.56
     ("Authorization: Bearer abcdefgh12345678", "bearer"),
     ("send x-user-key with it", "broker_header"),
     ("https://claude.ai/code/artifact/abc", "private_artifact"),
+    ("skipped UNMAPPED_100123: no line", "unmapped_id"),
+    ('{"UNMAPPED_42": 0.01}', "unmapped_id"),
 ])
 def test_value_leaks_are_caught(text, rule):
     rules = {f.rule for f in leakscan.scan(text)}
@@ -104,6 +106,7 @@ def test_findings_never_echo_the_secret():
     "a Bearer token is never stored here; USD-denominated lines are reported in x",
     "vol ratio 2.3, 50/200-day trend, 16 years of data, 0.1234567 rounding",
     "instrument universe of 123456 names and 999999 bars",      # 6 digits: below the id threshold
+    "UNMAPPED: 1 position outside the universe (unmapped_symbols_dropped:1)",
 ])
 def test_ordinary_public_text_is_clean(text):
     assert leakscan.scan(text) == [], leakscan.scan(text)
@@ -151,3 +154,9 @@ def test_clean_text_output_has_no_control_or_bidi_characters(raw):
 @given(st.from_regex(r"\$\s?\d{1,6}(\.\d{2})?", fullmatch=True))
 def test_clean_text_never_lets_a_dollar_amount_through(amount):
     assert not [f for f in leakscan.scan(clean_text(f"cost {amount} today")) if f.rule == "dollar_amount"]
+
+
+@given(st.integers(min_value=1, max_value=10**12))
+def test_clean_text_never_lets_an_unmapped_instrument_id_through(instrument_id):
+    out = clean_text(f"skipped UNMAPPED_{instrument_id}: no line")
+    assert str(instrument_id) not in out and leakscan.scan(out) == []

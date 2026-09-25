@@ -541,12 +541,15 @@ def test_r17_anti_chase_25(policy):
 # ----------------------------------------------------------------------------- R18 - R21
 
 
-def test_r18_daily_bar_age_30h(policy):
+def test_r18_frozen_line_holds_and_raw_age_is_not_rederived(policy):
+    """The pack decides freshness (weekend/holiday-aware, 30 h): a frozen line holds; a raw
+    data_age_h above 30 h on an unfrozen state (e.g. a Friday bar on Monday) does not."""
     pol = loose(policy)
-    stale = states_for(pol, NDX={"data_age_h": 31.0})
-    fresh = states_for(pol, NDX={"data_age_h": 29.0})
-    assert iso(pol, levels={"NDX": 1.0}, states=stale).final_w["NDX"] == 0.0
-    assert iso(pol, levels={"NDX": 1.0}, states=fresh).final_w["NDX"] == pytest.approx(0.35)
+    stale = states_for(pol, NDX={"data_age_h": 31.0, "frozen": True, "frozen_reason": "stale"})
+    raw_old = states_for(pol, NDX={"data_age_h": 62.0})
+    d = iso(pol, levels={"NDX": 1.0}, states=stale)
+    assert d.final_w["NDX"] == 0.0 and any("R18 frozen data" in r for r in d.hold_reasons)
+    assert iso(pol, levels={"NDX": 1.0}, states=raw_old).final_w["NDX"] == pytest.approx(0.35)
 
 
 def test_r18_frozen_reference_share_030(policy):

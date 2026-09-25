@@ -9,6 +9,10 @@ Rules:
     deadband (|move| >= deadband is a move). If no OTHER valid replicate shares that class, the line
     falls back to its reference level. This is the one jitter filter (no two-cycle confirmation).
   - Basis: `council` when no line fell back, else `council_partial_reference`.
+  - `agreement[line]` = share of VALID replicates whose action class on that line matches the
+    medoid's (the class that decided the line), rounded to 6 places; every line of `ref_levels`
+    has an entry. Empty when there is no medoid (fallback_parse). It maps 1:1 onto
+    `CycleRecord.agreement: dict[str, float]`.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ class AggregateResult(Strict):
     medoid_index: int | None                     # the medoid's replicate number
     basis: DecisionBasis
     per_line_fallback: list[str] = Field(default_factory=list)
-    agreement: dict[str, float] = Field(default_factory=dict)   # share of valid reps in medoid's class
+    agreement: dict[str, float] = Field(default_factory=dict)   # per line: share of valid reps in medoid's class
 
 
 def action_class(level: float, current: float, deadband: float) -> ActionClass:

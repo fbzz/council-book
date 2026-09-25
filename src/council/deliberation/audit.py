@@ -8,7 +8,12 @@ Rules (each deviation that breaks one is REVERTED to the reference level):
   - every cited ID exists (a pack evidence ID available by the slot, or a card ID);
   - the direction enum matches the snapped move:
       cut: level < reference; add: level > current; short: level < 0;
-      cover: current < 0 and current < level <= 0; lever: level > 1.0.
+      cover: current < 0 and current < level <= 0; lever: level > 1.0;
+  - SHORTS NEED A CITED RISK_DOWN CARD: a deviation whose snapped level is below 0 (a "short",
+    or any other label that lands below 0, partial covers included) must cite at least one card
+    whose scope includes that line and whose direction is `risk_down`. A `macro_context` card
+    alone is not enough (see `short_card_ids`). The reference never shorts, so a revert always
+    lands at or above 0.
 A replicate is INVALID when its decisive fact cites an unknown ID, or when at least half of its
 listed deviations were reverted. A missing decision is invalid. Band clipping is not the auditor's
 job: `enforce` (risk) clips levels to bands afterwards.
@@ -29,6 +34,8 @@ from council.models.risk import Band
 from council.policy import LineSpec, Policy
 
 EPS = 1e-9
+# Card types that can NOT by themselves justify a short (a regime view is not line evidence).
+SHORT_CARD_EXCLUDED_TYPES: frozenset[str] = frozenset({"macro_context"})
 
 
 class AuditResult(Strict):
@@ -51,6 +58,16 @@ def direction_matches(direction: str, level: float, ref: float, current: float) 
     if direction == "lever":
         return level > 1.0 + EPS
     return False
+
+
+def short_card_ids(cards: Sequence[EvidenceCard], symbol: str) -> list[str]:
+    """IDs of cards that can justify a short on `symbol`: direction `risk_down`, the line in the
+    card's scope, and a card type other than `macro_context`."""
+    return [
+        c.card_id for c in cards
+        if c.direction == "risk_down" and symbol in c.scope
+        and c.card_type not in SHORT_CARD_EXCLUDED_TYPES
+    ]
 
 
 def audit(
@@ -109,6 +126,8 @@ def audit(
                     f"direction_mismatch {dev.direction} level {level:+.2f} "
                     f"ref {ref:+.2f} now {cur:+.2f}"
                 )
+            elif level < -EPS and not set(dev.evidence_ids) & set(short_card_ids(cards, sym)):
+                reason = f"short_without_risk_down_card level {level:+.2f}"
         if reason is not None:
             violations.append(f"{sym}: {reason}")
             reverted.append(sym)

@@ -15,13 +15,19 @@ Rules (policy keys in brackets):
   scaled down once more. Every reduction is recorded in `truncations`, in percent.
 
 `states` and `returns` are keyed by line symbol (NDX); the line's signal ticker (QQQ) is accepted
-as a fallback key. `returns` are daily simple returns on one common calendar.
+as a fallback key. `returns` are daily returns on one common calendar (facts.returns.returns_matrix
+gives log returns; at daily horizons the covariance is the same to second order).
+
+The covariance is exposed for the risk engine: `book_covariance` is the filled covariance this
+module scales with, and `vol_fn(cov)` turns it into the engine's ex-ante vol function (keys the
+covariance does not know, i.e. locked UNMAPPED_* lines, are ignored). Each entry carries the
+line's catastrophe-stop distance (risk.stops) when its state has volatility.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -222,6 +228,70 @@ def _complete_covariance(
     return out
 
 
+def book_covariance(
+    returns: pd.DataFrame | None,
+    lines: Sequence[LineSpec],
+    states: Mapping[str, MarketState],
+    policy: Policy,
+    *,
+    symbols: Sequence[str] | None = None,
+    notes: list[str] | None = None,
+) -> pd.DataFrame:
+    """The filled covariance `build_reference` uses, over `symbols` (default: every line).
+
+    Rule: EWMA covariance [reference.book.covariance_ewma_days] of the last
+    COVARIANCE_LOOKBACK_SPANS spans of returns, annualised [reference.vol.annualisation_days.default],
+    gaps filled conservatively (missing variance from sigma_ann, else the largest known variance;
+    missing covariance at correlation 1; each fill appended to `notes`). Raises ValueError for a
+    symbol that is not a line, or when no requested line has any volatility information."""
+    line_map = {line.symbol: line for line in lines}
+    syms = list(line_map) if symbols is None else list(symbols)
+    unknown = [s for s in syms if s not in line_map]
+    if unknown:
+        raise ValueError(f"not reference lines: {unknown}")
+    span = int(policy.reference["book"]["covariance_ewma_days"])
+    ann = int(policy.reference["vol"]["annualisation_days"]["default"])
+    aligned = _align_returns(returns, lines)
+    if len(aligned) > COVARIANCE_LOOKBACK_SPANS * span:
+        aligned = aligned.iloc[-COVARIANCE_LOOKBACK_SPANS * span :]
+    return _complete_covariance(
+        ewma_covariance(aligned, span, ann), syms, line_map, states, notes if notes is not None else []
+    )
+
+
+def vol_fn(cov: pd.DataFrame) -> Callable[[Mapping[str, float]], float]:
+    """The risk engine's ex-ante vol function over `cov` (see ex_ante_vol). Keys missing from the
+    covariance (locked UNMAPPED_* lines) are ignored instead of raising; a non-finite entry among
+    the known lines still raises."""
+    known = frozenset(str(s) for s in cov.index) & frozenset(str(s) for s in cov.columns)
+
+    def ex_ante(weights: Mapping[str, float]) -> float:
+        return ex_ante_vol({s: float(w) for s, w in weights.items() if s in known}, cov)
+
+    return ex_ante
+
+
+def stop_distances(
+    lines: Sequence[LineSpec], states: Mapping[str, MarketState], policy: Policy
+) -> dict[str, float | None]:
+    """risk.stops catastrophe-stop distance per line; None when the line's state has no
+    volatility (or no state). risk.yaml is validated once per call."""
+    from council.risk.config import risk_limits  # local: keeps reference free of risk at import
+    from council.risk.stops import catastrophe_stop_distance
+
+    cfg = risk_limits(policy).catastrophe_stop
+    out: dict[str, float | None] = {}
+    for line in lines:
+        state = _state(line, states)
+        try:
+            out[line.symbol] = (
+                catastrophe_stop_distance(state, line, policy, cfg=cfg) if state is not None else None
+            )
+        except ValueError:
+            out[line.symbol] = None
+    return out
+
+
 def _vol_hard(policy: Policy) -> float:
     """The stricter of reference.book.ex_ante_vol_hard and risk.ex_ante_vol_hard."""
     limits = [float(policy.reference["book"]["ex_ante_vol_hard"])]
@@ -296,16 +366,11 @@ def build_reference(
         notes.append(f"book: gross {_pct(gross_raw)} above {_pct(gross_max)}, scaled to the limit")
 
     weighted = [s for s, v in raw.items() if v > _EPS]
-    span = int(policy.reference["book"]["covariance_ewma_days"])
-    ann = int(policy.reference["vol"]["annualisation_days"]["default"])
     vol_hard = _vol_hard(policy)
     cov = pd.DataFrame(dtype=float)
     k_vol = 1.0
     if weighted:
-        aligned = _align_returns(returns, lines)
-        if len(aligned) > COVARIANCE_LOOKBACK_SPANS * span:
-            aligned = aligned.iloc[-COVARIANCE_LOOKBACK_SPANS * span :]
-        cov = _complete_covariance(ewma_covariance(aligned, span, ann), weighted, line_map, states, notes)
+        cov = book_covariance(returns, lines, states, policy, symbols=weighted, notes=notes)
         vol_pre = ex_ante_vol({s: raw[s] * k_gross for s in weighted}, cov)
         if vol_pre > vol_hard:
             k_vol = vol_hard / vol_pre
@@ -327,6 +392,7 @@ def build_reference(
     if gross > gross_max + 1e-9:
         raise AssertionError(f"reference book gross {gross} above {gross_max}")
 
+    stops = stop_distances(lines, states, policy)
     entries: dict[str, ReferenceEntry] = {}
     for line in lines:
         state = _state(line, states)
@@ -340,6 +406,7 @@ def build_reference(
             unit_weight=units[line.symbol] * k,
             weight_ref=max(0.0, weights[line.symbol]),
             sigma_ann=state.sigma_ann if state is not None else None,
+            stop_distance=stops[line.symbol],
         )
     if flags is not None:
         flags.extend(notes)

@@ -29,15 +29,58 @@ def test_bad_cycle_ids_are_refused(bad):
         journal.cycle_path(bad)
 
 
-def test_reveal_files_require_a_matching_commitment(record, pack, policy):
+def test_reveal_files_publish_the_exact_sealed_bytes(record, pack, policy):
     doc = public_cycle(record, pack, lines=policy.universe)
-    commitment, salt = commit_reveal.seal(doc)
-    files = journal.reveal_files(doc, commit_reveal.reveal(commitment, salt))
+    commitment, salt, sealed = commit_reveal.seal_bytes(doc)
+    files = journal.reveal_files(sealed, salt, commitment)
+    assert files[journal.cycle_path(doc.cycle_id)] == sealed                 # unchanged, byte for byte
     raw = json.loads(files[journal.cycle_path(doc.cycle_id)])
     assert commit_reveal.verify(raw, salt, commitment.commitment_sha256)
-    wrong = commit_reveal.reveal(commit_reveal.seal(doc)[0], salt)
+    reveal = json.loads(files[journal.reveal_path(doc.cycle_id)])
+    assert reveal["salt"] == salt and reveal["commitment_sha256"] == commitment.commitment_sha256
+    assert journal.reveal_files(sealed, salt, commitment.commitment_sha256) == files   # sha alone works too
+
+
+def test_reveal_files_require_a_matching_commitment(record, pack, policy):
+    doc = public_cycle(record, pack, lines=policy.universe)
+    commitment, salt, sealed = commit_reveal.seal_bytes(doc)
+    other = commit_reveal.seal_bytes(doc)[0]
     with pytest.raises(journal.JournalError):
-        journal.reveal_files(doc, wrong)
+        journal.reveal_files(sealed, salt, other)                          # a different commitment
+    with pytest.raises(journal.JournalError):
+        journal.reveal_files(sealed, "00" * 32, commitment)                # a different salt
+    with pytest.raises(journal.JournalError):
+        journal.reveal_files(doc, salt, commitment)                        # a rebuilt document
+
+
+def test_reveal_files_refuse_bytes_that_are_not_the_canonical_public_cycle(record, pack, policy):
+    doc = public_cycle(record, pack, lines=policy.universe)
+    pretty = journal.dump_json(doc)                                        # same content, not the sealed bytes
+    commitment, salt, _ = commit_reveal.seal_bytes(doc)
+    sha = commit_reveal.bytes_commitment_sha256(pretty, salt)
+    with pytest.raises(journal.JournalError, match="canonical"):
+        journal.reveal_files(pretty, salt, sha)
+    data = doc.model_dump(mode="json") | {"amount_usd": 1.0}               # outside the allow-list
+    bad = commit_reveal.canonical_json(data)
+    with pytest.raises(journal.JournalError, match="not a valid public cycle"):
+        journal.reveal_files(bad, salt, commit_reveal.bytes_commitment_sha256(bad, salt))
+    renamed = commit_reveal.seal_bytes(doc, salt_hex=salt)[0].model_copy(update={"cycle_id": "2026-10-01T1840Z"})
+    with pytest.raises(journal.JournalError, match="ids differ"):
+        journal.reveal_files(commit_reveal.canonical_json(doc), salt, renamed)
+
+
+def test_final_outcome_is_published_without_touching_the_sealed_cycle(record, pack, policy):
+    """Sealed while pending; the final state goes to the ops row, the cycle bytes never change."""
+    sealed_rec = record.model_copy(update={"decision_state": "awaiting_publication", "approved_at": None,
+                                           "decision_reason": ""})
+    doc = public_cycle(sealed_rec, pack, lines=policy.universe)
+    commitment, salt, sealed = commit_reveal.seal_bytes(doc)
+    ops = journal.ops_files(None, [public_ops_row(sealed_rec)])[journal.OPS_PATH]
+    ops = journal.ops_files(ops, [public_ops_row(record)])[journal.OPS_PATH]      # final outcome upserted
+    row = json.loads(ops.decode().splitlines()[0])
+    assert (row["decision_state"], row["human_outcome"]) == ("completed", "approved")
+    revealed = journal.reveal_files(sealed, salt, commitment)[journal.cycle_path(doc.cycle_id)]
+    assert json.loads(revealed)["decision"]["human_outcome"] == "pending"
 
 
 def test_jsonl_upsert_is_idempotent_and_keyed(record):

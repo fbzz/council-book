@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from council.data import fred
+from council.models.facts import Fact
 from council.publish import leakscan
 from council.publish.public_models import PublicCycleV1
 from council.publish.redact import (
@@ -15,16 +17,20 @@ from council.publish.redact import (
     public_cycle,
     public_ops_row,
     public_status,
+    short_fingerprint,
 )
 from tests.publish.conftest import (
     CANARIES,
     PRIVATE_AMOUNT,
     PRIVATE_DECISION_ID,
+    PRIVATE_FINGERPRINT,
     PRIVATE_INSTRUMENT_ID,
     PRIVATE_NAV,
     PRIVATE_POSITION_ID,
     PRIVATE_SL_RATE,
     PRIVATE_UNITS,
+    SLOT,
+    make_pack,
     make_record,
 )
 
@@ -84,10 +90,40 @@ def test_evidence_refs_are_typed_and_feed_text_is_never_published(doc):
     refs = doc.cards[0].evidence
     assert refs[0].model_dump() == {"kind": "broker_feed", "id": "N:1a2b3c4d"}
     assert refs[1].kind == "market" and refs[1].id == "F:NDX:dist_sma200_pct"
-    macro = {r.series: r for r in doc.cards[3].evidence}
-    assert macro["DGS10"].publishable and macro["DGS10"].value == 4.11
-    assert not macro["VIXCLS"].publishable and macro["VIXCLS"].value is None
+    macro = {(r.series, r.measure): r for r in doc.cards[3].evidence}
+    assert macro[("DGS10", None)].publishable and macro[("DGS10", None)].value == 4.11
+    assert not macro[("VIXCLS", None)].publishable and macro[("VIXCLS", None)].value is None
     assert "Chipmakers" not in _text(doc)
+
+
+def test_macro_change_ids_from_the_data_layer_are_kept(doc):
+    """M:DGS10.chg20@D (the 20-observation change) used to be dropped by the id regex."""
+    chg = [r for r in doc.cards[3].evidence if r.measure == "chg20"]
+    assert len(chg) == 1
+    assert (chg[0].series, chg[0].as_of, chg[0].value, chg[0].unit) == ("DGS10", "2026-09-30", -12.5, "bps")
+    assert not any(f.startswith("evidence_ids_dropped:") for f in doc.flags)
+
+
+def test_fred_publishability_comes_from_the_data_layer_and_the_pack(record, policy):
+    assert "VIXCLS" not in fred.PUBLISHABLE and "DGS10" in fred.PUBLISHABLE
+    pack = make_pack()
+    facts = [f.model_copy(update={"publishable": False}) if f.id == "M:DGS10@2026-09-30" else f for f in pack.facts]
+    doc = public_cycle(record, pack.model_copy(update={"facts": facts}), lines=policy.universe)
+    macro = {(r.series, r.measure): r for r in doc.cards[3].evidence}
+    assert not macro[("DGS10", None)].publishable and macro[("DGS10", None)].value is None
+    assert macro[("DGS10", "chg20")].publishable                      # its own fact is still publishable
+
+
+def test_a_series_outside_the_publishable_list_never_carries_a_value(record, policy):
+    """T10Y3M was on redact's old private list; the data layer does not register it."""
+    assert "T10Y3M" not in fred.PUBLISHABLE
+    pack = make_pack()
+    fact = Fact(id="M:T10Y3M@2026-09-30", kind="macro", value=0.4, unit="pct", available_at=SLOT, source="fred")
+    card = record.cards[3].model_copy(update={"evidence_ids": ["M:T10Y3M@2026-09-30"]})
+    rec = record.model_copy(update={"cards": [*record.cards[:3], card]})
+    doc = public_cycle(rec, pack.model_copy(update={"facts": [*pack.facts, fact]}), lines=policy.universe)
+    ref = doc.cards[3].evidence[0]
+    assert ref.series == "T10Y3M" and not ref.publishable and ref.value is None
 
 
 def test_text_copied_from_a_licensed_item_is_withheld(doc):
@@ -110,16 +146,56 @@ def test_private_amounts_in_code_strings_are_removed(doc):
     assert names["R7"].value == "[amount removed]"
 
 
-def test_pm_block_reports_medoid_and_agreement(doc):
+def test_unmapped_instrument_ids_are_scrubbed_everywhere(doc):
+    assert "UNMAPPED: no line" in doc.plan.skipped
+    assert str(PRIVATE_INSTRUMENT_ID) not in _text(doc) and "UNMAPPED_" not in _text(doc)
+    assert clean_text("hold UNMAPPED_100123 and unmapped_42; UNMAPPED stays") == "hold UNMAPPED and UNMAPPED; UNMAPPED stays"
+    assert [f.rule for f in leakscan.scan("skipped UNMAPPED_100123")] == ["unmapped_id"]
+
+
+def test_pm_block_reports_medoid_and_the_records_action_class_agreement(doc):
+    """Agreement is the record's per-line share in the medoid's action class, not a recount."""
     assert doc.pm.medoid == 0 and doc.pm.valid_replicates == 2
-    assert doc.pm.agreement["SEMIS"] == 2
+    assert doc.pm.agreement_pct == {"NDX": 66.67, "SEMIS": 100.0}
+    assert doc.pm.levels["SEMIS"] == 0.5                  # the levels handed to the risk engine
     assert doc.pm.replicates[2].valid is False and doc.pm.replicates[2].violations == ["parse_fail"]
     assert doc.pm.replicates[0].deviations[0].line == "SEMIS"
+
+
+def test_single_agent_control_comes_from_the_typed_record(doc):
+    sa = doc.single_agent
+    assert sa is not None and sa.medoid is None and sa.valid_replicates == 1
+    assert sa.levels["SEMIS"] == 0.75 and sa.agreement_pct == {}
+    assert [r.replicate for r in sa.replicates] == [0, 1]
+    assert sa.replicates[0].sided_with == "reference" and sa.replicates[0].levels["SEMIS"] == 0.75
+
+
+def test_single_agent_is_absent_when_the_control_did_not_run(policy):
+    doc = public_cycle(make_record(single_agent=[], single_agent_levels={}), None, lines=policy.universe)
+    assert doc.single_agent is None
+
+
+def test_extras_are_never_read(policy):
+    rec = make_record(decision_reason="", approved_at=None,
+                      extras={"approved_at": "2026-10-01T15:07:13Z", "decision_reason": "from extras",
+                              "single_agent": {"replicates": []}})
+    doc = public_cycle(rec.model_copy(update={"single_agent": [], "single_agent_levels": {}}), None,
+                       lines=policy.universe)
+    assert doc.decision.reason == "" and doc.decision.approved_slot is None and doc.single_agent is None
 
 
 def test_approval_time_is_rounded_to_the_slot(doc):
     assert doc.decision.approved_slot == datetime(2026, 10, 1, 14, 40, tzinfo=UTC)
     assert doc.decision.human_outcome == "approved"
+    assert doc.decision.reason == "Agree with the cut"
+
+
+def test_material_fingerprint_is_published_as_a_short_hash_only(doc):
+    assert len(doc.material_fingerprint) == 16 and PRIVATE_FINGERPRINT not in _text(doc)
+    assert "K:vol:1|" not in _text(doc)
+    assert short_fingerprint("sha256:" + "ab" * 32) == "ab" * 8           # a digest is truncated
+    assert short_fingerprint("") == "" and short_fingerprint(None) == ""
+    assert short_fingerprint("a") == short_fingerprint("a") != short_fingerprint("b")
 
 
 def test_calls_carry_no_error_text_and_normalised_shas(doc):
@@ -148,6 +224,14 @@ def test_ops_row_counts_only(record):
     row = public_ops_row(record)
     assert (row.calls, row.calls_ok, row.timeouts, row.legs, row.duration_s) == (2, 1, 1, 1, 420)
     assert leakscan.scan(row, canaries=CANARIES) == []
+
+
+def test_ops_row_carries_the_final_decision_outcome(record):
+    row = public_ops_row(record)
+    assert (row.decision_state, row.human_outcome, row.decision_reason) == ("completed", "approved", "Agree with the cut")
+    assert row.approved_slot == datetime(2026, 10, 1, 14, 40, tzinfo=UTC)
+    pending = public_ops_row(make_record(decision_state="proposed", decision_reason="", approved_at=None))
+    assert (pending.human_outcome, pending.approved_slot) == ("pending", None)
 
 
 def test_public_book_from_weights(policy):

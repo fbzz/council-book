@@ -55,6 +55,7 @@ def make_executor(write_client, read_client, ledger, limiter, fclock, policy):
         kwargs.setdefault("write", write_client)
         kwargs.setdefault("symbol_for", {iid: sym for sym, (iid, _b, _a) in INSTRUMENTS.items()})
         write = kwargs.pop("write")
+        kwargs.setdefault("_skip_guard_for_tests", True)   # pytest is not an operator terminal
         return Executor(
             write, read_client, ledger, limiter, clock=fclock.now, sleep=fclock.sleep,
             policy=policy, **kwargs,
@@ -70,7 +71,7 @@ def approve(ledger: Ledger, fclock: FakeClock):
             decision_id=decision_id, kind=kind, cycle_id="2026-10-01T1440Z",
             valid_until=fclock.now() + timedelta(hours=4),
         )
-        ledger.transition(decision_id, "approved", "operator approved")
+        ledger.transition(decision_id, "approved", "operator approved", actor="operator")
         return decision_id
 
     return _approve

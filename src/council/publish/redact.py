@@ -9,33 +9,42 @@ Rules:
   and long numbers are removed, and any text sharing an 8-word n-gram with a licensed feed item
   is withheld.
 - Evidence ids become typed refs: N: -> broker_feed id only; M: -> FRED series (value only when
-  the series is publishable); F:/V:/C:/E:/S:/K: -> ids.
-- Symbols are published only as exposure LINES; unknown symbols are dropped and counted.
-- Approval timestamps are rounded down to their slot.
+  the series is in `council.data.fred.PUBLISHABLE`, the single publishability list, and the
+  pack's fact is not marked unpublishable); F:/V:/C:/E:/S:/K: -> ids.
+- Symbols are published only as exposure LINES; unknown symbols are dropped and counted, and
+  `UNMAPPED_<instrument id>` is scrubbed to `UNMAPPED` in any published text.
+- Approval timestamps are rounded down to their slot; the material-change fingerprint is
+  published as a short hash only.
+- The execution record (`public_execution`) carries weights (x NAV), slippage and cost in bp,
+  and leg states: never amounts, units, prices or ids.
 """
 
 from __future__ import annotations
 
+import hashlib
+import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
-from typing import Any, get_args
-
-from pydantic import ValidationError
+from typing import Any, Protocol, get_args
 
 from council import clock
+from council.data import fred
 from council.models.cards import EvidenceCard
 from council.models.cycle import CycleRecord, PMReplicate
 from council.models.debate import AdvocateCase, BearCase
-from council.models.facts import FactPack
-from council.models.plan import Plan
+from council.models.facts import Fact, FactPack
+from council.models.plan import Leg, Plan
 from council.models.risk import RiskDecision
 from council.policy import LineSpec, Universe, default_policy
 from council.publish import leakscan
 from council.publish.public_models import (
     CallStatus,
     CycleStatus,
+    DecisionState,
     KillState,
+    LegKind,
+    LegState,
     PublicAdvocate,
     PublicBand,
     PublicBook,
@@ -50,6 +59,8 @@ from council.publish.public_models import (
     PublicDecisiveFact,
     PublicDeviation,
     PublicDismissal,
+    PublicExecution,
+    PublicFill,
     PublicLeg,
     PublicOpsRow,
     PublicPlan,
@@ -61,14 +72,6 @@ from council.publish.public_models import (
     PublicStatus,
     StatusState,
 )
-
-# FRED series whose VALUES may be republished (public-domain government data). Everything else
-# (e.g. VIXCLS, ICE/BofA and S&P series) is cited by series name only.
-PUBLISHABLE_FRED: frozenset[str] = frozenset({
-    "DFF", "DFEDTARU", "DFEDTARL", "DGS3MO", "DGS2", "DGS5", "DGS10", "DGS30", "T10Y2Y", "T10Y3M",
-    "T10YIE", "DTWEXBGS", "UNRATE", "PAYEMS", "CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE",
-    "WALCL", "GDP", "GDPC1",
-})
 
 WITHHELD_LICENSED = "[withheld: overlaps licensed feed text]"
 X_DP, PCT_DP, BP_DP, LEVEL_DP = 3, 2, 1, 2
@@ -87,6 +90,8 @@ _MONEY = re.compile(
 )
 _LONG_NUMBER = re.compile(r"(?<![\w.])(?<!\b[NSMECFVK]:)\d{7,}(?!\w)")
 _UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+# Positions on symbols outside the universe are keyed UNMAPPED_<instrument id>; the id is private.
+_UNMAPPED = re.compile(r"(?i)UNMAPPED_[0-9A-Za-z]+")
 
 
 def clean_text(value: str | None, max_len: int = 200) -> str:
@@ -100,6 +105,7 @@ def clean_text(value: str | None, max_len: int = 200) -> str:
     text = _PATH.sub("[path removed]", text)
     text = _HANDLE.sub("[handle removed]", text)
     text = _UUID.sub("[id removed]", text)
+    text = _UNMAPPED.sub("UNMAPPED", text)
     text = _MONEY.sub("[amount removed]", text)
     text = _LONG_NUMBER.sub("[number removed]", text)
     text = " ".join(text.split())
@@ -223,14 +229,24 @@ class LineMap:
 _ID_KIND = {"F": "market", "V": "vol", "C": "cost", "E": "event", "S": "filing", "K": "card"}
 _ID_OK = re.compile(r"^[FVCESK]:[A-Za-z0-9_.:@#+-]{1,80}$")
 _NEWS_OK = re.compile(r"^N:[0-9a-f]{8}$")
-_MACRO = re.compile(r"^M:([A-Z0-9_]{1,32})(?:@(\d{4}-\d{2}-\d{2}))?$")
+# M:<SERIES>[.<measure>][@YYYY-MM-DD], e.g. M:DGS10@2026-09-24 or M:DGS10.chg20@2026-09-24.
+_MACRO = re.compile(r"^M:([A-Z0-9_]{1,32})(?:\.([a-z0-9_]{1,16}))?(?:@(\d{4}-\d{2}-\d{2}))?$")
+_FRED_UNITS = frozenset({"pct", "bps", "x", "ratio"})
+_NO_PUBLISH_SOURCES = frozenset({"fred:no_publish"})
+
+
+def _fred_publishable(series: str, fact: Fact | None) -> bool:
+    """One list decides (council.data.fred.PUBLISHABLE); a pack fact can only make it stricter."""
+    if not fred.is_publishable(series):
+        return False
+    return fact is None or (fact.publishable and fact.source not in _NO_PUBLISH_SOURCES)
 
 
 class _Evidence:
     def __init__(self, pack: FactPack | None):
-        self.values: dict[str, Any] = {}
+        self.facts: dict[str, Fact] = {}
         if pack is not None:
-            self.values = {f.id: f.value for f in pack.facts if f.id.startswith("M:")}
+            self.facts = {f.id: f for f in pack.facts if f.id.startswith("M:")}
         self.dropped = 0
 
     def ref(self, evidence_id: str | None) -> dict[str, Any] | None:
@@ -239,12 +255,18 @@ class _Evidence:
             return {"kind": "broker_feed", "id": eid}
         macro = _MACRO.match(eid)
         if macro:
-            series, as_of = macro.group(1), macro.group(2)
-            publishable = series in PUBLISHABLE_FRED
-            value = self.values.get(eid)
-            ref: dict[str, Any] = {"kind": "fred", "series": series, "as_of": as_of, "publishable": publishable}
-            if publishable and isinstance(value, int | float) and not isinstance(value, bool):
+            series, measure, as_of = macro.group(1), macro.group(2), macro.group(3)
+            fact = self.facts.get(eid)
+            publishable = _fred_publishable(series, fact)
+            ref: dict[str, Any] = {
+                "kind": "fred", "series": series, "measure": measure, "as_of": as_of, "publishable": publishable,
+            }
+            value = fact.value if fact is not None else None
+            if (publishable and isinstance(value, int | float) and not isinstance(value, bool)
+                    and math.isfinite(float(value))):
                 ref["value"] = round(float(value), 4)
+                if fact is not None and fact.unit in _FRED_UNITS:
+                    ref["unit"] = fact.unit
             return ref
         if _ID_OK.match(eid):
             return {"kind": _ID_KIND[eid[0]], "id": eid}
@@ -356,39 +378,38 @@ def _replicate(
     )
 
 
+def _agreement_pct(agreement: Mapping[str, float], lm: LineMap) -> dict[str, float]:
+    """Per-line share of valid replicates in the medoid's action class (0..1) -> percent."""
+    out: dict[str, float] = {}
+    for sym, share in agreement.items():
+        line = lm.line(sym)
+        if line is None or not isinstance(share, int | float) or not math.isfinite(float(share)):
+            continue
+        out[line] = _pct(min(1.0, max(0.0, float(share))))
+    return {k: out[k] for k in lm.ordered(out)}
+
+
 def _pm_block(
     reps: list[PMReplicate], medoid: int | None, ref_levels: dict[str, float],
-    lm: LineMap, text: _Text, ev: _Evidence,
+    lm: LineMap, text: _Text, ev: _Evidence, *,
+    levels: Mapping[str, float], agreement: Mapping[str, float],
 ) -> PublicPM:
     public = [_replicate(r, ref_levels, lm, text, ev) for r in reps]
-    valid = [p for p in public if p.valid]
-    agreement: dict[str, int] = {}
-    chosen = next((p for p in public if p.replicate == medoid), None)
-    if chosen is not None:
-        for line, level in chosen.levels.items():
-            agreement[line] = sum(
-                1 for p in valid if abs(p.levels.get(line, ref_levels.get(line, 0.0)) - level) < 1e-9
-            )
-    return PublicPM(replicates=public, medoid=medoid, agreement=agreement, valid_replicates=len(valid))
+    return PublicPM(
+        replicates=public,
+        medoid=medoid,
+        levels=lm.first_by_line(levels),
+        agreement_pct=_agreement_pct(agreement, lm),
+        valid_replicates=sum(1 for p in public if p.valid),
+    )
 
 
-def _single_agent(extras: Mapping[str, Any], ref_levels, lm, text, ev) -> tuple[PublicPM | None, bool]:
-    raw = extras.get("single_agent")
-    if raw is None:
-        return None, False
-    medoid = None
-    if isinstance(raw, Mapping):
-        medoid = raw.get("medoid")
-        raw = raw.get("replicates", [])
-    reps: list[PMReplicate] = []
-    bad = False
-    for item in raw if isinstance(raw, list) else []:
-        try:
-            reps.append(item if isinstance(item, PMReplicate) else PMReplicate.model_validate(item))
-        except ValidationError:
-            bad = True
-    medoid = medoid if isinstance(medoid, int) and not isinstance(medoid, bool) else None
-    return _pm_block(reps, medoid, ref_levels, lm, text, ev), bad
+def _single_agent(rec: CycleRecord, ref_levels, lm, text, ev) -> PublicPM | None:
+    """The single-agent control (C10) from the typed record fields; None when it did not run."""
+    if not rec.single_agent and not rec.single_agent_levels:
+        return None
+    return _pm_block(rec.single_agent, None, ref_levels, lm, text, ev,
+                     levels=rec.single_agent_levels, agreement={})
 
 
 def _check_value(v: float | str | None) -> float | str | None:
@@ -496,14 +517,35 @@ def _as_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _slot_of(value: Any) -> datetime | None:
+    """A timestamp rounded DOWN to its slot; naive or unparseable times are dropped."""
+    ts = _as_datetime(value)
+    return clock.slot_at_or_before(ts) if ts is not None else None
+
+
 def _decision(rec: CycleRecord) -> PublicDecision:
-    approved_at = _as_datetime(rec.extras.get("approved_at"))
     return PublicDecision(
         state=rec.decision_state,
         human_outcome=_OUTCOME.get(rec.decision_state, "none"),
-        reason=clean_text(str(rec.extras.get("decision_reason") or ""), 200),
-        approved_slot=clock.slot_at_or_before(approved_at) if approved_at else None,
+        reason=clean_text(rec.decision_reason, 200),
+        approved_slot=_slot_of(rec.approved_at),
     )
+
+
+_HEX_DIGEST = re.compile(r"^[0-9a-f]{16,}$")
+FINGERPRINT_CHARS = 16
+
+
+def short_fingerprint(value: str | None) -> str:
+    """The material-change fingerprint as a short hash: a hex digest is truncated, anything else
+    is hashed first, so the fingerprint's contents are never published."""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    v = raw.lower().removeprefix("sha256:")
+    if _HEX_DIGEST.match(v):
+        return v[:FINGERPRINT_CHARS]
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()[:FINGERPRINT_CHARS]
 
 
 _CALL_STATUSES = set(get_args(CallStatus))
@@ -556,7 +598,7 @@ def public_cycle(
     if kill not in _KILL:
         flags.append("kill_state_unrecognised")
         kill = "NORMAL"
-    single_agent, single_bad = _single_agent(rec.extras, ref_levels, lm, text, ev)
+    single_agent = _single_agent(rec, ref_levels, lm, text, ev)
     fields: dict[str, Any] = {
         "cycle_id": rec.cycle_id,
         "slot": rec.slot,
@@ -577,8 +619,11 @@ def public_cycle(
             bear=_advocate(rec.debate.bear, lm, text, ev),
             rebuttal=_advocate(rec.debate.bull_rebuttal, lm, text, ev),
         ),
-        "pm": _pm_block(rec.pm, rec.medoid_replicate, ref_levels, lm, text, ev),
+        "pm": _pm_block(rec.pm, rec.medoid_replicate, ref_levels, lm, text, ev,
+                        levels=rec.risk.raw_levels if rec.risk is not None else {},
+                        agreement=rec.agreement),
         "single_agent": single_agent,
+        "material_fingerprint": short_fingerprint(rec.material_fingerprint),
         "basis": rec.risk.basis if rec.risk is not None else None,
         "bands": {
             line: PublicBand(
@@ -603,14 +648,13 @@ def public_cycle(
         flags.append(f"licensed_overlap_withheld:{text.withheld}")
     if pack is None:
         flags.append("licensed_text_check_skipped")
-    if single_bad:
-        flags.append("single_agent_unparsed")
     return PublicCycleV1(**fields, flags=flags)
 
 
 # ------------------------------------------------------------------------------ other documents
 def public_ops_row(rec: CycleRecord) -> PublicOpsRow:
-    """One punctuality/health row per cycle (counts only)."""
+    """One punctuality/health row per cycle (counts only), plus the decision outcome. Upsert it
+    again once the decision is final: the sealed cycle document still says "pending"."""
     duration = None
     if rec.finished_at is not None:
         duration = max(0, int((rec.finished_at - rec.started_at).total_seconds()))
@@ -627,6 +671,9 @@ def public_ops_row(rec: CycleRecord) -> PublicOpsRow:
         basis=rec.risk.basis if rec.risk is not None else None,
         legs=len(rec.plan.legs) if rec.plan is not None else 0,
         decision_state=rec.decision_state,
+        human_outcome=_OUTCOME.get(rec.decision_state, "none"),
+        decision_reason=clean_text(rec.decision_reason, 200),
+        approved_slot=_slot_of(rec.approved_at),
         model=_model_name(rec.model),
         model_digest=_model_name(rec.model_digest),
         flags=[_code(f) for f in rec.flags],
@@ -662,6 +709,163 @@ def public_book(
     return PublicBook(
         as_of_cycle_id=cycle_id, lines=book_lines, gross_x=gross, net_x=net,
         cash_x=_x(max(0.0, 1.0 - gross)), kill_state=kill,
+    )
+
+
+# ------------------------------------------------------------------------------ execution
+class LegResultLike(Protocol):
+    """The fields read from `council.execution.executor.LegResult` (duck-typed: the public-record
+    package never imports the executor, the ledger or the broker)."""
+
+    seq: int
+    kind: str
+    symbol: str
+    line: str
+    state: str
+    units_requested: float | None
+    units_filled: float | None
+    fill_price: float | None
+
+
+class ReconcileLike(Protocol):
+    drift: float
+    achieved_w: dict[str, float]
+
+
+class ExecutionReportLike(Protocol):
+    """The fields read from `council.execution.executor.ExecutionReport`."""
+
+    final_state: str
+    legs: Sequence[LegResultLike]
+    reconcile: ReconcileLike | None
+
+
+_LEG_KINDS = set(get_args(LegKind))
+_LEG_STATES = set(get_args(LegState))
+_DECISION_STATES = set(get_args(DecisionState))
+_EXECUTED = frozenset({"filled", "partially_filled", "rejected_partial"})
+_MIN_TARGET_X = 1e-4          # below this an exposure error in % is meaningless
+
+
+def _pos(v: Any) -> float | None:
+    """A finite positive float, else None."""
+    if isinstance(v, bool) or not isinstance(v, int | float):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) and f > 0 else None
+
+
+def _within(v: float | None, bound: float) -> float | None:
+    return v if v is not None and math.isfinite(v) and abs(v) <= bound else None
+
+
+def _weight_sign(kind: str, direction: str | None) -> float | None:
+    """Sign of a leg's effect on its line's weight: opens add their direction, closes remove it."""
+    if direction not in ("long", "short"):
+        return None
+    base = 1.0 if direction == "long" else -1.0
+    if kind == "open":
+        return base
+    if kind in ("close", "partial_close"):
+        return -base
+    return 0.0
+
+
+def _fill(r: LegResultLike, line: str, leg: Leg | None, state: str, nav_usd: float) -> PublicFill:
+    direction = leg.direction if leg is not None else None
+    target = _x(leg.weight_after - leg.weight_before) if leg is not None else None
+    filled = slippage = error = None
+    units, price = _pos(r.units_filled), _pos(r.fill_price)
+    sign = _weight_sign(r.kind, direction)
+    if r.kind == "open" and units is not None and price is not None and sign is not None:
+        filled = _within(_x(sign * units * price / nav_usd), 5.0)
+        if target is not None and filled is not None and abs(target) >= _MIN_TARGET_X:
+            error = _within(round((filled / target - 1.0) * 100.0, PCT_DP) + 0.0, 1000.0)
+        amount = _pos(leg.amount_usd) if leg is not None else None
+        planned_units = _pos(leg.units) if leg is not None else None
+        planned = amount / planned_units if amount and planned_units else None   # notional / units
+        if planned:
+            adverse = 1.0 if direction == "long" else -1.0
+            slippage = _within(_bp(adverse * (price / planned - 1.0) * 1e4), 10000.0)
+    return PublicFill(
+        seq=r.seq,
+        kind=r.kind,
+        line=line,
+        direction=direction,
+        settlement=leg.settlement if leg is not None else None,
+        leverage=leg.leverage if leg is not None else None,
+        state=state,
+        weight_target_x=_within(target, 5.0),
+        weight_filled_x=filled,
+        exposure_error_pct=error,
+        slippage_bp=slippage,
+        cost_bp=_bp(leg.cost_bps_nav) if leg is not None else None,
+    )
+
+
+def public_execution(
+    report: ExecutionReportLike,
+    *,
+    cycle_id: str,
+    lines: Iterable[LineSpec] | Universe | Mapping[str, LineSpec] | None,
+    nav_usd: float,
+    plan: Plan | None = None,
+    approved_at: datetime | None = None,
+    completed_at: datetime | None = None,
+) -> PublicExecution:
+    """The public execution record from the PRIVATE `ExecutionReport`.
+
+    Per leg: line, kind, direction, target vs filled weight (x NAV at approval), slippage and
+    cost in bp, and state. `nav_usd` is only a denominator and is never published. `plan` (the
+    approved plan, joined by leg seq) supplies direction, the approved weight change, the planned
+    price and the cost estimate; without it those fields are None and `plan_missing` is flagged.
+    Amounts, units, prices, order/position ids, request ids and error strings are never read into
+    the output."""
+    nav = _pos(nav_usd)
+    if nav is None:
+        raise ValueError("nav_usd must be a positive finite number")
+    lm = LineMap(lines)
+    flags: list[str] = []
+    plan_legs = {leg.seq: leg for leg in plan.legs} if plan is not None else {}
+    if plan is None:
+        flags.append("plan_missing")
+    fills: list[PublicFill] = []
+    bad_kind = bad_state = no_plan_leg = 0
+    for r in report.legs:
+        line = lm.lookup(str(r.line)) or lm.line(str(r.symbol))
+        if line is None:
+            continue
+        if r.kind not in _LEG_KINDS:
+            bad_kind += 1
+            continue
+        state = r.state if r.state in _LEG_STATES else "unknown"
+        if state != r.state:
+            bad_state += 1
+        leg = plan_legs.get(r.seq)
+        if plan is not None and leg is None:
+            no_plan_leg += 1
+        fills.append(_fill(r, line, leg, state, nav))
+    fills.sort(key=lambda f: f.seq)
+    final = report.final_state if report.final_state in _DECISION_STATES else "execution_unknown"
+    if final != report.final_state:
+        flags.append("final_state_unrecognised")
+    rec = report.reconcile
+    costs = [f.cost_bp for f in fills if f.state in _EXECUTED and f.cost_bp is not None]
+    achieved = lm.sum_by_line(rec.achieved_w) if rec is not None else {}
+    for name, count in (("unmapped_symbols_dropped", lm.unmapped), ("leg_kind_unrecognised", bad_kind),
+                        ("leg_state_unrecognised", bad_state), ("leg_not_in_plan", no_plan_leg)):
+        if count:
+            flags.append(f"{name}:{count}")
+    return PublicExecution(
+        cycle_id=cycle_id,
+        decision_state=final,
+        approved_slot=_slot_of(approved_at),
+        completed_slot=_slot_of(completed_at),
+        fills=fills,
+        achieved_x=achieved,
+        achieved_drift_x=_within(_x(rec.drift), 5.0) if rec is not None else None,
+        cost_bp_total=_bp(sum(costs)) if plan is not None else None,
+        flags=flags,
     )
 
 

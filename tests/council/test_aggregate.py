@@ -86,6 +86,16 @@ def test_invalid_replicates_are_ignored():
     assert res.medoid_index == 1 and res.levels["A"] == 0.5 and res.basis == "council"
 
 
+def test_agreement_is_a_per_line_share_of_valid_replicates():
+    # 3 valid (r0 and r1 cut A, r3 holds it) + 1 invalid that also holds A: denominator is 3
+    reps = [rep(0, A=0.5), rep(1, A=0.5), rep(2, valid=False), rep(3)]
+    res = aggregate(reps, REF, CUR, 0.25)
+    assert res.medoid_index == 0
+    assert res.agreement == {"A": pytest.approx(2 / 3, abs=1e-6), "B": 1.0, "C": 1.0}
+    assert all(isinstance(k, str) and isinstance(v, float) for k, v in res.agreement.items())
+    assert aggregate([rep(0)], REF, CUR, 0.25).agreement == {}      # no medoid, no agreement
+
+
 def test_per_line_deadband_mapping():
     # crypto-like wider deadband: 0.25 moves are holds, so every replicate is in the same class
     reps = [rep(0, A=0.75), rep(1), rep(2)]

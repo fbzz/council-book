@@ -106,13 +106,29 @@
   </tbody>
 </table>
 </div>
-{% if c.pm.agreement %}<p class="small">Replicates agreeing with the medoid, per line: {% for line, n in c.pm.agreement | by_line %}<span class="kv"><span class="k">{{ line }}</span> <span class="n">{{ n }}/{{ c.pm.valid_replicates }}</span></span>{% endfor %}</p>{% endif %}
+{% if c.pm.agreement_pct %}<p class="small">Valid replicates in the medoid's action class (up, hold or down), per line: {% for line, share in c.pm.agreement_pct | by_line %}<span class="kv"><span class="k">{{ line }}</span> <span class="n">{{ share | pct }}</span></span>{% endfor %}</p>{% endif %}
 {% else %}
 {{ m.empty("No PM output", "The council did not run or no replicate returned a valid decision; the reference book applies.") }}
 {% endif %}
 {% if c.single_agent %}
 <h3>Control: single agent, no debate</h3>
-<p class="small">{% for r in c.single_agent.replicates %}Replicate <span class="n">{{ r.replicate }}</span>: {% for d in r.deviations %}{{ d.line }} → <span class="n">{{ d.level | level }}</span>{% if not loop.last %}, {% endif %}{% else %}no deviation{% endfor %}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+<p class="small">Same facts, no debate; published as a control and never traded. Valid replicates: <span class="n">{{ c.single_agent.valid_replicates }}</span> of {{ c.single_agent.replicates | length }}.</p>
+{% if c.single_agent.levels %}
+{% set control_lines = (c.single_agent.levels.keys() | list) + (c.pm.levels.keys() | list) %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Line</th><th>Council</th><th>Single agent</th></tr></thead>
+  <tbody>
+  {% for line in control_lines | unique | sort_lines %}
+  {% set council_lv = c.pm.levels.get(line) %}
+  {% set control_lv = c.single_agent.levels.get(line) %}
+  <tr{% if council_lv is not none and control_lv is not none and council_lv != control_lv %} class="chosen"{% endif %}><td><strong>{{ line }}</strong></td><td class="n">{{ council_lv | level }}</td><td class="n">{{ control_lv | level }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+<p class="small">{% for r in c.single_agent.replicates %}Replicate <span class="n">{{ r.replicate }}</span>{% if not r.valid %} (invalid){% endif %}: {% for d in r.deviations %}{{ d.line }} → <span class="n">{{ d.level | level }}</span>{% if not loop.last %}, {% endif %}{% else %}no deviation{% endfor %}{% if not loop.last %} · {% endif %}{% endfor %}</p>
 {% endif %}
 {% endcall %}
 
@@ -192,9 +208,41 @@
 {% endcall %}
 
 {% call m.section("human", 7, "Human outcome", "proposed") %}
-<div class="status-row">{{ m.chip(cv.chip) }}<span class="chip state-sealed">{{ c.decision.human_outcome | replace("_", " ") }}</span></div>
-{% if c.decision.reason %}<p>Reason given: {{ c.decision.reason }}</p>{% endif %}
-{% if c.decision.approved_slot %}<p class="small">Approved during the slot starting {{ c.decision.approved_slot | slot }} (times are rounded to the slot).</p>{% endif %}
+<div class="status-row">{{ m.chip(cv.chip) }}<span class="chip state-sealed">{{ cv.human_outcome | replace("_", " ") }}</span></div>
+{% if cv.final_state != c.decision.state %}<p class="small muted">This cycle was sealed while the decision was {{ c.decision.human_outcome | replace("_", " ") }}; the outcome shown here comes from the {{ "execution record" if cv.execution else "operations log" }}, published after the decision.</p>{% endif %}
+{% if cv.decision_reason %}<p>Reason given: {{ cv.decision_reason }}</p>{% endif %}
+{% if cv.approved_slot %}<p class="small">Approved during the slot starting {{ cv.approved_slot | slot }} (times are rounded to the slot).</p>{% endif %}
+{% if cv.execution %}
+{% set ex = cv.execution %}
+<h3>Execution</h3>
+{% if ex.fills %}
+<div class="table-wrap">
+<table class="wide">
+  <thead><tr><th>#</th><th>Leg</th><th>Line</th><th>State</th><th>Target</th><th>Filled</th><th>Slippage</th><th>Cost</th></tr></thead>
+  <tbody>
+  {% for f in ex.fills %}
+  <tr>
+    <td class="n">{{ f.seq }}</td>
+    <td>{{ f.kind | replace("_", " ") }}{% if f.direction %} {{ m.direction_chip(f.direction) }}{% endif %}</td>
+    <td><strong>{{ f.line }}</strong></td>
+    <td>{% if f.state == "filled" %}<span class="chip state-executed">{{ f.state }}</span>{% else %}<span class="chip state-warn">{{ f.state | replace("_", " ") }}</span>{% endif %}</td>
+    <td class="n">{{ f.weight_target_x | x }}</td>
+    <td class="n">{{ f.weight_filled_x | x }}</td>
+    <td class="n">{{ f.slippage_bp | bp }}</td>
+    <td class="n">{{ f.cost_bp | bp }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}<p class="muted">No leg was sent.</p>{% endif %}
+<dl class="facts">
+  <div><dt>Drift after</dt><dd class="n">{{ ex.achieved_drift_x | x }}</dd></div>
+  <div><dt>Cost (estimated)</dt><dd class="n">{{ ex.cost_bp_total | bp }}</dd></div>
+  <div><dt>Completed</dt><dd class="n">{{ ex.completed_slot | slot }}</dd></div>
+</dl>
+{% if ex.flags %}<p class="small">Flags: {% for f in ex.flags %}<code>{{ f }}</code> {% endfor %}</p>{% endif %}
+{% endif %}
 {% endcall %}
 
 {% call m.section("seal", 8, "Seal and calls", "code") %}
@@ -205,8 +253,9 @@
   <div><dt>Input hash</dt><dd class="n">{{ c.input_hash | sha }}</dd></div>
   <div><dt>Policy</dt><dd class="n">{{ c.policy_sha | sha }}</dd></div>
   <div><dt>Prompts</dt><dd class="n">{{ c.prompt_manifest_sha | sha }}</dd></div>
+  <div><dt>Material facts</dt><dd class="n">{{ c.material_fingerprint | sha }}</dd></div>
 </dl>
-<p class="small">Files: <a href="../{{ cv.path }}">cycle</a>{% if cv.reveal %} · <a href="../{{ cv.path | replace('.json', '.reveal.json') }}">salt</a>{% endif %}. Check: sha256(bytes.fromhex(salt) + canonical_json(cycle)) equals the commitment, where canonical JSON has sorted keys and no spaces.</p>
+<p class="small">Files: <a href="../{{ cv.path }}">cycle</a>{% if cv.reveal %} · <a href="../{{ cv.path | replace('.json', '.reveal.json') }}">salt</a>{% endif %}{% if cv.execution_path %} · <a href="../{{ cv.execution_path }}">execution</a>{% endif %}. Check: sha256(bytes.fromhex(salt) + cycle file bytes) equals the commitment. The cycle file is the sealed canonical JSON (sorted keys, no spaces), so re-serialising it that way gives the same bytes.</p>
 {% if c.calls %}
 <div class="table-wrap">
 <table class="wide">

@@ -92,17 +92,22 @@ class BrokerFeedRef(PublicModel):
 
 
 class FredRef(PublicModel):
-    """A FRED macro value. `value` is present only when the series is publishable."""
+    """A FRED macro value. `value` (and its `unit`) is present only when the series is publishable.
+
+    `M:DGS10@2026-09-24` -> series DGS10; `M:DGS10.chg20@2026-09-24` -> series DGS10, measure chg20
+    (the 20-observation change)."""
 
     kind: Literal["fred"] = "fred"
     series: str = Field(pattern=r"^[A-Z0-9_]{1,32}$")
+    measure: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,16}$")
     as_of: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     publishable: bool
     value: float | None = Field(default=None, allow_inf_nan=False)
+    unit: Literal["pct", "bps", "x", "ratio"] | None = None
 
     @model_validator(mode="after")
     def _value_only_if_publishable(self) -> FredRef:
-        if self.value is not None and not self.publishable:
+        if (self.value is not None or self.unit is not None) and not self.publishable:
             raise ValueError("a non-publishable FRED series may not carry a value")
         return self
 
@@ -198,11 +203,17 @@ class PublicPMReplicate(PublicModel):
 
 
 class PublicPM(PublicModel):
-    """PM replicates and the medoid. `agreement[line]` = valid replicates at the medoid's level."""
+    """PM replicates, the medoid and the aggregate levels this block produced.
+
+    `levels`: the aggregate (council: the levels handed to the risk engine; single-agent control:
+    its own aggregate). `agreement_pct[line]`: share of valid replicates in the medoid's action
+    class (up / hold / down) for that line, in percent: the agreement that decided the line."""
 
     replicates: list[PublicPMReplicate] = Field(default_factory=list, max_length=8)
     medoid: int | None = None
-    agreement: dict[Line, int] = Field(default_factory=dict)
+    levels: dict[Line, Level] = Field(default_factory=dict)
+    agreement_pct: dict[Line, Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]] = Field(
+        default_factory=dict)
     valid_replicates: int = Field(default=0, ge=0)
 
 
@@ -306,6 +317,7 @@ class PublicCycleV1(PublicModel):
     debate: PublicDebate = Field(default_factory=PublicDebate)
     pm: PublicPM = Field(default_factory=PublicPM)
     single_agent: PublicPM | None = None           # control: one agent, no debate
+    material_fingerprint: Sha = ""                 # short hash of the material-change fingerprint
     basis: Basis | None = None
     bands: dict[Line, PublicBand] = Field(default_factory=dict)
     risk: PublicRisk | None = None
@@ -373,6 +385,9 @@ class PublicBook(PublicModel):
 
 
 class PublicOpsRow(PublicModel):
+    """One row per cycle, upserted by cycle_id. The cycle document is sealed BEFORE the human
+    decision, so this row (and the execution file) carries the FINAL decision outcome."""
+
     cycle_id: CycleId
     slot: UtcDatetime
     status: CycleStatus
@@ -385,6 +400,9 @@ class PublicOpsRow(PublicModel):
     basis: Basis | None = None
     legs: int = Field(ge=0)
     decision_state: DecisionState | None = None
+    human_outcome: HumanOutcome = "none"
+    decision_reason: str = Field(default="", max_length=200)
+    approved_slot: UtcDatetime | None = None       # approval time rounded DOWN to its slot
     model: ModelName = ""
     model_digest: ModelName = ""
     flags: list[Code] = Field(default_factory=list)
@@ -408,14 +426,20 @@ class PublicPerformancePoint(PublicModel):
 
 
 class PublicFill(PublicModel):
+    """One executed leg. Weights are signed changes of the LINE's weight (x NAV at approval):
+    `weight_target_x` is the approved change, `weight_filled_x` the measured one (opens only:
+    filled size at the fill price; a close is confirmed by the portfolio, not measured).
+    `slippage_bp`: fill vs planned price, positive = adverse. `cost_bp`: the leg's estimated cost
+    in bps of NAV. Fields are None when the private report cannot support them."""
+
     seq: int = Field(ge=0, le=64)
     kind: LegKind
     line: Line
-    direction: Direction
+    direction: Direction | None = None
     settlement: Settlement | None = None
-    leverage: int = Field(ge=1, le=10)
+    leverage: int | None = Field(default=None, ge=1, le=10)
     state: LegState
-    weight_target_x: X
+    weight_target_x: X | None = None
     weight_filled_x: X | None = None
     exposure_error_pct: Pct | None = None
     slippage_bp: Bp | None = None
@@ -423,14 +447,18 @@ class PublicFill(PublicModel):
 
 
 class PublicExecution(PublicModel):
+    """The FINAL outcome of an executed decision (the cycle itself was sealed before approval)."""
+
     schema_id: Literal["council-book/execution/v1"] = "council-book/execution/v1"
     cycle_id: CycleId
     decision_state: DecisionState
     approved_slot: UtcDatetime | None = None
     completed_slot: UtcDatetime | None = None
     fills: list[PublicFill] = Field(default_factory=list, max_length=64)
+    achieved_x: dict[Line, X] = Field(default_factory=dict)   # line weights after reconcile
     achieved_drift_x: X | None = None
     cost_bp_total: Bp | None = None
+    flags: list[Code] = Field(default_factory=list)
 
 
 class PublicIncident(PublicModel):

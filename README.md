@@ -23,13 +23,18 @@ before it can be executed.**
    the time it became available; nothing later than the cycle start is admissible.
 2. **Reference book (code)**: a mechanical trend × volatility-target book. It is the default
    position, the fallback, and the benchmark the council is scored against.
-3. **Analysts (LLM)**: news, SEC filings, macro and sector analysts write *evidence cards* — claims
-   that must cite evidence IDs from the pack. Event, volatility and cost officers are code.
+3. **Analysts (LLM)**: a news analyst (every cycle) and a macro analyst (once a day) write *evidence
+   cards* — claims that must cite evidence IDs from the pack. Event, volatility and cost officers are
+   code. (Filings and sector analysts arrive with single stocks in v1.1.)
 4. **Debate (LLM)**: a bull opens, a bear rebuts the bull's specific claims, the bull answers.
-5. **Portfolio manager (LLM, 3 independent replicates)** tilts the reference book inside bands that
-   code enforces. The medoid replicate is used — a real decision, never an average.
+5. **Portfolio manager (LLM, 3 independent replicates)** proposes at most three deviations from the
+   reference book, inside bands that code enforces. The medoid replicate is used — a real decision,
+   never an average — and a line falls back to the reference when the replicates disagree on it.
+   A single-agent control (the same model, no analysts, no debate) runs alongside, so the record can
+   show whether the council earns its extra calls.
 6. **Auditor and risk officer (code)**: uncited or self-contradicting changes are reverted; hard
-   limits (gross ≤ 2.0×, kill switch at −25%, stop budget, costs, carry, deadband, minimum holds)
+   limits (gross ≤ 2.0×, a soft kill switch that stops new risk at −20% and proposes a full exit at
+   −25% from the lifetime peak, a stop-loss on every position, costs, carry, deadband, minimum holds)
    are enforced in code, not in prompts.
 7. **Seal**: a hash commitment of the full cycle is pushed here before any order can be approved;
    the cycle itself is revealed once the decision is final.

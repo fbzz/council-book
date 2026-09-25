@@ -10,8 +10,13 @@ Pipeline (every number from policy/risk.yaml; rule IDs as in its comments):
  4. Boxes per line (weights = level x unit weight): band; |level| <= 1 where the class leverage
     cap is 1 (R6, hold-allowed); line cap with hold-allowed (R5); no-increase for WARN (R3), vol breakers (R9),
     macro event windows (R16), post-stop cool-off (R4d), missing catastrophe stop (R4), hedged
-    lines; side-specific anti-chase (R17); hold for stale or frozen data (R18), frozen reference
-    share above the limit (R18), closed markets (R19) and blockers (R20).
+    lines; side-specific anti-chase (R17); hold for frozen or missing states (R18/R19), frozen
+    reference share above the limit (R18), closed markets (R19) and blockers (R20).
+    Freshness is the pack's call: a line holds when its state is `frozen` (any reason); the engine
+    never re-derives staleness from the raw `data_age_h` (the pack's age skips weekends and
+    holidays). The R18 frozen reference share counts only DATA freezes: a state frozen solely
+    for `market_closed` is held (R19) but does not count, so a closed equity session can never
+    hold the crypto lines.
  5. Projection: group caps (crypto_total, fx_total, equity_beta_cluster; R5) -> gross <=
     proposal_max (R1) -> short gross and net floor (R2) -> net ceiling (R2) -> margin sum(|w|/L) <=
     margin_use_max with L = 2 above level 1.0 (R7) -> ex-ante vol <= ex_ante_vol_hard (R8).
@@ -25,6 +30,11 @@ Pipeline (every number from policy/risk.yaml; rule IDs as in its comments):
 Moves toward the reference are exempt from R12 and R13 (TOWARD_REFERENCE_EXEMPT) and use the
 reference cost threshold; they are NOT exempt from the cost gate, deadband, event block or
 anti-chase.
+Cost quotes: `cost_quotes` may be keyed (line, direction, leverage), (line, direction) or line.
+A leg is priced with the quote of its direction and leverage (L = 2 when the line's level after
+the move is above 1.0), falling back to the unlevered keys when no levered quote exists.
+`RiskDecision.base_w` is the snapshot book the engine started from (zeros without a snapshot);
+`models.risk.changed_lines(decision)` is the set of lines the planner may touch.
 """
 
 from __future__ import annotations
@@ -59,11 +69,12 @@ from council.risk.stops import catastrophe_stop_distance, stop_at_risk
 
 EPS = 1e-9
 TOWARD_REFERENCE_EXEMPT: frozenset[str] = frozenset({"R12", "R13"})
+MARKET_CLOSED = "market_closed"   # the pack's session freeze: held, but not a data freeze
 BOX_LABELS = {
     "warn": "R3 WARN no adds", "breaker": "R9 vol breaker", "event": "R16 event window",
     "cooloff": "R4d post-stop cool-off", "nostop": "R4 no catastrophe stop",
     "hedged": "hedged line", "chase_long": "R17 anti-chase", "chase_short": "R17 anti-chase",
-    "stale": "R18 stale data", "closed": "R19 market closed", "blocked": "R20 blocker",
+    "stale": "R18 frozen data", "closed": "R19 market closed", "blocked": "R20 blocker",
     "cap": "R5 line cap", "leverage": "R6 leverage cap",
 }
 VolFn = Callable[[Mapping[str, float]], float]
@@ -83,6 +94,22 @@ def classify_risk_increasing(
     if sl_widened:
         return True
     return ck.increased(before_w, after_w)
+
+
+def freeze_reasons(state: MarketState) -> set[str]:
+    """The pack's comma-separated `frozen_reason`, as a set (empty when none is given)."""
+    return {r.strip() for r in (state.frozen_reason or "").split(",") if r.strip()}
+
+
+def data_frozen(state: MarketState | None) -> bool:
+    """R18 data freeze: a missing state, or a frozen one for any reason other than
+    `market_closed` (a frozen state without a reason counts, fail closed)."""
+    if state is None:
+        return True
+    if not state.frozen:
+        return False
+    reasons = freeze_reasons(state)
+    return not reasons or bool(reasons - {MARKET_CLOSED})
 
 
 def toward_reference(before: float, after: float, ref: float) -> bool:
@@ -131,8 +158,8 @@ class RiskEngine:
         """Run the pipeline in the module docstring.
 
         `levels` are post-enforce council levels, `ref` the reference LEVELS, `unit_weights` the
-        weight of each line at level 1.0. `cost_quotes` maps a line (or (line, direction)) to its
-        floored quote. `turnover_7d`/`turnover_30d` are trailing discretionary turnover and
+        weight of each line at level 1.0. `cost_quotes` maps (line, direction, leverage),
+        (line, direction) or a line to its floored quote (see the module docstring). `turnover_7d`/`turnover_30d` are trailing discretionary turnover and
         `cost_30d_bps` trailing discretionary cost, as NAV shares / bps of NAV."""
         run = _Run(
             self,
@@ -188,11 +215,29 @@ class _Run:
         u = self.unit.get(s, 0.0)
         return w / u if u > EPS else 0.0
 
-    def quote(self, s: str, direction: str) -> CostQuote | None:
-        q = self.cost_quotes.get((s, direction))
-        if q is None:
-            q = self.cost_quotes.get(s)
-        return q if q is not None and q.direction == direction else None
+    def quote(self, s: str, direction: str, leverage: int = 1) -> CostQuote | None:
+        """The quote for one leg: (line, direction, L) first; a levered leg without a levered
+        quote falls back to the unlevered keys (line, direction, 1), (line, direction), line."""
+        keys: list[object] = [(s, direction, leverage)]
+        if leverage != 1:
+            keys.append((s, direction, 1))
+        keys.extend([(s, direction), s])
+        for key in keys:
+            q = self.cost_quotes.get(key)
+            if q is not None and q.direction == direction:
+                return q
+        return None
+
+    def leg_quote(self, s: str, before: float, after: float) -> CostQuote | None:
+        """Quote for the move before -> after, in its direction. It is a lever leg (L = 2) when
+        the traded side reaches the leverage extension: |level| above 1.0 after the move, or
+        before it when the move stays on the same side (trimming the levered tranche)."""
+        if s not in self.unit:
+            return self.quote(s, self.direction(before, after))
+        level = abs(self.level_of(s, after))
+        if before * after > 0:
+            level = max(level, abs(self.level_of(s, before)))
+        return self.quote(s, self.direction(before, after), ck.line_leverage(level))
 
     def direction(self, before: float, after: float) -> str:
         if after > EPS:
@@ -204,7 +249,7 @@ class _Run:
     def carry_line(self, s: str, w: float) -> float:
         if abs(w) <= EPS or s not in self.specs:
             return 0.0
-        q = self.quote(s, "long" if w > 0 else "short")
+        q = self.leg_quote(s, 0.0, w)
         return abs(w) * q.carry_bps_day if q is not None else 0.0
 
     def carry(self, w: Mapping[str, float]) -> float:
@@ -220,11 +265,14 @@ class _Run:
                 total += abs(v) * st.sigma_ann
         return total
 
-    def stale(self, s: str) -> bool:
+    def data_frozen(self, s: str) -> bool:
+        """R18: missing state or a data freeze from the pack (never re-derived from data_age_h)."""
+        return data_frozen(self.states.get(s))
+
+    def session_frozen(self, s: str) -> bool:
+        """R19: the market is closed, or the pack froze the line only for market_closed."""
         st = self.states.get(s)
-        if st is None or st.frozen:
-            return True
-        return st.data_age_h is not None and st.data_age_h > self.lim.freshness.daily_bar_max_h
+        return st is not None and (not st.market_open or (st.frozen and not data_frozen(st)))
 
     def groups(self) -> list[tuple[str, list[str], float]]:
         caps = self.lim.caps
@@ -241,6 +289,11 @@ class _Run:
         """Reported next to stop-at-risk: NAV share between now and the halt line."""
         dd = min(max(self.nav_drawdown or 0.0, 0.0), 0.999999)
         return max(0.0, 1.0 - self.lim.killswitch.halt_at / (1.0 - dd))
+
+    def base_w(self) -> dict[str, float]:
+        """The book the engine started from: snapshot line weights (before any R1 de-risk), every
+        managed line present (0 when flat or without a snapshot), plus the locked lines."""
+        return {s: self.cur.get(s, 0.0) for s in self.order}
 
     def changed(self, w: Mapping[str, float], held: Mapping[str, str] | None = None) -> list[str]:
         held = held or {}
@@ -274,6 +327,7 @@ class _Run:
         return RiskDecision(
             raw_levels=self.raw,
             banded_levels=self.banded,
+            base_w=self.base_w(),
             proposed_w=_clean(proposed or final),
             final_w=final,
             checks=checks,
@@ -308,7 +362,7 @@ class _Run:
         ]
         return RiskDecision(
             raw_levels=self.raw, banded_levels={s: 0.0 for s in self.managed},
-            proposed_w=dict(final), final_w=final, checks=checks, gross=0.0, net=0.0,
+            base_w=self.base_w(), proposed_w=dict(final), final_w=final, checks=checks, gross=0.0, net=0.0,
             margin_use=0.0, stop_budget_used=0.0, stop_budget_limit=self.cushion(),
             carry_bps_day=0.0, ex_ante_vol=0.0, basis="halted", hold_reasons=[],
             compliance=self.compliance,
@@ -392,11 +446,12 @@ class _Run:
         return num / den if den > EPS else None
 
     def frozen_reference_share(self) -> float:
+        """R18: share of reference weight on data-frozen lines (market_closed does not count)."""
         total = sum(abs(self.ref_w[s]) for s in self.managed if self.specs[s].in_reference)
         if total <= EPS:
             return 0.0
         frozen = sum(abs(self.ref_w[s]) for s in self.managed
-                     if self.specs[s].in_reference and self.stale(s))
+                     if self.specs[s].in_reference and self.data_frozen(s))
         return frozen / total
 
     def boxes(self) -> None:
@@ -460,9 +515,9 @@ class _Run:
                 lo, hi = restrict(lo, hi, min(b, 0.0), math.inf)
                 no_add.append("chase_short")
             holds = []
-            if self.stale(s):
+            if self.data_frozen(s):
                 holds.append("stale")
-            if st is not None and not st.market_open:
+            if self.session_frozen(s):
                 holds.append("closed")
             if self.blockers:
                 holds.append("blocked")
@@ -585,7 +640,7 @@ class _Run:
     def gate(self, s: str, before: float, after: float, toward: bool) -> tuple[bool, float | None, str]:
         """R15 for one changed line: (passes, SR_be, reason)."""
         limit = gate_threshold(toward, self.p)
-        q = self.quote(s, self.direction(before, after))
+        q = self.leg_quote(s, before, after)
         st = self.states.get(s)
         sigma = st.sigma_ann if st is not None else None
         if q is None:
@@ -681,7 +736,7 @@ class _Run:
             return found
         cost = {}
         for s in changed:
-            q = self.quote(s, self.direction(base[s], w[s]))
+            q = self.leg_quote(s, base[s], w[s])
             cost[s] = dw[s] * (q.per_side_bps if q is not None else 0.0)
         found = self.trim(cost, lim.cost_budget.cycle_max_bps, "R14 cycle cost budget", worst_first)
         if not found and self.cost_30d_bps is not None:
@@ -768,7 +823,7 @@ class _Run:
         ))
         old = []
         for s in changed:
-            q = self.quote(s, self.direction(base[s], final[s]))
+            q = self.leg_quote(s, base[s], final[s])
             if q is None or (self.now - q.quoted_at).total_seconds() > lim.freshness.quote_max_s:
                 old.append(s)
         rows.append(RiskCheck(
@@ -839,7 +894,7 @@ class _Run:
         cost = 0.0
         disc = 0.0
         for s in changed:
-            q = self.quote(s, self.direction(base[s], final[s]))
+            q = self.leg_quote(s, base[s], final[s])
             c = abs(final[s] - base[s]) * (q.per_side_bps if q is not None else 0.0)
             cost += c
             disc += 0.0 if toward[s] else c

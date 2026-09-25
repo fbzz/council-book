@@ -81,6 +81,24 @@ def test_allowed_directions(lines):
     assert allowed_directions(band=_band(0.0, 1.0), ref=0.5, current=0.5, line=gold, admitted=False) == []
 
 
+def test_levels_below_zero_need_a_short_card(lines):
+    oil = {ln.symbol: ln for ln in lines}["OIL"]
+    band = _band(-0.5, 0.0)
+    assert allowed_directions(band=band, ref=0.0, current=-0.25, line=oil, admitted=True,
+                              short_card=False) == ["add", "cover"]
+    assert allowed_directions(band=band, ref=0.0, current=0.0, line=oil, admitted=True,
+                              short_card=False) == []
+
+
+def test_desk_offers_short_only_with_a_risk_down_card(ref, bands, current, lines, policy):
+    def oil_row(pack):
+        text = render(pack, ref, bands, current, lines, policy)
+        return next(r for r in text.splitlines() if r.startswith("OIL"))
+
+    assert "may: add, cover" in oil_row(build_pack())                     # no card on OIL
+    assert "may: add, short, cover" in oil_row(build_pack(ewma={"OIL": 2.5}))   # K:vol:2 on OIL
+
+
 def test_late_evidence_never_shown(ref, bands, current, lines, policy):
     pack = with_late_evidence(build_pack())
     text = render(pack, ref, bands, current, lines, policy) + news_detail(pack)
