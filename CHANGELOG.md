@@ -1,5 +1,14 @@
 # Changelog
 
+## reference v2 — policy change (2026-09-25)
+- The reference-spec-v1 backtest showed 21-25 trend flips per line per year (764% turnover, 2.1%/yr
+  cost drag, 59% mean gross). Seven variants and a selection rule were pre-registered (tag
+  `reference-variants-spec`) and run: **V3** was selected — a 2% hysteresis band around each moving
+  average and a "mixed" level of 0.75. In-sample: CAGR 14.1%, vol 12.1%, max drawdown −23.0%, 253%
+  turnover. Variants with more volatility breached the −25% kill line. See `docs/reference-variants.md`.
+- One trend implementation (`reference.signals.trend_states`) now serves both the live cycle and the
+  backtest.
+
 ## council-spec-v1 (pending tag) — policy change
 - **Policy v2** (`policy/`): exposure lines with a signal history and ordered vehicle candidates
   (UCITS/ETC real first, then 1× CFD); a composition-based reference book (≈1× gross, never levered,

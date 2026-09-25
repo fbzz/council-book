@@ -11,7 +11,9 @@ vol:
 trend:
   fast_sma: 50
   slow_sma: 200                     # PRIOR completed daily closes only
-  levels: {up: 1.0, mixed: 0.5, down: 0.25}
+  band_pct: 2.0                     # hysteresis around each SMA (variant V3, selected by the frozen rule)
+  confirm_closes: 1
+  levels: {up: 1.0, mixed: 0.75, down: 0.25}
   crypto_confirm_closes: 2          # crypto trend flips need 2 consecutive closes (1%/side costs)
 level_grid: [-0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
 book:

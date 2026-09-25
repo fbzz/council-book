@@ -35,7 +35,8 @@ BASE = {"NDX": 0.35, "SEMIS": 0.15, "SPX": 0.15, "GOLD": 0.12, "BTC": 0.13, "ETH
 def test_levels_follow_the_trend_table(policy):
     states = all_states(policy, SEMIS={"trend": "mixed"}, SPX={"trend": "down"})
     levels = reference_levels(policy.universe.lines, states, policy)
-    assert levels["NDX"] == 1.0 and levels["SEMIS"] == 0.5 and levels["SPX"] == 0.25
+    table = policy.reference["trend"]["levels"]
+    assert levels["NDX"] == table["up"] and levels["SEMIS"] == table["mixed"] and levels["SPX"] == table["down"]
     assert all(levels[s] == 0.0 for s in OVERLAY)  # overlay lines are council-only
 
 
@@ -58,7 +59,8 @@ def test_overlay_line_in_uptrend_still_zero_and_unflagged(policy):
 
 def test_states_keyed_by_signal_ticker_are_accepted(policy):
     lines = [ln for ln in policy.universe.lines if ln.symbol == "NDX"]
-    assert reference_levels(lines, {"QQQ": state("QQQ", trend="mixed")}, policy) == {"NDX": 0.5}
+    mixed = policy.reference["trend"]["levels"]["mixed"]
+    assert reference_levels(lines, {"QQQ": state("QQQ", trend="mixed")}, policy) == {"NDX": mixed}
 
 
 def test_level_table_that_would_short_is_rejected(policy):
@@ -204,7 +206,8 @@ def test_gross_below_limit_is_not_scaled(policy):
     states = all_states(policy, NDX={"trend": "mixed"})
     book = build_reference(cycle_id="c", lines=policy.universe.lines, states=states,
                            returns=_calm_returns(), policy=policy)
-    assert book.k == 1.0 and book.gross == pytest.approx(0.95 - 0.175)
+    mixed = policy.reference["trend"]["levels"]["mixed"]
+    assert book.k == 1.0 and book.gross == pytest.approx(0.95 - 0.35 * (1 - mixed))
 
 
 def test_ex_ante_vol_above_hard_limit_is_scaled_to_the_limit(policy):
