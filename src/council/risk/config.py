@@ -148,10 +148,15 @@ class CostGateConfig(Frozen):
 
 
 class EventBlockConfig(Frozen):
-    """R16: hours before/after a macro event during which adds are blocked."""
+    """R16: hours before/after a scheduled macro event during which adds are blocked; for a stock's
+    earnings, the hours before/after the report and the half-width, in US trading days, of the
+    window around an ESTIMATED report date (`council.risk.churn.event_window`)."""
 
     macro_before_h: float = Field(ge=0)
     macro_after_h: float = Field(ge=0)
+    earnings_before_h: float = Field(ge=0)
+    earnings_after_h: float = Field(ge=0)
+    earnings_estimate_window_days: int = Field(ge=0, le=30)
 
 
 class FreshnessConfig(Frozen):
@@ -164,9 +169,16 @@ class FreshnessConfig(Frozen):
 
 
 class ProposalConfig(Frozen):
-    """R21: proposal shape."""
+    """R21: proposal shape. `max_legs` counts risk-increasing and discretionary legs; risk-reducing
+    reference-origin legs do not count, and `max_legs_total` bounds every leg of a plan."""
 
     max_legs: int = Field(ge=1)
+    max_legs_total: int = Field(ge=1)
+
+    @property
+    def total_cap(self) -> int:
+        """The hard total, never below `max_legs` (a policy that raises `max_legs` raises it too)."""
+        return max(self.max_legs_total, self.max_legs)
 
 
 class RiskLimits(BaseModel):
@@ -208,14 +220,37 @@ class OvernightConfig(Frozen):
     crypto_cfd: float = Field(ge=0)
 
 
+class MinTradeConfig(Frozen):
+    """The hard trade-size floor in REAL dollars: `copy_min_multiple` x the copy minimum."""
+
+    copy_min_real_usd: float = Field(gt=0)
+    copy_min_multiple: float = Field(ge=1)
+
+    @property
+    def floor_real_usd(self) -> float:
+        return self.copy_min_real_usd * self.copy_min_multiple
+
+
+class AssumedAccount(Frozen):
+    """Conservative stand-ins when the account figures are unknown: the virtual NAV before the
+    broker is connected, the mirror ratio (real / virtual) while `mirror.json` is missing."""
+
+    virtual_nav_usd: float = Field(gt=0)
+    mirror_ratio: float = Field(gt=0, le=10)
+
+
 class CostFloors(BaseModel):
-    """costs.yaml: per-side floors (bps), fixed commissions (USD), slippage buffer, carry rates."""
+    """costs.yaml: per-side floors (bps), fixed commissions (USD), where the fixed commission is
+    charged, the real-dollar trade floor, assumed account figures, slippage buffer, carry rates."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     version: int
     per_side_bps: dict[str, float]
     fixed_commission_usd: dict[str, float]
+    fixed_commission_charged_on: tuple[Literal["virtual", "mirror"], ...] = Field(min_length=1)
+    min_trade: MinTradeConfig
+    assumed: AssumedAccount
     slippage_buffer_bps: float = Field(ge=0)
     overnight_annual: OvernightConfig
     weekend_multiplier: float = Field(ge=1)

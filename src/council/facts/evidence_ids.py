@@ -1,6 +1,7 @@
 """Deterministic evidence IDs. The auditor rejects any cited ID that is not in the cycle's pack.
 
-Formats (models/common.py): F:<line>:<field> market · V:<line>:<field> volatility ·
+Formats (models/common.py): F:<line>:<field> market (and fundamental, kind "fundamental", with a
+field from FUNDAMENTAL_FIELDS) · V:<line>:<field> volatility ·
 C:<line>:<field> cost · M:<series>@<YYYY-MM-DD> macro · E:<kind>[:<symbol>]@<YYYY-MM-DD> event ·
 N:<sha256[:8]> news. Rule: every component is non-empty and uses [A-Za-z0-9_.-] only, so an ID
 can never smuggle a separator, whitespace or markup into a prompt or the journal."""
@@ -19,6 +20,18 @@ MARKET_FIELDS: tuple[str, ...] = (
     "data_age_h", "market_open",
 )
 VOL_FIELDS: tuple[str, ...] = ("sigma_ann", "vol_ratio", "ewma5_60")
+# Stock lines' fundamentals (design §11.2; kind "fundamental", available at the SEC acceptance time of
+# the filing they come from): revenue growth year on year, its acceleration, the gross and operating
+# margin changes (percentage points), the rank's within-sector and global scores, the age of the
+# latest filing in days, and the FF12 sector.
+FUNDAMENTAL_FIELDS: tuple[str, ...] = (
+    "rev_yoy", "rev_accel", "gm_chg", "om_chg", "sector_pct", "composite", "filing_age_d", "sector",
+)
+# Fundamental fields that move with the calendar, not with new evidence (left out of the per-line
+# material fingerprint, runtime.material_fingerprints).
+FUNDAMENTAL_NOT_MATERIAL: frozenset[str] = frozenset({"filing_age_d"})
+if set(FUNDAMENTAL_FIELDS) & set(MARKET_FIELDS):
+    raise AssertionError("fundamental and market fields share the F: namespace; they must not overlap")
 
 
 def _part(value: object, what: str) -> str:
@@ -41,6 +54,13 @@ def _day(value: date | datetime | str) -> str:
 def fact_id(line: str, field: str) -> str:
     """Market fact, e.g. F:NDX:dist_sma200."""
     return f"F:{_part(line, 'line')}:{_part(field, 'field')}"
+
+
+def fundamental_id(line: str, field: str) -> str:
+    """Fundamental fact of a stock line, e.g. F:BRK_B:rev_yoy (field from FUNDAMENTAL_FIELDS)."""
+    if field not in FUNDAMENTAL_FIELDS:
+        raise ValueError(f"unknown fundamental field {field!r}")
+    return fact_id(line, field)
 
 
 def vol_id(line: str, field: str) -> str:

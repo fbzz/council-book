@@ -10,6 +10,12 @@ Rules:
   clean 401/403 and 429) → DefiniteRejection; timeout / transport error / 5xx → AmbiguousWriteError.
 - This client NEVER retries. Retrying a write is the executor's decision, with a new attempt id,
   and only after a definite rejection.
+- No order-cancel method yet, on purpose. When an open is held for a closed market (status 11)
+  the executor cancels it only if the write client has `cancel_order(request_id=, order_id=)` AND
+  its `CANCEL_ROUTE_VERIFIED` attribute is True; both change here after the M5 route check
+  verifies the cancel route and its payload (contract test first). Until then a held order becomes
+  `waiting_for_market`, which the watch resolves read-only (see ETORO_ROUTES.md, "Order held for a
+  closed market"). `resume` never cancels.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ def _import_guard() -> None:
 
 _import_guard()
 
+CANCEL_ROUTE_VERIFIED = False     # flips, together with cancel_order, after the M5 route check
 OPEN_ORDER_PATH = "/api/v3/trading/execution/orders"
 CLOSE_POSITION_PATH = "/api/v1/trading/execution/market-close-orders/positions/{position_id}"
 POSITION_PATH = "/api/v2/trading/positions/{position_id}"
@@ -135,6 +142,9 @@ def build_patch_body(*, stop_loss_rate: float) -> dict[str, Any]:
 
 class EtoroWriteClient:
     """open / close / patch-SL. Construct only with the WRITE token in the operator terminal."""
+
+    # The executor cancels a held order only when this is True AND `cancel_order` exists.
+    CANCEL_ROUTE_VERIFIED = CANCEL_ROUTE_VERIFIED
 
     def __init__(
         self,

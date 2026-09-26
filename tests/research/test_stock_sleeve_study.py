@@ -49,7 +49,7 @@ def uni(inp, spec):
 
 
 def test_spec_numbers_match_the_policy_they_cite(spec):
-    pol = Policy.load()
+    pol = Policy.load(include_sleeve=False)
     assert set(spec["variants"]) == {"GC", "SC", "SQ"}
     assert set(S.cells_of(spec, selectable=True)) == {"SC-8", "SC-10", "SQ-8", "SQ-10"}
     assert set(S.cells_of(spec, selectable=False)) == {"GC-8", "GC-10"}      # the user fixed within-sector ranks
@@ -313,7 +313,7 @@ def test_max_percentile_null_corrects_for_the_best_of_several_cells():
 
 
 def test_rebased_policy_scales_the_core_to_its_share():
-    pol = Policy.load()
+    pol = Policy.load(include_sleeve=False)
     reb = S.rebased_policy(pol, 0.45)
     ref = [ln for ln in reb.universe.lines if ln.in_reference]
     assert sum(ln.base_weight for ln in ref) == pytest.approx(0.45)
@@ -378,7 +378,7 @@ def test_gate_needs_every_check(spec):
 
 
 def test_sealed_parameters_round_trip_and_refuse_tampering(spec, tmp_path):
-    pol = Policy.load()
+    pol = Policy.load(include_sleeve=False)
     root = tmp_path / "state-outside"
     digest = S.seal_params(root / "private-params.json", real_nav_usd=12345.0, fixed_fee_usd=1.0)
     patched = {**spec, "costs": {**spec["costs"], "private_params_sha256": digest}}
@@ -393,7 +393,7 @@ def test_sealed_parameters_round_trip_and_refuse_tampering(spec, tmp_path):
 
 
 def test_the_fee_is_charged_per_leg_on_the_sleeve_capital(spec, inp):
-    ctx = S.Context(spec=spec, inp=inp, policy=Policy.load(), calendar=pd.DatetimeIndex([]),
+    ctx = S.Context(spec=spec, inp=inp, policy=Policy.load(include_sleeve=False), calendar=pd.DatetimeIndex([]),
                     rows=pd.DatetimeIndex([]), dates=[], eligible={}, funnels={},
                     market=S.Market(core={}, controls={}, long={}), real_nav=4000.0, fee_usd=1.0, draws=0,
                     synthetic=True)
@@ -404,7 +404,7 @@ def test_the_fee_is_charged_per_leg_on_the_sleeve_capital(spec, inp):
     assert in_book.fixed["X"] == pytest.approx(2.0 / 4000.0)
     assert in_book.per_side["X"] == pytest.approx(40e-4)
     assert ctx.stock_costs(["X"], share=1.0, fee_mult=0.0).fixed["X"] == 0.0
-    pol = Policy.load()
+    pol = Policy.load(include_sleeve=False)
     core = S.core_costs(ctx, S.core_lines(pol), pol)
     assert all(v >= pol.costs["slippage_buffer_bps"] / 1e4 for v in core.per_side.values())   # slippage on every leg
 
@@ -661,7 +661,7 @@ def test_coverage_counts_only(spec, inp, tmp_path):
 
 def test_gate_json_is_written_before_anything_after_the_gate(monkeypatch, tmp_path):
     spec = S.load_spec()
-    ctx = S.synthetic_context(spec, Policy.load(), seed=11, draws=2, verbose=False)
+    ctx = S.synthetic_context(spec, Policy.load(include_sleeve=False), seed=11, draws=2, verbose=False)
 
     def crash(*args, **kwargs):
         raise KeyboardInterrupt

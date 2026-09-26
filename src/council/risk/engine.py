@@ -11,12 +11,21 @@ Pipeline (every number from policy/risk.yaml; rule IDs as in its comments):
     cap is 1 (R6, hold-allowed); line cap with hold-allowed (R5); no-increase for WARN (R3), vol breakers (R9),
     macro event windows (R16), post-stop cool-off (R4d), missing catastrophe stop (R4), hedged
     lines; side-specific anti-chase (R17); hold for frozen or missing states (R18/R19), frozen
-    reference share above the limit (R18), closed markets (R19) and blockers (R20).
+    reference share above the limit (R18), closed markets (R19) and blockers (R20). A blocker
+    holds every line, except a "satellite:<id>" blocker (a stock order waiting for its market),
+    which holds only the satellite sleeve. `pending_w` (open orders the broker still holds) is
+    counted as held: added to the current book before any limit is applied.
     Freshness is the pack's call: a line holds when its state is `frozen` (any reason); the engine
     never re-derives staleness from the raw `data_age_h` (the pack's age skips weekends and
     holidays). The R18 frozen reference share counts only DATA freezes: a state frozen solely
     for `market_closed` is held (R19) but does not count, so a closed equity session can never
-    hold the crypto lines.
+    hold the crypto lines. R18 is PER SLEEVE (design D13): the core share (every in-reference line
+    outside the satellite) above the limit holds every line, as before; the satellite share (the
+    in-reference stock lines) above the limit holds only the satellite. A RETIRING stock line is
+    reduce-only whatever its band (never an add), and a data freeze (its own, or the satellite
+    share) keeps it reduce-only instead of holding it, so it can still be sold; a closed session
+    (R19), a blocker (R20) or a core freeze still holds it. R9's book-ratio proxy leaves the
+    satellite out (each stock keeps its own instrument breaker).
  5. Projection: group caps (crypto_total, fx_total, equity_beta_cluster; R5) -> gross <=
     proposal_max (R1) -> short gross and net floor (R2) -> net ceiling (R2) -> margin sum(|w|/L) <=
     margin_use_max with L = 2 above level 1.0 (R7) -> ex-ante vol <= ex_ante_vol_hard (R8).
@@ -30,6 +39,35 @@ Pipeline (every number from policy/risk.yaml; rule IDs as in its comments):
 Moves toward the reference are exempt from R12 and R13 (TOWARD_REFERENCE_EXEMPT) and use the
 reference cost threshold; they are NOT exempt from the cost gate, deadband, event block or
 anti-chase.
+
+Leg origin (design D7): a change is REFERENCE-origin when it moves the line toward the mechanical
+rule's target (`toward_reference`; there are no council anchors before WP-K), DISCRETIONARY
+otherwise. `leg_origins` gives the planner the same classification.
+- R11: reference-origin changes follow the studied rule (`churn.reference_pending`, i.e.
+  `reference.sleeve.pending_trades`, with the held reference levels of `risk.held_levels`; None
+  migrates them from the current book): a changed reference level always trades, a drift trades
+  at max(deadband level x unit, min_nav_share), sleeve lines get the never-borrow trim; the size
+  floor is then max(`copy_min_share`, the broker minimum) (the real-dollar trade floor), skipped
+  by a close to zero. Discretionary changes keep the level step and max(2% NAV, broker minimum,
+  `copy_min_share`); a stock line closing to zero skips both.
+- R14: a leg costs |dw| x per side + the quote's private `fixed_fee_nav_bps` (real non-crypto
+  vehicles). Risk-reducing reference-origin legs are exempt from the per-cycle cap; the 30-day
+  budget counts discretionary legs only. The fee never holds a risk-reducing leg: it counts in the
+  totals (so it squeezes risk-increasing legs), but a risk-reducing leg is held only when the
+  VARIABLE costs of the risk-reducing legs alone exceed the budget (today's rule; `trim_costs`).
+- R15: reference-origin legs as before (variable round trip, reference threshold and horizon);
+  risk-increasing discretionary legs add the fee paid twice as bps of the traded notional;
+  risk-reducing legs are never gated on the fee (variable round trip, as today).
+- R21: `max_legs` counts risk-increasing and discretionary legs; risk-reducing reference legs do
+  not count; `max_legs_total` bounds them all.
+- MC: `material_changed` is one flag for every line, or a per-line map (design §11.4,
+  `runtime.material_changes`): a discretionary change on a line needs new material evidence on that
+  line or market-wide; a line the map does not name has none.
+- R14 and R21 hold lines in TRIM ORDER (risk_reducing, reference origin, -SR_be, -|dw|, symbol):
+  risk-increasing discretionary legs first, risk-reducing reference legs last.
+- Privacy (D18): a fee-bearing R14/R15 check publishes the code `R14_fee`/`R15_fee` instead of its
+  value, and a fee-bearing discretionary leg's R15 hold reason carries no number, so nothing in a
+  public record encodes the NAV.
 Cost quotes: `cost_quotes` may be keyed (line, direction, leverage), (line, direction) or line.
 A leg is priced with the quote of its direction and leverage (L = 2 when the line's level after
 the move is above 1.0), falling back to the unlevered keys when no levered quote exists.
@@ -46,6 +84,7 @@ from datetime import datetime
 import numpy as np
 
 from council.invariants import check_policy
+from council.ledger.states import SATELLITE_BLOCKER_PREFIX
 from council.models.broker import CostQuote, ExposureSnapshot
 from council.models.facts import EventItem, MarketState
 from council.models.risk import Band, RiskCheck, RiskDecision
@@ -59,16 +98,27 @@ from council.risk.churn import (
     line_increase,
     min_hold_ok,
     reentry_blocked,
+    reference_pending,
+    reference_size_ok,
 )
 from council.risk.config import risk_limits
-from council.risk.costs import gate_threshold, hold_days, round_trip_bps, srbe
+from council.risk.costs import (
+    discretionary_round_trip_bps,
+    gate_threshold,
+    hold_days,
+    round_trip_bps,
+    srbe,
+)
 from council.risk.exposure import is_unmapped
+from council.risk.held_levels import migrated_levels
 from council.risk.killswitch import LATCHED
 from council.risk.projection import project_or_nearest
 from council.risk.stops import catastrophe_stop_distance, stop_at_risk
 
 EPS = 1e-9
 TOWARD_REFERENCE_EXEMPT: frozenset[str] = frozenset({"R12", "R13"})
+REFERENCE, DISCRETIONARY = "reference", "discretionary"
+R14_FEE, R15_FEE = "R14_fee", "R15_fee"      # public codes for fee-bearing checks (no value)
 MARKET_CLOSED = "market_closed"   # the pack's session freeze: held, but not a data freeze
 BOX_LABELS = {
     "warn": "R3 WARN no adds", "breaker": "R9 vol breaker", "event": "R16 event window",
@@ -76,7 +126,10 @@ BOX_LABELS = {
     "hedged": "hedged line", "chase_long": "R17 anti-chase", "chase_short": "R17 anti-chase",
     "stale": "R18 frozen data", "closed": "R19 market closed", "blocked": "R20 blocker",
     "cap": "R5 line cap", "leverage": "R6 leverage cap",
+    "retiring": "retiring line: reduce only", "stale_reduce": "R18 frozen data: reduce only",
 }
+R18_CORE_HOLD = "R18 frozen reference share"
+R18_SATELLITE_HOLD = "R18 frozen satellite share"
 VolFn = Callable[[Mapping[str, float]], float]
 
 
@@ -120,6 +173,24 @@ def toward_reference(before: float, after: float, ref: float) -> bool:
     return lo - EPS <= after <= hi + EPS and abs(after - ref) < abs(before - ref) - EPS
 
 
+def leg_origin(before: float, after: float, ref: float) -> str:
+    """D7: "reference" when the move goes toward the mechanical rule's target, else
+    "discretionary" (no council anchors exist before WP-K)."""
+    return REFERENCE if toward_reference(before, after, ref) else DISCRETIONARY
+
+
+def leg_origins(base_w: Mapping[str, float], final_w: Mapping[str, float],
+                ref_w: Mapping[str, float], eps: float = 1e-6) -> dict[str, str]:
+    """Origin of every changed line of a decision (the planner copies it onto the legs)."""
+    lines = set(base_w) | set(final_w)
+    out: dict[str, str] = {}
+    for s in sorted(lines):
+        before, after = float(base_w.get(s, 0.0)), float(final_w.get(s, 0.0))
+        if abs(after - before) > eps:
+            out[s] = leg_origin(before, after, float(ref_w.get(s, 0.0)))
+    return out
+
+
 class RiskEngine:
     """Deterministic risk officer. One instance per policy; `evaluate` is pure."""
 
@@ -143,7 +214,7 @@ class RiskEngine:
         events: Iterable[EventItem],
         last_change: Mapping[str, datetime],
         turnover_7d: float,
-        material_changed: bool,
+        material_changed: bool | Mapping[str, bool],
         basis: str,
         now: datetime,
         ex_ante_vol_fn: VolFn | None = None,
@@ -154,13 +225,21 @@ class RiskEngine:
         blockers: Iterable[str] = (),
         broker_min_share: Mapping[str, float] | None = None,
         nav_drawdown: float | None = None,
+        pending_w: Mapping[str, float] | None = None,
+        held_levels: Mapping[str, float] | None = None,
+        copy_min_share: float = 0.0,
+        cost_30d_fee_bps: float = 0.0,
     ) -> RiskDecision:
         """Run the pipeline in the module docstring.
 
         `levels` are post-enforce council levels, `ref` the reference LEVELS, `unit_weights` the
         weight of each line at level 1.0. `cost_quotes` maps (line, direction, leverage),
         (line, direction) or a line to its floored quote (see the module docstring). `turnover_7d`/`turnover_30d` are trailing discretionary turnover and
-        `cost_30d_bps` trailing discretionary cost, as NAV shares / bps of NAV."""
+        `cost_30d_bps` trailing discretionary cost, as NAV shares / bps of NAV (fees included;
+        `cost_30d_fee_bps` is the fee part, only used to withhold the public value).
+        `held_levels` are the held reference levels (`risk.held_levels`; None migrates them from
+        the current book) and `copy_min_share` the real-dollar trade floor as a NAV share (both
+        private). `material_changed` is one flag, or {line: new material evidence} (MC per line)."""
         run = _Run(
             self,
             levels=levels, ref=ref, bands=bands, states=states, snapshot=snapshot,
@@ -170,6 +249,10 @@ class RiskEngine:
             turnover_30d=turnover_30d, cost_30d_bps=cost_30d_bps, book_vol_ratio=book_vol_ratio,
             stop_hits=stop_hits or {}, blockers=list(blockers),
             broker_min_share=broker_min_share or {}, nav_drawdown=nav_drawdown,
+            pending_w=dict(pending_w or {}),
+            held_levels=None if held_levels is None else dict(held_levels),
+            copy_min_share=max(float(copy_min_share), 0.0),
+            cost_30d_fee_bps=max(float(cost_30d_fee_bps or 0.0), 0.0),
         )
         return run.decide()
 
@@ -180,7 +263,8 @@ class _Run:
     The keyword inputs become attributes under the names `RiskEngine.evaluate` passes: levels,
     ref, bands, states, snapshot, unit_weights, kill_state, cost_quotes, events, last_change,
     turnover_7d, material_changed, basis, now, vol_fn, turnover_30d, cost_30d_bps,
-    book_vol_ratio, stop_hits, blockers, broker_min_share, nav_drawdown."""
+    book_vol_ratio, stop_hits, blockers, broker_min_share, nav_drawdown, pending_w, held_levels,
+    copy_min_share, cost_30d_fee_bps."""
 
     def __init__(self, engine: RiskEngine, **kw) -> None:
         self.p: Policy = engine.policy
@@ -194,6 +278,11 @@ class _Run:
             raise ValueError(f"unknown lines in levels: {unknown}")
         signed = self.snapshot.signed_w if self.snapshot is not None else {}
         self.cur = {s: float(w) for s, w in signed.items()}
+        for s, w in self.pending_w.items():      # an order held until its market opens counts as held
+            if math.isfinite(float(w)) and abs(float(w)) > EPS:
+                self.cur[s] = self.cur.get(s, 0.0) + float(w)
+        self.blockers_all = [b for b in self.blockers if not str(b).startswith(SATELLITE_BLOCKER_PREFIX)]
+        self.blockers_sat = [b for b in self.blockers if str(b).startswith(SATELLITE_BLOCKER_PREFIX)]
         self.managed = list(self.specs)
         self.locked = sorted(s for s in self.cur if s not in self.specs)
         self.order = self.managed + self.locked
@@ -206,6 +295,10 @@ class _Run:
         self.hold_reasons: list[str] = []
         self.compliance: list[str] = []
         self.srbe_seen: dict[str, float] = {}
+        if self.held_levels is None:        # no fill history given: migrate from the current book
+            self.held_levels = migrated_levels(self.specs.values(), self.cur, self.unit)
+        self.held_level = {s: float(self.held_levels.get(s, 0.0)) for s in self.managed}
+        self.fee_legs_r15: set[str] = set()    # discretionary fee-bearing lines the gate priced
         self.vol_detail = "covariance function" if self.vol_fn else "upper bound: rho = 1"
         if self.snapshot is None:
             self.hold_reasons.append("no broker snapshot: current book taken as flat")
@@ -255,6 +348,91 @@ class _Run:
     def carry(self, w: Mapping[str, float]) -> float:
         return float(sum(self.carry_line(s, v) for s, v in w.items()))
 
+    def leg_fee(self, s: str, before: float, after: float) -> float:
+        """The private fixed fee (bps of NAV) of the change before -> after: the quote's
+        `fixed_fee_nav_bps` for the traded side; a flip also pays the closing side's fee."""
+        if abs(after - before) <= EPS or s not in self.specs:
+            return 0.0
+        q = self.leg_quote(s, before, after)
+        fee = q.fixed_fee_nav_bps if q is not None else 0.0
+        if before * after < 0:
+            closing = self.quote(s, self.direction(before, 0.0))
+            fee += closing.fixed_fee_nav_bps if closing is not None else 0.0
+        return max(float(fee), 0.0)
+
+    @property
+    def variable_30d_bps(self) -> float:
+        """The trailing discretionary cost without its fixed fees (bps of NAV): what a risk-reducing
+        leg is measured against in the 30-day budget (the fee never holds it)."""
+        return max(float(self.cost_30d_bps or 0.0) - self.cost_30d_fee_bps, 0.0)
+
+    def leg_variable_cost(self, s: str, before: float, after: float) -> float:
+        """The variable part of a change's cost in bps of NAV: |dw| x per side (today's R14 cost)."""
+        q = self.leg_quote(s, before, after)
+        return abs(after - before) * (q.per_side_bps if q is not None else 0.0)
+
+    def leg_cost(self, s: str, before: float, after: float) -> float:
+        """R14 cost of one change in bps of NAV: |dw| x per side + the fixed fee."""
+        return self.leg_variable_cost(s, before, after) + self.leg_fee(s, before, after)
+
+    def origin(self, s: str, before: float, after: float) -> str:
+        return leg_origin(before, after, self.ref_w.get(s, 0.0))
+
+    def trim_key(self, w: Mapping[str, float]) -> Callable[[str], tuple]:
+        """R14/R21 trim order: (risk_reducing, reference origin, -SR_be, -|dw|, symbol) ascending,
+        so risk-increasing discretionary legs are held first, risk-reducing reference legs last."""
+        base = self.base
+
+        def key(s: str) -> tuple:
+            before, after = base[s], w[s]
+            return (not ck.increased(before, after), self.origin(s, before, after) == REFERENCE,
+                    -self.srbe_seen.get(s, 0.0), -abs(after - before), s)
+
+        return key
+
+    def reference_exempt(self, s: str, before: float, after: float) -> bool:
+        """Risk-reducing reference-origin legs: exempt from the R14 cycle cap and the R21 count."""
+        return not ck.increased(before, after) and self.origin(s, before, after) == REFERENCE
+
+    def reference_rule(self) -> None:
+        """R11 for reference-origin legs: which lines the studied rule orders to their target now,
+        from the compliance base, the held reference levels and the reference targets (sleeve
+        lines under the never-borrow budget)."""
+        lines = [s for s in self.managed if self.unit[s] > EPS]
+        sleeve = self.p.universe.stock_sleeve
+        budget_lines = [s for s in lines if self.cls[s] == "stock"] if sleeve is not None else []
+        self.rule_pending = reference_pending(
+            lines, held_w=self.base, held_level=self.held_level, target_w=self.ref_w,
+            target_level=self.ref_level, unit=self.unit,
+            crypto_lines=[s for s in lines if self.cls[s] == "crypto"], policy=self.p,
+            budget_lines=budget_lines,
+            budget=float(sleeve.sleeve_weight) if sleeve is not None else math.inf,
+        )
+
+    def size_floor(self, s: str) -> float:
+        """The hard size floor as a NAV share: the real-dollar trade floor and the broker minimum."""
+        return max(self.copy_min_share, float(self.broker_min_share.get(s, 0.0)))
+
+    def r11_reason(self, s: str, before: float, after: float) -> str | None:
+        """R11 for one change (module docstring): the studied rule for reference-origin changes,
+        today's deadband for discretionary ones. None when it passes."""
+        u, cls = self.unit[s], self.cls[s]
+        to_zero = abs(after) <= EPS
+        if u <= EPS:
+            return "R11 deadband (no unit weight)"
+        if self.origin(s, before, after) == REFERENCE:
+            if s not in self.rule_pending:
+                return "R11 reference rule (level unchanged, drift below the threshold)"
+            if not reference_size_ok(after - before, to_zero=to_zero, min_share=self.size_floor(s)):
+                return "R11 below the minimum trade size"
+            return None
+        min_share = max(self.lim.deadband.min_nav_share, self.size_floor(s))
+        if not deadband_ok((after - before) / u, after - before, to_zero=to_zero,
+                           crypto=cls == "crypto", min_share=min_share, policy=self.p,
+                           stock=cls == "stock"):
+            return f"R11 deadband (level step {(after - before) / u:+.2f})"
+        return None
+
     def vol(self, w: Mapping[str, float]) -> float:
         if self.vol_fn is not None:
             return float(self.vol_fn(dict(w)))
@@ -268,6 +446,30 @@ class _Run:
     def data_frozen(self, s: str) -> bool:
         """R18: missing state or a data freeze from the pack (never re-derived from data_age_h)."""
         return data_frozen(self.states.get(s))
+
+    def material(self, s: str) -> bool:
+        """MC for one line: a single flag answers for every line; a per-line map answers per line
+        (a line it does not name has no new material evidence)."""
+        mc = self.material_changed
+        if isinstance(mc, Mapping):
+            return bool(mc.get(s, False))
+        return bool(mc)
+
+    def satellite(self, s: str) -> bool:
+        spec = self.specs.get(s)
+        return spec is not None and spec.sleeve == "satellite"
+
+    def retiring(self, s: str) -> bool:
+        """A stock line leaving the sleeve (role `retiring`): target 0, reduce-only."""
+        spec = self.specs.get(s)
+        return spec is not None and spec.stock is not None and spec.stock.role == "retiring"
+
+    def blocked_line(self, s: str) -> bool:
+        """R20: any whole-book blocker, or a satellite-scoped one on a satellite line."""
+        if self.blockers_all:
+            return True
+        spec = self.specs.get(s)
+        return bool(self.blockers_sat) and spec is not None and spec.sleeve == "satellite"
 
     def session_frozen(self, s: str) -> bool:
         """R19: the market is closed, or the pack froze the line only for market_closed."""
@@ -306,6 +508,7 @@ class _Run:
             return self.flatten()
         self.authority()
         self.compliance_base()
+        self.reference_rule()
         self.stop_distances()
         self.boxes()
         target = {s: self.banded[s] * self.unit[s] for s in self.managed}
@@ -432,11 +635,14 @@ class _Run:
 
     def book_ratio(self) -> float | None:
         """R9 book ratio: given, else the vol-weighted mean of instrument ratios over the base and
-        reference books (a proxy when no book return series is available)."""
+        reference books (a proxy when no book return series is available). The proxy leaves the
+        satellite out (design §17.2 #8): each stock line keeps its own instrument breaker."""
         if self.book_vol_ratio is not None:
             return self.book_vol_ratio
         num = den = 0.0
         for s in self.managed:
+            if self.satellite(s):
+                continue
             st = self.states.get(s)
             if st is None or st.ewma5_60_ratio is None or not st.sigma_ann:
                 continue
@@ -445,13 +651,15 @@ class _Run:
             den += weight
         return num / den if den > EPS else None
 
-    def frozen_reference_share(self) -> float:
-        """R18: share of reference weight on data-frozen lines (market_closed does not count)."""
-        total = sum(abs(self.ref_w[s]) for s in self.managed if self.specs[s].in_reference)
+    def frozen_reference_share(self, satellite: bool = False) -> float:
+        """R18: share of reference weight on data-frozen lines (market_closed does not count), over
+        the core (every in-reference line outside the satellite) or, with `satellite`, over the
+        in-reference satellite lines."""
+        lines = [s for s in self.managed if self.specs[s].in_reference and self.satellite(s) == satellite]
+        total = sum(abs(self.ref_w[s]) for s in lines)
         if total <= EPS:
             return 0.0
-        frozen = sum(abs(self.ref_w[s]) for s in self.managed
-                     if self.specs[s].in_reference and self.data_frozen(s))
+        frozen = sum(abs(self.ref_w[s]) for s in lines if self.data_frozen(s))
         return frozen / total
 
     def boxes(self) -> None:
@@ -461,16 +669,19 @@ class _Run:
         self.box_notes: dict[str, list[str]] = {}
         self.pinned: set[str] = set(self.locked)
         sets = ("warn", "breaker", "event", "cooloff", "nostop", "hedged", "chase_long",
-                "chase_short", "stale", "closed", "blocked")
+                "chase_short", "stale", "closed", "blocked", "retiring", "stale_reduce")
         self.sets: dict[str, set[str]] = {k: set() for k in sets}
         book_ratio = self.book_ratio()
         self.book_blocked = book_ratio is not None and book_ratio >= lim.vol_breaker.book_ratio
         self.frozen_share = self.frozen_reference_share()
+        self.frozen_share_sat = self.frozen_reference_share(satellite=True)
+        share_max = lim.freshness.frozen_reference_share_max + EPS
         all_hold: list[str] = []
-        if self.frozen_share > lim.freshness.frozen_reference_share_max + EPS:
-            all_hold.append("R18 frozen reference share")
-        if self.blockers:
+        if self.frozen_share > share_max:
+            all_hold.append(R18_CORE_HOLD)
+        if self.blockers_all:
             all_hold.append("R20 blocker")
+        self.sat_frozen = self.frozen_share_sat > share_max
         for s in self.managed:
             b, u, spec, st = self.base[s], self.unit[s], self.specs[s], self.states.get(s)
             notes: list[str] = []
@@ -514,20 +725,31 @@ class _Run:
             if anti_chase_block(st, False, True, p):
                 lo, hi = restrict(lo, hi, min(b, 0.0), math.inf)
                 no_add.append("chase_short")
+            line_hold = list(all_hold)
+            if self.sat_frozen and self.satellite(s):
+                line_hold.append(R18_SATELLITE_HOLD)
             holds = []
-            if self.data_frozen(s):
+            if self.retiring(s):
+                # never an add; a data freeze (own or satellite share) keeps it reduce-only
+                lo, hi = restrict(lo, hi, *no_add_interval(b))
+                no_add.append("retiring")
+                if self.data_frozen(s) or R18_SATELLITE_HOLD in line_hold:
+                    no_add.append("stale_reduce")
+                    if R18_SATELLITE_HOLD in line_hold:
+                        line_hold.remove(R18_SATELLITE_HOLD)
+            elif self.data_frozen(s):
                 holds.append("stale")
             if self.session_frozen(s):
                 holds.append("closed")
-            if self.blockers:
+            if self.blocked_line(s):
                 holds.append("blocked")
-            if holds or all_hold:
+            if holds or line_hold:
                 lo = hi = b
                 self.pinned.add(s)
             for key in no_add + holds:
                 self.sets[key].add(s)
             self.lo[s], self.hi[s] = lo, hi
-            self.box_notes[s] = [BOX_LABELS[k] for k in limits + no_add + holds] + all_hold
+            self.box_notes[s] = [BOX_LABELS[k] for k in limits + no_add + holds] + line_hold
         for s in self.locked:
             self.lo[s] = self.hi[s] = self.base[s]
 
@@ -638,7 +860,11 @@ class _Run:
 
     # ------------------------------------------------------------------ filters
     def gate(self, s: str, before: float, after: float, toward: bool) -> tuple[bool, float | None, str]:
-        """R15 for one changed line: (passes, SR_be, reason)."""
+        """R15 for one changed line: (passes, SR_be, reason). Reference-origin (toward) legs pay the
+        variable round trip only; risk-increasing discretionary legs add the fixed fee paid twice,
+        as bps of the traded notional, and their failure reason then carries no number (it encodes
+        the NAV). A risk-reducing leg is never gated on the fee: it pays the variable round trip,
+        as today (the fee must never keep the book from de-risking)."""
         limit = gate_threshold(toward, self.p)
         q = self.leg_quote(s, before, after)
         st = self.states.get(s)
@@ -647,25 +873,32 @@ class _Run:
             return False, None, "R15 no cost quote"
         if not sigma or sigma <= 0:
             return False, None, "R15 no volatility"
-        carry = q.carry_bps_day if ck.increased(before, after) else 0.0
-        value = srbe(round_trip_bps(q), carry, sigma,
-                     hold_days(self.cls[s], self.p, toward_reference=toward))
+        increases = ck.increased(before, after)
+        carry = q.carry_bps_day if increases else 0.0
+        fee_bearing = not toward and increases and q.fixed_fee_nav_bps > 0
+        trip = discretionary_round_trip_bps(q, after - before) if fee_bearing else round_trip_bps(q)
+        if fee_bearing:
+            self.fee_legs_r15.add(s)
+        if not math.isfinite(trip):
+            return False, None, f"{R15_FEE} net-of-cost gate (fixed fee)"
+        value = srbe(trip, carry, sigma, hold_days(self.cls[s], self.p, toward_reference=toward))
         if value > limit + EPS:
+            if fee_bearing:
+                return False, value, f"{R15_FEE} net-of-cost gate (fixed fee)"
             return False, value, f"R15 SR_be {value:.2f} above {limit:.2f}"
         return True, value, ""
 
     def line_reason(self, s: str, after: float) -> str | None:
-        before, u, cls = self.base[s], self.unit[s], self.cls[s]
+        before, cls = self.base[s], self.cls[s]
         toward = toward_reference(before, after, self.ref_w[s])
-        min_share = max(self.lim.deadband.min_nav_share, self.broker_min_share.get(s, 0.0))
-        if not deadband_ok((after - before) / u, after - before, to_zero=abs(after) <= EPS,
-                           crypto=cls == "crypto", min_share=min_share, policy=self.p):
-            return f"R11 deadband (level step {(after - before) / u:+.2f})"
+        why = self.r11_reason(s, before, after)
+        if why:
+            return why
         exempt = toward and "R12" in TOWARD_REFERENCE_EXEMPT
         if not min_hold_ok(s, self.last_change.get(s), self.now, sign_flip=before * after < 0,
                            toward_reference=exempt, asset_class=cls, policy=self.p):
             return "R12 minimum hold"
-        if self.lim.material_change_required and not toward and not self.material_changed:
+        if self.lim.material_change_required and not toward and not self.material(s):
             return "MC no new material evidence"
         ok, value, why = self.gate(s, before, after, toward)
         if value is not None:
@@ -694,6 +927,30 @@ class _Run:
                 break
         return out
 
+    def trim_costs(self, cost: Mapping[str, float], variable: Mapping[str, float],
+                   reducing: Mapping[str, bool], limit: float, reason: str,
+                   key: Callable[[str], tuple], *, var_limit: float | None = None) -> dict[str, str]:
+        """R14: hold lines until the summed cost (fixed fees included) fits `limit`, but never hold a
+        risk-reducing leg because of the fee. Risk-increasing legs are held first (in `key` order);
+        once only risk-reducing legs remain, one is held only while their VARIABLE costs exceed
+        `var_limit` (default `limit`), which is today's rule. Their fees still count against the
+        budget, so they squeeze risk-increasing legs, never themselves."""
+        var_cap = limit if var_limit is None else var_limit
+        total = sum(cost.values())
+        if total <= limit + EPS:
+            return {}
+        out: dict[str, str] = {}
+        for s in sorted((s for s, c in cost.items() if c > EPS), key=lambda s: (reducing[s], key(s))):
+            if reducing[s]:
+                remaining = sum(variable.get(x, 0.0) for x in cost if reducing[x] and x not in out)
+                if remaining <= var_cap + EPS:
+                    break
+            out[s] = reason
+            total -= cost[s]
+            if total <= limit + EPS:
+                break
+        return out
+
     def budget_filters(self, w: Mapping[str, float], held: Mapping[str, str]) -> dict[str, str]:
         lim = self.lim
         changed = self.changed(w, held)
@@ -706,8 +963,8 @@ class _Run:
         def worst_first(s: str) -> tuple:
             return (toward[s], -self.srbe_seen.get(s, 0.0), -dw[s], s)
 
-        def smallest_first(s: str) -> tuple:
-            return (toward[s], dw[s], s)
+        trim_order = self.trim_key(w)
+        exempt = {s: self.reference_exempt(s, base[s], w[s]) for s in changed}
 
         floor, ceiling, _ = self.net_limits()
         net = ck.net(w)
@@ -734,15 +991,18 @@ class _Run:
                               "R13 30-day turnover budget", worst_first)
         if found:
             return found
-        cost = {}
-        for s in changed:
-            q = self.leg_quote(s, base[s], w[s])
-            cost[s] = dw[s] * (q.per_side_bps if q is not None else 0.0)
-        found = self.trim(cost, lim.cost_budget.cycle_max_bps, "R14 cycle cost budget", worst_first)
+        cost = {s: self.leg_cost(s, base[s], w[s]) for s in changed}
+        variable = {s: self.leg_variable_cost(s, base[s], w[s]) for s in changed}
+        reducing = {s: not ck.increased(base[s], w[s]) for s in changed}
+        capped = {s: c for s, c in cost.items() if not exempt[s]}
+        found = self.trim_costs(capped, variable, reducing, lim.cost_budget.cycle_max_bps,
+                                "R14 cycle cost budget", trim_order)
         if not found and self.cost_30d_bps is not None:
+            month_cap = lim.cost_budget.discretionary_30d_max_bps
             disc = {s: c for s, c in cost.items() if not toward[s]}
-            found = self.trim(disc, lim.cost_budget.discretionary_30d_max_bps - self.cost_30d_bps,
-                              "R14 30-day cost budget", worst_first)
+            found = self.trim_costs(disc, variable, reducing, month_cap - self.cost_30d_bps,
+                                    "R14 30-day cost budget", trim_order,
+                                    var_limit=month_cap - self.variable_30d_bps)
         if found:
             return found
         carry_cap = max(lim.cost_budget.carry_proposal_max_bps_day, self.carry(base))
@@ -754,7 +1014,11 @@ class _Run:
             if found:
                 return found
         legs = {s: 2.0 if base[s] * w[s] < 0 else 1.0 for s in changed}
-        return self.trim(legs, float(lim.proposal.max_legs), "R21 too many legs", smallest_first)
+        counted = {s: n for s, n in legs.items() if not exempt[s]}
+        found = self.trim(counted, float(lim.proposal.max_legs), "R21 too many legs", trim_order)
+        if found:
+            return found
+        return self.trim(legs, float(lim.proposal.total_cap), "R21 too many legs in total", trim_order)
 
     # ------------------------------------------------------------------ reporting
     def explain(self, target: Mapping[str, float], final: Mapping[str, float],
@@ -814,12 +1078,18 @@ class _Run:
         rows.append(ck.check_side_no_increase("R17", "anti_chase", final, base,
                                               self.sets["chase_long"], self.sets["chase_short"]))
         stale_moved = sorted(s for s in changed if s in self.sets["stale"])
-        share_ok = self.frozen_share <= lim.freshness.frozen_reference_share_max + EPS or not changed
+        reduce_bad = sorted(s for s in changed if s in self.sets["stale_reduce"] and ck.increased(base[s], final[s]))
+        share_max = lim.freshness.frozen_reference_share_max + EPS
+        share_ok = self.frozen_share <= share_max or not changed
+        sat_moved = [s for s in changed if self.satellite(s) and not self.retiring(s)]
+        sat_ok = self.frozen_share_sat <= share_max or not sat_moved
+        bad = stale_moved + reduce_bad
         rows.append(RiskCheck(
-            rule_id="R18", name="data_freshness", passed=not stale_moved and share_ok,
+            rule_id="R18", name="data_freshness", passed=not bad and share_ok and sat_ok,
             value=round(self.frozen_share, 6), limit=lim.freshness.frozen_reference_share_max,
-            detail=f"frozen reference share; daily bars <= {lim.freshness.daily_bar_max_h:g}h"
-            + (f"; stale lines changed {stale_moved}" if stale_moved else ""),
+            detail=f"frozen reference share (core); daily bars <= {lim.freshness.daily_bar_max_h:g}h"
+            + (f"; satellite share {self.frozen_share_sat:.2f}" if self.frozen_share_sat > EPS else "")
+            + (f"; stale lines changed {bad}" if bad else ""),
         ))
         old = []
         for s in changed:
@@ -835,16 +1105,30 @@ class _Run:
         rows.append(RiskCheck(rule_id="R19", name="market_open", passed=not closed_moved,
                               value=float(len(closed_moved)), limit=0.0, kind="execution",
                               detail=f"changed while closed {closed_moved}" if closed_moved else ""))
-        rows.append(RiskCheck(rule_id="R20", name="blockers", passed=not (self.blockers and changed),
+        blocked_moved = [s for s in changed if self.blocked_line(s)]
+        rows.append(RiskCheck(rule_id="R20", name="blockers", passed=not blocked_moved,
                               value=float(len(self.blockers)), limit=0.0,
                               detail=", ".join(self.blockers)))
-        legs = sum(2 if base[s] * final[s] < 0 else 1 for s in changed)
-        rows.append(ck.check_budget("R21", "legs", float(legs), float(lim.proposal.max_legs)))
+        legs = {s: 2 if base[s] * final[s] < 0 else 1 for s in changed}
+        counted = sum(n for s, n in legs.items() if not self.reference_exempt(s, base[s], final[s]))
+        total = sum(legs.values())
+        r21 = ck.check_budget("R21", "legs", float(counted), float(lim.proposal.max_legs),
+                              f"risk-increasing and discretionary legs; {total} of at most "
+                              f"{lim.proposal.total_cap} in total")
+        if total > lim.proposal.total_cap:
+            r21 = r21.model_copy(update={"passed": False})
+        rows.append(r21)
         undocumented = sorted(s for s in changed if not toward[s])
-        mc_ok = not (lim.material_change_required and not self.material_changed and undocumented)
+        unsupported = [s for s in undocumented if not self.material(s)]
+        mc_ok = not (lim.material_change_required and unsupported)
+        if isinstance(self.material_changed, Mapping):
+            mc_value = str(not unsupported) if undocumented else str(any(self.material_changed.values()))
+        else:
+            mc_value = str(bool(self.material_changed))
         rows.append(RiskCheck(rule_id="MC", name="material_change", passed=mc_ok,
-                              value=str(self.material_changed), limit="required for deviations",
-                              detail=f"non-reference changes {undocumented}" if undocumented else ""))
+                              value=mc_value, limit="required for deviations",
+                              detail=(f"non-reference changes {undocumented}" if undocumented else "")
+                              + (f"; without new evidence {unsupported}" if unsupported else "")))
         return sorted(rows, key=_rule_order)
 
     def verify_line_rules(self, final: Mapping[str, float], changed: list[str],
@@ -854,11 +1138,8 @@ class _Run:
         db_bad, hold_bad, gate_bad = [], [], []
         worst = 0.0
         for s in changed:
-            before, after, u = base[s], final[s], self.unit[s]
-            min_share = max(lim.deadband.min_nav_share, self.broker_min_share.get(s, 0.0))
-            if u <= EPS or not deadband_ok((after - before) / u, after - before,
-                                           to_zero=abs(after) <= EPS, crypto=self.cls[s] == "crypto",
-                                           min_share=min_share, policy=self.p):
+            before, after = base[s], final[s]
+            if self.r11_reason(s, before, after):
                 db_bad.append(s)
             exempt = toward[s] and "R12" in TOWARD_REFERENCE_EXEMPT
             if not min_hold_ok(s, self.last_change.get(s), self.now, sign_flip=before * after < 0,
@@ -868,6 +1149,8 @@ class _Run:
             worst = max(worst, value or 0.0)
             if not ok:
                 gate_bad.append(s)
+        fee_priced = any(s in self.fee_legs_r15 and not toward[s] for s in changed)
+        r15_value: float | str = R15_FEE if fee_priced else round(worst, 6)
         return [
             RiskCheck(rule_id="R11", name="deadband", passed=not db_bad, value=float(len(db_bad)),
                       limit=f"level {lim.deadband.level}/{lim.deadband.level_crypto} crypto, "
@@ -878,7 +1161,7 @@ class _Run:
                       limit=f"{lim.min_hold_days.default:g}d/{lim.min_hold_days.crypto:g}d crypto",
                       detail=f"violations {sorted(hold_bad)}" if hold_bad else ""),
             RiskCheck(rule_id="R15", name="net_of_cost_gate", passed=not gate_bad,
-                      value=round(worst, 6),
+                      value=r15_value,
                       limit=f"reference {lim.net_of_cost_gate.reference_max_srbe}, "
                             f"council {lim.net_of_cost_gate.council_max_srbe}",
                       detail=f"violations {sorted(gate_bad)}" if gate_bad else "max SR_be"),
@@ -891,13 +1174,25 @@ class _Run:
         r13 = [s for s in changed if not (toward[s] and "R13" in TOWARD_REFERENCE_EXEMPT)]
         inc = sum(line_increase(base[s], final[s]) for s in r13)
         turn = sum(abs(final[s] - base[s]) for s in r13 if ck.increased(base[s], final[s]))
-        cost = 0.0
-        disc = 0.0
+        cost = cost_var = 0.0
+        disc = disc_var = 0.0
+        cycle_fee = disc_fee = False
+        cycle_inc = disc_inc = False          # a risk-increasing leg with a cost in the total
         for s in changed:
-            q = self.leg_quote(s, base[s], final[s])
-            c = abs(final[s] - base[s]) * (q.per_side_bps if q is not None else 0.0)
-            cost += c
-            disc += 0.0 if toward[s] else c
+            c = self.leg_cost(s, base[s], final[s])
+            v = self.leg_variable_cost(s, base[s], final[s])
+            fee = self.leg_fee(s, base[s], final[s]) > 0
+            inc_leg = ck.increased(base[s], final[s]) and c > EPS
+            if not self.reference_exempt(s, base[s], final[s]):
+                cost += c
+                cycle_fee |= fee
+                cycle_inc |= inc_leg
+                cost_var += 0.0 if inc_leg else v
+            if not toward[s]:
+                disc += c
+                disc_fee |= fee
+                disc_inc |= inc_leg
+                disc_var += 0.0 if inc_leg else v
         rows = [
             ck.check_budget("R13", "cycle_increase", inc, lim.churn.cycle_increase_max),
             ck.check_budget("R13", "turnover_7d", self.turnover_7d + turn, lim.churn.turnover_7d_max,
@@ -907,11 +1202,21 @@ class _Run:
         if self.turnover_30d is not None:
             rows.append(ck.check_budget("R13", "turnover_30d", self.turnover_30d + turn,
                                         lim.churn.turnover_30d_max, base=self.turnover_30d))
-        rows.append(ck.check_budget("R14", "cycle_cost_bps", cost, lim.cost_budget.cycle_max_bps))
+        cap = lim.cost_budget.cycle_max_bps
+        cycle = ck.check_budget("R14", "cycle_cost_bps", cost, cap,
+                                "risk-reducing reference legs exempt; the fee never holds a "
+                                "risk-reducing leg")
+        if not cycle.passed and not cycle_inc and cost_var <= cap + EPS:
+            cycle = cycle.model_copy(update={"passed": True})     # only risk-reducing legs, fee aside
+        rows.append(cycle.model_copy(update={"value": R14_FEE}) if cycle_fee else cycle)
         if self.cost_30d_bps is not None:
-            rows.append(ck.check_budget("R14", "cost_30d_bps", self.cost_30d_bps + disc,
-                                        lim.cost_budget.discretionary_30d_max_bps,
-                                        base=self.cost_30d_bps))
+            month_cap = lim.cost_budget.discretionary_30d_max_bps
+            month = ck.check_budget("R14", "cost_30d_bps", self.cost_30d_bps + disc, month_cap,
+                                    base=self.cost_30d_bps)
+            if not month.passed and not disc_inc and self.variable_30d_bps + disc_var <= month_cap + EPS:
+                month = month.model_copy(update={"passed": True})
+            withheld = disc_fee or self.cost_30d_fee_bps > 0
+            rows.append(month.model_copy(update={"value": R14_FEE}) if withheld else month)
         carry_f, carry_b = self.carry(final), self.carry(base)
         watch = lim.cost_budget.carry_watch_max_bps_day
         rows.append(ck.check_budget(

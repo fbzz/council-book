@@ -7,6 +7,10 @@ Rules:
 - Availability: the bar for D is usable from D 20:00 America/New_York (bars.tiingo rule), so a
   partial or same-day row is never returned before then.
 - The token travels in the Authorization header, never in the URL or an error message.
+- Core lines only: stock lines take their history from the dedicated stock source (data/alpaca.py;
+  facts.market routes by asset class), never from this shared token.
+- A 429 raises `council.data.http.RateLimited` at once, never retried: the caller's breaker stops
+  every further Tiingo call for the hour (facts.market).
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import pandas as pd
 
 from council.clock import utcnow
 from council.data.bars import available_only, bars_from_rows, empty_bars, to_utc
-from council.data.http import DataError, client_scope, get_with_retry, json_body
+from council.data.http import DEFAULT_RETRIES, DataError, client_scope, get_with_retry, json_body
 
 PRICES_URL = "https://api.tiingo.com/tiingo/daily/{ticker}/prices"
 _TICKER = re.compile(r"^[A-Za-z0-9.\-]{1,15}$")
@@ -74,8 +78,10 @@ def fetch_daily(
     token: str,
     client: httpx.Client | None = None,
     now: datetime | None = None,
+    retries: int = DEFAULT_RETRIES,
 ) -> pd.DataFrame:
-    """Adjusted daily bars for `ticker` from `start` (inclusive), available bars only."""
+    """Adjusted daily bars for `ticker` from `start` (inclusive), available bars only. A 429 raises
+    `RateLimited` without a retry; other retryable failures get `retries` extra attempts."""
     if not _TICKER.match(ticker):
         raise ValueError(f"bad tiingo ticker {ticker!r}")
     if not token:
@@ -87,7 +93,8 @@ def fetch_daily(
     headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
     with client_scope(client) as http:
         response = get_with_retry(
-            http, url, what=what, params={"startDate": start_s, "format": "json"}, headers=headers
+            http, url, what=what, params={"startDate": start_s, "format": "json"}, headers=headers,
+            retries=retries, fail_fast_429=True,
         )
         payload = json_body(response, what=what)
     return parse_daily(payload, asof.to_pydatetime())

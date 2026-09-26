@@ -16,7 +16,11 @@ Rules (policy keys in brackets):
 
 `states` and `returns` are keyed by line symbol (NDX); the line's signal ticker (QQQ) is accepted
 as a fallback key. `returns` are daily returns on one common calendar (facts.returns.returns_matrix
-gives log returns; at daily horizons the covariance is the same to second order).
+gives log returns; at daily horizons the covariance is the same to second order). Stock columns may
+be NaN before their history starts (the cycle aligns them on the core's calendar, design §11.3):
+the covariance is pairwise-complete, and a variance or pair with fewer than MIN_COMMON_ROWS common
+rows counts as missing (variance from sigma_ann, correlation 1), so a short-history stock never
+shrinks or distorts the core's covariance.
 
 The covariance is exposed for the risk engine: `book_covariance` is the filled covariance this
 module scales with, and `vol_fn(cov)` turns it into the engine's ex-ante vol function (keys the
@@ -38,6 +42,7 @@ from council.policy import LineSpec, Policy
 
 MISSING_VOL_HAIRCUT = 0.5      # unit multiplier when a line has no vol ratio
 COVARIANCE_LOOKBACK_SPANS = 5  # rows older than 5 spans carry < 0.5% of the EWMA weight
+MIN_COMMON_ROWS = 60           # a (co)variance from fewer common rows counts as missing (design §11.3)
 _EPS = 1e-12
 
 
@@ -125,14 +130,26 @@ def unit_weights(
     return out
 
 
-def ewma_covariance(returns: pd.DataFrame, span: int = 90, ann: int = 252) -> pd.DataFrame:
+def common_rows(returns: pd.DataFrame) -> pd.DataFrame:
+    """DataFrame[line x line]: the number of rows on which both returns are finite (the diagonal is
+    each line's own count). WP-K's pair pricing fails closed below MIN_COMMON_ROWS."""
+    cols = [str(c) for c in returns.columns]
+    mask = np.isfinite(returns.to_numpy(dtype=float)).astype(float)
+    return pd.DataFrame(mask.T @ mask, index=cols, columns=cols).astype(int)
+
+
+def ewma_covariance(returns: pd.DataFrame, span: int = 90, ann: int = 252, *,
+                    min_periods: int = 1) -> pd.DataFrame:
     """Zero-mean EWMA covariance of daily returns (RiskMetrics convention), annualised by `ann`.
 
     Row weights are proportional to (1 - a)^age with a = 2 / (span + 1), newest row heaviest.
     Pairwise-complete: each pair uses only the rows where both returns are finite, with the weights
-    renormalised over those rows. A pair with no common row is NaN."""
+    renormalised over those rows. A pair (or variance) with fewer than `min_periods` common rows is
+    NaN (default 1: only a pair with no common row)."""
     if span < 1:
         raise ValueError("span must be >= 1")
+    if min_periods < 1:
+        raise ValueError("min_periods must be >= 1")
     cols = [str(c) for c in returns.columns]
     x = returns.to_numpy(dtype=float, copy=True)
     if x.shape[0] == 0:
@@ -144,8 +161,9 @@ def ewma_covariance(returns: pd.DataFrame, span: int = 90, ann: int = 252) -> pd
     mask = finite.astype(float)
     num = (x0 * decay[:, None]).T @ x0
     den = (mask * decay[:, None]).T @ mask
+    count = mask.T @ mask
     with np.errstate(invalid="ignore", divide="ignore"):
-        cov = np.where(den > 0.0, num / den, np.nan) * float(ann)
+        cov = np.where((den > 0.0) & (count >= min_periods), num / den, np.nan) * float(ann)
     return pd.DataFrame(cov, index=cols, columns=cols)
 
 
@@ -241,9 +259,10 @@ def book_covariance(
 
     Rule: EWMA covariance [reference.book.covariance_ewma_days] of the last
     COVARIANCE_LOOKBACK_SPANS spans of returns, annualised [reference.vol.annualisation_days.default],
-    gaps filled conservatively (missing variance from sigma_ann, else the largest known variance;
-    missing covariance at correlation 1; each fill appended to `notes`). Raises ValueError for a
-    symbol that is not a line, or when no requested line has any volatility information."""
+    pairwise-complete with at least MIN_COMMON_ROWS common rows per entry, gaps filled
+    conservatively (missing variance from sigma_ann, else the largest known variance; missing
+    covariance at correlation 1; each fill appended to `notes`). Raises ValueError for a symbol that
+    is not a line, or when no requested line has any volatility information."""
     line_map = {line.symbol: line for line in lines}
     syms = list(line_map) if symbols is None else list(symbols)
     unknown = [s for s in syms if s not in line_map]
@@ -255,7 +274,8 @@ def book_covariance(
     if len(aligned) > COVARIANCE_LOOKBACK_SPANS * span:
         aligned = aligned.iloc[-COVARIANCE_LOOKBACK_SPANS * span :]
     return _complete_covariance(
-        ewma_covariance(aligned, span, ann), syms, line_map, states, notes if notes is not None else []
+        ewma_covariance(aligned, span, ann, min_periods=MIN_COMMON_ROWS), syms, line_map, states,
+        notes if notes is not None else []
     )
 
 

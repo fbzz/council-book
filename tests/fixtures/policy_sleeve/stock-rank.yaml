@@ -1,0 +1,6 @@
+# TEST FIXTURE (not live policy). Only the live-only settings the policy loader validates; the
+# adopted cell's keys arrive with the adoption commit (stocks/adopted.py) and are not modelled here.
+version: 1
+shortlist_size: 8            # shortlist lines allowed in stock-sleeve.yaml
+tiingo_symbol_cap: 40        # distinct stock history tickers allowed
+history_source: tiingo       # Signal.source of every stock line

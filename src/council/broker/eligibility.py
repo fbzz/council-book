@@ -11,6 +11,20 @@ Rules:
   stop, see `risk.stops.fit_to_eligibility`). A long at 1x prefers `real` when it is offered.
 - `resolve_vehicle` walks a line's ordered candidates for the direction and returns the eligible
   candidate with the LOWEST expected cost; ties go to the earlier candidate.
+- Order terms (design §4.3, single stocks): every parsed row is an `EligibilityTerms`, which also
+  carries `requiresW8Ben`, `allowedOrderQuantityType` and `tradeUnitType`. They are read fail
+  closed: `w8ben_required` is True for any value other than an explicit false or an absent / null
+  field (the stock gate refuses the name and the user is asked); `unit_orders_allowed` and
+  `trades_in_units` are False when the field is absent or names no units ("Amount", "Contracts").
+  The row also keeps `allowClosePosition` and `unitsQuantityType` exactly as sent, because the
+  permissive core defaults (an absent close permission is True, an absent quantity type is
+  "fractional") would let a single stock through: `close_allowed` is True only for an explicit JSON
+  true, and `fractional_units` only when the broker names fractional units (else the stock gate
+  applies the whole-unit price test).
+  `stock_configs` re-reads the leverage configs with fail-closed defaults for the stop-loss fields
+  (absent `allowStopLossTakeProfit` / `allowEditStopLoss` = False, absent `isPotential` = True, absent
+  SL bounds = an empty range), for the strict single-stock gate; `leverage_configs` keep the
+  permissive defaults the core lines have always used.
 """
 
 from __future__ import annotations
@@ -19,6 +33,8 @@ import math
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
+
+from pydantic import Field
 
 from council.broker.parsing import as_float, as_int, pick
 from council.models.broker import EligibilityRow, LeverageConfig
@@ -63,6 +79,99 @@ def parse_leverage_config(raw: Mapping[str, Any]) -> LeverageConfig | None:
     )
 
 
+class EligibilityTerms(EligibilityRow):
+    """An eligibility row with the order-terms fields the single-stock gate reads (design §4.3).
+
+    Raw values are kept as the broker sent them (None when absent); read them through
+    `w8ben_required`, `unit_orders_allowed` and `trades_in_units`, which fail closed."""
+
+    requires_w8ben: bool | None = None           # None: absent or null
+    allowed_order_quantity_type: str | None = None   # e.g. "Both", "Units", "Amount"
+    trade_unit_type: str | None = None           # e.g. "Units", "Contracts"
+    stock_configs: list[LeverageConfig] = Field(default_factory=list)   # fail-closed re-read (module doc)
+    allow_close_reported: bool | None = None     # allowClosePosition as sent (None: absent / not a boolean)
+    units_quantity_reported: str | None = None   # unitsQuantityType as sent (None: absent)
+
+
+def parse_stock_config(raw: Mapping[str, Any]) -> LeverageConfig | None:
+    """A leverage config read for the strict stock gate: every stop-loss field must be present to
+    count (absent permissions are False, an absent `isPotential` is True, absent bounds admit no
+    stop distance)."""
+    base = parse_leverage_config(raw)
+    if base is None:
+        return None
+    missing = object()
+
+    def present(name: str) -> Any:
+        value = pick(raw, name, default=missing)
+        return None if value is missing else value
+
+    potential, allow_sl, allow_edit = (present(k) for k in ("isPotential", "allowStopLossTakeProfit",
+                                                              "allowEditStopLoss"))
+    lo, hi = as_float(present("minStopLossPercentage")), as_float(present("maxStopLossPercentage"))
+    return base.model_copy(update={
+        "is_potential": True if potential is None else bool(potential),
+        "allow_sl_tp": allow_sl is True,
+        "allow_edit_stop_loss": allow_edit is True,
+        "min_sl_pct": 100.0 if lo is None else lo,
+        "max_sl_pct": 0.0 if hi is None else hi,
+    })
+
+
+def _w8ben(value: Any) -> bool | None:
+    """`requiresW8Ben`: None when absent or null, False only for an explicit false, True otherwise
+    (an unknown value counts as required: fail closed)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("false", "0", "no")
+
+
+def _text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _strict_bool(value: Any) -> bool | None:
+    """A JSON boolean as sent; anything else (absent, null, a string) is None."""
+    return value if isinstance(value, bool) else None
+
+
+def close_allowed(row: EligibilityRow) -> bool:
+    """The broker explicitly allows closing the position (`allowClosePosition` is JSON true). An
+    absent or non-boolean field is False (fail closed), unlike the core parser's default."""
+    return getattr(row, "allow_close_reported", None) is True
+
+
+def fractional_units(row: EligibilityRow) -> bool:
+    """The broker says the instrument trades in fractional units (`unitsQuantityType` names
+    fractions, e.g. "FractionalUnits"). Absent or anything else is False: whole units (fail closed)."""
+    text = (getattr(row, "units_quantity_reported", None) or "").strip().lower()
+    return "fraction" in text
+
+
+def w8ben_required(row: EligibilityRow) -> bool:
+    """True when the broker says the instrument needs a W-8BEN form (any value but false/absent)."""
+    return bool(getattr(row, "requires_w8ben", None))
+
+
+def unit_orders_allowed(row: EligibilityRow) -> bool:
+    """Orders by units are allowed: `allowedOrderQuantityType` is "Both" or names units. Absent or
+    anything else ("Amount") is False (fail closed)."""
+    text = (getattr(row, "allowed_order_quantity_type", None) or "").strip().lower()
+    return text == "both" or "unit" in text
+
+
+def trades_in_units(row: EligibilityRow) -> bool:
+    """The instrument trades in units (shares), not contracts: `tradeUnitType` names units. Absent
+    or anything else is False (fail closed)."""
+    text = (getattr(row, "trade_unit_type", None) or "").strip().lower()
+    return "unit" in text
+
+
 def parse_eligibility_row(raw: Mapping[str, Any], fetched_at: datetime) -> EligibilityRow | None:
     instrument_id = as_int(pick(raw, "instrumentId", "instrumentID"))
     symbol = pick(raw, "symbol")
@@ -76,7 +185,7 @@ def parse_eligibility_row(raw: Mapping[str, Any], fetched_at: datetime) -> Eligi
         )
         if cfg is not None
     ]
-    return EligibilityRow(
+    return EligibilityTerms(
         instrument_id=instrument_id,
         symbol=str(symbol),
         min_position_exposure=as_float(pick(raw, "minPositionExposure"), 0.0) or 0.0,
@@ -89,6 +198,16 @@ def parse_eligibility_row(raw: Mapping[str, Any], fetched_at: datetime) -> Eligi
         units_quantity_type=str(pick(raw, "unitsQuantityType", default="fractional") or "fractional"),
         leverage_configs=configs,
         fetched_at=fetched_at,
+        requires_w8ben=_w8ben(pick(raw, "requiresW8Ben")),
+        allowed_order_quantity_type=_text(pick(raw, "allowedOrderQuantityType")),
+        trade_unit_type=_text(pick(raw, "tradeUnitType")),
+        allow_close_reported=_strict_bool(pick(raw, "allowClosePosition")),
+        units_quantity_reported=_text(pick(raw, "unitsQuantityType")),
+        stock_configs=[
+            cfg for cfg in (parse_stock_config(c) for c in (pick(raw, "leverageConfigs", default=[]) or [])
+                            if isinstance(c, Mapping))
+            if cfg is not None
+        ],
     )
 
 

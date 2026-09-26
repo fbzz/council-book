@@ -11,9 +11,13 @@ Trading (reference and composition controls):
   [risk.deadband: level 0.25, crypto 0.5, min_nav_share 0.02]. A traded line goes to its target.
 
 Costs per side on the traded weight, by vehicle class [costs.per_side_bps]:
-- crypto 100 bps; real UCITS/ETC = etf_real plus the fixed commission expressed as a fraction of a
-  configurable NAV, charged once per traded leg; 1x CFD fallback = etf_cfd (ETF CFDs) or the line's
-  class CFD rate. No carry at 1x. No borrowing, cash earns 0 (Sharpe with rf 0).
+- crypto 100 bps; real UCITS/ETC = etf_real and real US shares = stock_real, each plus the fixed
+  commission expressed as a fraction of `commission_nav`, charged once per traded leg; 1x CFD
+  fallback = etf_cfd (ETF CFDs) or the line's class CFD rate. No carry at 1x. No borrowing, cash
+  earns 0 (Sharpe with rf 0).
+- `commission_nav` is the NAV the fixed commission is expressed against: the real NAV when only the
+  real account pays it; `live_commission_nav` gives the value at which the backtest's per-leg fee
+  equals the live private scalar (`risk.costs.fee_nav_bps`, both levels charged).
 """
 
 from __future__ import annotations
@@ -54,25 +58,40 @@ class CostModel:
 def vehicle_cost_class(line: LineSpec, mode: VehicleMode) -> str:
     """Cost class of the vehicle a line trades.
 
-    Rule: crypto -> crypto. `listed` takes the first long candidate: real -> etf_real, a CFD ->
-    the CFD rate. `cfd` takes the first CFD long candidate. A CFD on the line's own signal ETF
+    Rule: crypto -> crypto. `listed` takes the first long candidate: real -> etf_real (a stock
+    line: stock_real), a CFD -> the CFD rate. `cfd` takes the first CFD long candidate. A CFD on the line's own signal ETF
     (e.g. QQQ) is an ETF CFD (etf_cfd); other CFDs use the line's class rate (index_cfd, ...)."""
     if line.asset_class == "crypto":
         return "crypto"
     candidates = list(line.vehicles.long)
     if mode == "listed" and candidates and candidates[0].settlement == "real":
-        return "etf_real"
+        return "stock_real" if line.asset_class == "stock" else "etf_real"
     cfds = [v for v in candidates if v.settlement == "cfd"]
     if cfds and cfds[0].symbol == line.signal.ticker:
         return "etf_cfd"
     return _CFD_CLASS[line.asset_class]
 
 
+REAL_FEE_CLASSES = frozenset({"etf_real", "stock_real"})   # classes that pay the fixed commission
+
+
+def live_commission_nav(policy: Policy, *, virtual_nav_usd: float | None = None,
+                        mirror_ratio: float | None = None) -> float:
+    """The `commission_nav` at which one traded leg's fixed cost (fee / commission_nav) equals the
+    live private scalar `fee_nav_bps` / 1e4 (both levels charged: 1 / sum(1 / NAV_level))."""
+    from council.risk.costs import trade_economics  # local: keeps reference free of risk at import
+
+    econ = trade_economics(policy, virtual_nav_usd=virtual_nav_usd, mirror_ratio=mirror_ratio)
+    if econ.fee_nav_bps <= 0:
+        raise ValueError("no fixed commission configured")
+    return econ.fee_usd * 1e4 / econ.fee_nav_bps
+
+
 def _class_costs(policy: Policy, cls: str, commission_nav: float, slippage_bps: float) -> tuple[float, float]:
     per_side_bps = policy.costs["per_side_bps"]
     per_side = (float(per_side_bps[cls]) + slippage_bps) / 1e4
     fixed = 0.0
-    if cls == "etf_real":
+    if cls in REAL_FEE_CLASSES:
         if commission_nav <= 0:
             raise ValueError("commission_nav must be positive")
         fixed = float(policy.costs["fixed_commission_usd"]["real"]) / commission_nav

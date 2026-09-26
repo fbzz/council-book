@@ -15,13 +15,20 @@ Admission rules (nothing later than the slot is admissible):
   `EventItem.known_at`, else the `event_known_at` keyword) is dropped.
 - Cost facts: available_at <= slot, and each must be a C: fact of kind "cost"
   (`cost_facts_from_quotes` builds them from the cycle's floored quotes).
+- Fundamentals (stock lines, design §11.2; `council.stocks.fundamentals`): available_at <= slot
+  (the SEC acceptance time of the filing, the rank date for the rank's scores); each must be an
+  F: fact of kind "fundamental" with a FUNDAMENTAL_FIELDS field on a stock line of the policy. They
+  are kept for frozen lines too (they do not depend on prices).
 
 Freezing rules (a frozen line is not in `admitted` and gets no legs):
 - no_data: no usable daily bar, or no trend / sigma (history too short).
 - stale: the newest daily bar is older than risk.freshness.daily_bar_max_h. For non-crypto lines,
-  weekend days and US exchange holidays do not count, so a Friday bar stays fresh through
-  Monday's session.
-- market_closed: clock.market_open(asset_class, slot) is False.
+  weekend days and US exchange holidays (clock.US_HOLIDAYS, every calendar year it holds) do not
+  count, so a Friday bar stays fresh through Monday's session.
+- market_closed: the line's session (LineSpec.session) is closed at the slot (early closes and
+  holidays included), or closes within clock.LEG_CLOSE_MARGIN of it (a leg would be born expired).
+  Past the exchange calendars (clock.CALENDAR_LAST_DAY) a US/LSE line is closed for the cycle,
+  which only proposes, with the flag `calendar_missing:<year>`.
 - future_data: the caller's state used a bar that became available after the slot.
 
 Facts are percent-denominated (dist/mom/dd in %, sigma_ann in % a year); ratios are unitless.
@@ -40,7 +47,7 @@ from council import clock
 from council.data import fred
 from council.data.bars import to_utc
 from council.data.feeds import sort_news
-from council.facts.evidence_ids import cost_id, fact_id, macro_id, vol_id
+from council.facts.evidence_ids import FUNDAMENTAL_FIELDS, cost_id, fact_id, macro_id, vol_id
 from council.models.facts import EventItem, Fact, FactPack, MarketState, NewsItem
 from council.policy import Policy
 
@@ -57,7 +64,18 @@ def closed_day(day: date, asset_class: str) -> bool:
     """A day that does not age a non-crypto daily bar: Saturday, Sunday or a US exchange holiday."""
     if asset_class == "crypto":
         return False
-    return day.weekday() >= 5 or day in clock.US_HOLIDAYS_2026
+    return day.weekday() >= 5 or day in clock.US_HOLIDAYS
+
+
+def session_admits(asset_class: str, session: str | None, slot: datetime) -> bool:
+    """A line may trade this cycle: its session is open at the slot and does not close within
+    clock.LEG_CLOSE_MARGIN of it (past the calendars: closed; the cycle never proposes there)."""
+    if not clock.market_open(asset_class, slot, session):
+        return False
+    if session is None or session not in clock.SESSIONS:
+        return True
+    close = clock.session_close_after(session, slot)
+    return close is None or close - clock.LEG_CLOSE_MARGIN > slot
 
 
 def effective_age_h(available_at: datetime, asof: datetime, *, asset_class: str) -> float:
@@ -210,6 +228,23 @@ def admissible_costs(cost_facts: Iterable[Fact], slot: datetime) -> list[Fact]:
     return out
 
 
+def admissible_fundamentals(facts: Iterable[Fact], slot: datetime, policy: Policy) -> list[Fact]:
+    """Fundamental facts known by the slot. A fact that is not an F:<stock line>:<fundamental field>
+    fact of kind "fundamental" is a bug and raises; a later one is dropped (nothing about it, not
+    even a count, enters the pack)."""
+    stock = {ln.symbol for ln in policy.universe.stock_lines()}
+    out = []
+    for fact in facts:
+        prefix, _, rest = fact.id.partition(":")
+        line, _, field = rest.rpartition(":")
+        if (prefix != "F" or fact.kind != "fundamental" or field not in FUNDAMENTAL_FIELDS
+                or fact.symbol not in stock or line != fact.symbol):
+            raise ValueError(f"not a fundamental fact of a stock line: {fact.id}")
+        if to_utc(fact.available_at) <= slot:
+            out.append(fact)
+    return out
+
+
 _COST_FIELDS: tuple[tuple[str, str, int], ...] = (
     # (quote attribute = id field, unit, digits)
     ("per_side_bps", "bps", 2),
@@ -289,6 +324,7 @@ def build_fact_pack(
     quality_flags: Iterable[str] = (),
     bar_available_at: Mapping[str, datetime] | None = None,
     event_known_at: Mapping[str, datetime] | None = None,
+    fundamental_facts: Iterable[Fact] = (),
 ) -> FactPack:
     """Assemble and seal the cycle's FactPack (see the module docstring for every rule)."""
     slot_t = to_utc(slot).to_pydatetime()
@@ -319,7 +355,10 @@ def build_fact_pack(
             reasons.append("no_data")
         elif is_stale(bar_at, slot_t, asset_class=line.asset_class, max_h=max_h):
             reasons.append("stale")
-        is_open = clock.market_open(line.asset_class, slot_t, line.session)
+        is_open = session_admits(line.asset_class, line.session, slot_t)
+        missing = clock.calendar_missing(line.session, slot_t)
+        if missing:
+            flags.add(missing)
         if not is_open:
             reasons.append("market_closed")
         update: dict[str, object] = {
@@ -344,6 +383,7 @@ def build_fact_pack(
     facts.extend(macro_list)
     flags.update(macro_flags)
     facts.extend(admissible_costs(cost_facts, slot_t))
+    facts.extend(admissible_fundamentals(fundamental_facts, slot_t, policy))
 
     ids = [f.id for f in facts]
     if len(ids) != len(set(ids)):

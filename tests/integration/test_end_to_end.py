@@ -49,7 +49,7 @@ def _history(slot: datetime) -> tuple[dict[str, pd.DataFrame], list[str]]:
     """Up-trending synthetic daily bars for every line, completed and available before the slot."""
     rng = np.random.default_rng(7)
     out: dict[str, pd.DataFrame] = {}
-    for line in Policy.load().universe.lines:
+    for line in Policy.load(include_sleeve=False).universe.lines:
         crypto = line.asset_class == "crypto"
         end = (slot - timedelta(days=1)).date()
         if crypto:
@@ -98,7 +98,7 @@ def _ctx(tmp_path: Path, *, broker=None, publisher=None, clock=lambda: NOW) -> C
     ledger = Ledger(state / "ledger.sqlite3", clock=clock)
     ledger.migrate()
     return CycleContext(
-        policy=Policy.load(), settings=Settings(role="dev", mode="stub"), ledger=ledger,
+        policy=Policy.load(include_sleeve=False), settings=Settings(role="dev", mode="stub"), ledger=ledger,
         gateway=StubGateway(hold_reference_stub()), registry=PromptRegistry(),
         sources=Sources(history=_history, events=_no_events, broker=broker),
         publisher=publisher, clock=clock, state_dir=state,

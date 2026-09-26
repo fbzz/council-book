@@ -22,6 +22,7 @@ CycleStatus = Literal[
 DecisionState = Literal[
     "awaiting_publication", "proposed", "approved", "executing", "completed", "completed_partial",
     "rejected", "expired", "superseded", "blocked", "execution_unknown", "reviewed_no_action",
+    "waiting_for_market",
 ]
 CallStatus = Literal["ok", "parse_fail", "timeout", "transport", "cached", "skipped", "invalid"]
 

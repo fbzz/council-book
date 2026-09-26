@@ -1,0 +1,67 @@
+# ADOPTION RECORD of the pre-registered stock-sleeve study (tag stock-sleeve-spec; results in
+# docs/stock-sleeve-study.md). The gate did NOT pass (G1 pass; G2, G3, B1, B2 fail). On 2026-09-25
+# the user adopted the rule sleeve anyway, as a RECORDED OVERRIDE of the gate (option 1 of the spec's
+# section 12). The verdict stays NOT ADOPTED; this file records the decision, it is not a pass.
+#
+# Not loaded by Policy.load (variants/ is research and outside policy_sha). src/council/stocks/adopted.py
+# loads it, compares every value with its own constants and with the tagged variants file (sha256),
+# and fails closed on any difference. Nothing live changes with this file: stock lines stay off in
+# every runtime (invariants.STOCK_SLEEVE_LIVE = False) until the go-live commit, which also brings
+# the re-based universe.yaml and the reference.yaml `sleeve:` section. Editing a value here without
+# the matching code change (and a new CHANGELOG policy entry) fails CI.
+version: 1
+study: stock-sleeve
+decision: user_override                   # the gate failed; the user adopted the rule anyway
+decided_on: "2026-09-25"
+
+spec:
+  tag: stock-sleeve-spec                  # annotated tag, pushed to origin before the run
+  tag_object: 50530df4e8f7322c93443cd8012566f9ff2073ab
+  commit: fc8fb39337740fe3f6bb640b033d90a770d4cada
+  doc: docs/stock-sleeve-spec.md
+  variants_file: policy/variants/stock-sleeve-variants-v1.yaml
+  variants_sha256: 00c155985e3aaaf226877ac737445d11d9318452bfc396397d088b2fcb1aaf28   # = result.json spec_sha256
+
+run:                                      # the one real run, from a worktree at the tag
+  id: run-20260926T012203Z                # <state dir>/backtests/stock-sleeve/results/<id>/ (operator-only)
+  synthetic: false
+  result_sha256: df14f00158bb40f35d399e20556d88e9761c5de843259dc1712690b0ae6d0cdb   # result.json
+  gate_sha256: 268b3654bdb4d55a2e144abd1af221c3ce7604fab6e054617650d5bb73f86e53     # gate.json
+
+gate:
+  verdict: not_adopted
+  checks:
+    G1_pool: pass
+    G2_random: fail                       # adjusted percentile 85% < 95%
+    G3_regimes: fail                      # before 2023-05-01 the sleeve trailed the pool
+    B1_book: fail                         # no overlay option stayed shallower than -25% everywhere
+    B2_index_sleeve: fail                 # Sharpe below the index-sleeve book's
+
+adopted:                                  # what live runs after the go-live commit
+  cell: SQ-8
+  variant: SQ                             # sector score, sector quotas (largest remainder, each <= 3)
+  names: 8                                # unit = sleeve_share / names = 0.0625 of NAV
+  overlay: none                           # the sleeve's level is 1.0 whatever the SPX trend
+  sleeve_share: 0.50
+  core_share: 0.45                        # in-reference core base weights x 0.45 / 0.95 (pro rata)
+  universe:
+    headline: [sp500, nasdaq100]          # the tested universe
+    ai_list: ranked_mechanically          # L9: the AI-adjacent list ranked with the same rule and
+                                          # filters; untested extension (the `ai_list` sensitivity,
+                                          # hindsight-flattered); labelled so in the public record
+
+divergences:                              # spec section 12, L1-L14, as they apply under the override
+  L1: as_studied                          # sleeve deadband
+  L2: as_studied                          # pending_trades decides the rule's own orders
+  L3: named_divergence                    # live stop-outs + re-buy after R4d; tested stop rule is the floor
+  L4: named_divergence                    # fee at both levels until the first live stock trade
+  L5: named_divergence                    # whole-book R8 stays (live stricter); stock cap cannot bind
+  L6: named_divergence                    # next US-session slots; R16, R17, gap guard can delay
+  L7: as_studied                          # same modules; blob hashes pinned (tests/stocks/test_frozen_rule.py)
+  L8: never_live                          # GC
+  L9: named_divergence                    # AI list ranked mechanically (user decision)
+  L10: as_studied                         # constants checked by council.stocks.adopted
+  L11: as_studied                         # score.ordered
+  L12: as_studied                         # held = the committed selected names
+  L13: as_studied                         # a reference level change skips R11's 2% floor
+  L14: as_studied                         # fee in R14 and the planner; R15 on reference legs leaves it out

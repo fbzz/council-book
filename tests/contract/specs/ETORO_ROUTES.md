@@ -102,7 +102,29 @@ or (close) `{"action":"close","transaction":"sell","positionIds":[13902598]}` �
 ```
 Status ids: 1 Received, 2 Placed, 3 Filled, 4 Rejected, 5 PartiallyFilled, 6 PendingCancel, 7 Canceled,
 8 Expired, 9 CanceledPartiallyFilled, 10 RejectedPartiallyFilled, 11 WaitingForMarket, 12 PendingTriggeredRate.
-Terminal-success: 3 (5 after its poll window). Terminal-failure: 4, 7, 8, 9, 10. In flight: 1, 2, 6, 11, 12. 404 = not found (yet).
+Terminal-success: 3 (5 after its poll window). Terminal-failure: 4, 7, 8, 9, 10. In flight: 1, 2, 6, 12.
+Held for a closed market: 11 (its own outcome, never "in flight"; see below). 404 = not found (yet).
+
+## Order held for a closed market (status 11)
+- An order sent while the instrument's market is closed is accepted and held: `status.id` 11
+  (WaitingForMarket) on `orders:lookup`, `statusID` 11 on the close-order read. It executes at the
+  next open, unless cancelled.
+- council-book avoids it: each leg carries its session and deadline, the approval drops legs whose
+  market is closed or closes within 5 minutes, and the executor re-checks the session before each
+  write. If it still happens while the session is open by our calendar (a trading halt), the
+  executor keeps polling through 11 for the normal window; once the session is closed, or the window
+  ends with the order still held, it is held for its market. With a verified cancel route it
+  cancels the order and looks it up again (7 Canceled → the leg is `rejected`,
+  `cancelled_market_closed`; `resume` never cancels); without one the leg and the decision become
+  `waiting_for_market` (not `execution_unknown`), a blocker that the watch resolves read-only when
+  the order fills (checked on units and broker exposure, not the planned price; a partial fill
+  waits for its remainder until the deadline) or is cancelled. Still held one hour after the next
+  full session closes → `blocked` with an URGENT alert (also when the broker read fails); the
+  operator checks the broker and runs `council ops resolve <decision> --filled|--cancelled`.
+- **Cancel route: UNVERIFIED.** The execution pool lists "all DELETE order routes", but no cancel
+  route for a held market order is specified here yet. It is added to `EtoroWriteClient` (as
+  `cancel_order(request_id=, order_id=)`, `CANCEL_ROUTE_VERIFIED = True`) only after the M5 route
+  check confirms the path, the body and how a cancel shows on `orders:lookup`.
 
 ## Close position (WRITE)
 `POST /api/v1/trading/execution/market-close-orders/positions/{positionId}` body `{"InstrumentId":1111,"UnitsToDeduct":2.0}` (null/omitted = full) →

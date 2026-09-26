@@ -1,0 +1,24 @@
+# Scheduled macro events for 2027 (UTC). Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+# (2027 schedule, tentative until confirmed at the preceding meeting; statement at 2:00 pm ET, so
+# 18:00Z under US daylight time and 19:00Z otherwise). The event officer blocks ADDS around these;
+# it never forces sells. Exchange holidays and early closes (NYSE, LSE) live in src/council/clock.py
+# (US_HOLIDAYS, US_EARLY_CLOSES, UK_HOLIDAYS, LSE_EARLY_CLOSES through CALENDAR_LAST_DAY = 2027-12-31);
+# tests/unit/test_clock.py checks them against the list below. Policy.load merges every
+# calendar-*.yaml (lists concatenated), so no key here may repeat 2026's `notes`.
+version: 1
+fomc_decisions_utc:
+  - "2027-01-27T19:00:00Z"
+  - "2027-03-17T18:00:00Z"
+  - "2027-04-28T18:00:00Z"
+  - "2027-06-09T18:00:00Z"
+  - "2027-07-28T18:00:00Z"
+  - "2027-09-15T18:00:00Z"
+  - "2027-10-27T18:00:00Z"
+  - "2027-12-08T19:00:00Z"
+exchange_calendar:   # the record the code is tested against (clock.py is what runs)
+  nyse_holidays: ["2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18",
+                  "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"]
+  nyse_early_close_1300_et: ["2027-11-26"]
+  lse_holidays: ["2027-01-01", "2027-03-26", "2027-03-29", "2027-05-03", "2027-05-31", "2027-08-30",
+                 "2027-12-27", "2027-12-28"]
+  lse_early_close_1230_uk: ["2027-12-24", "2027-12-31"]

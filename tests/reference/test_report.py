@@ -18,7 +18,7 @@ TICKERS = {"NDX": "QQQ", "SEMIS": "SOXX", "SPX": "SPY", "GOLD": "GLD", "BTC": "B
 def small_run():
     from council.policy import Policy
 
-    policy = Policy.load()
+    policy = Policy.load(include_sleeve=False)
     raw = synthetic_closes(["QQQ", "SOXX", "SPY", "GLD", "IEF"], start=date(2016, 1, 4), end=date(2019, 12, 31),
                            crypto_tickers=["BTCUSDT", "ETHUSDT"], crypto_start=date(2017, 8, 17), seed=21)
     closes = {sym: raw[t] for sym, t in TICKERS.items()}

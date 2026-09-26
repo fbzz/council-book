@@ -18,6 +18,7 @@ build fails if the scan finds anything.
 | FRED (Federal Reserve Economic Data) | Macro context, release dates | Yes | Values only for series marked publishable (US government data such as policy rates, Treasury yields, the broad dollar index, CPI, payrolls). Third-party series hosted on FRED (for example volatility indices or credit spreads owned by index providers) are cited by series name only, with no value. |
 | Tiingo end-of-day history | Signal history for the equity, gold, oil and FX lines; the mechanical reference backtest | Yes | Derived percentages only (returns, distances from averages, volatility ratios). No price series. |
 | Binance public market data | BTC and ETH signal history | Yes | Derived percentages only. No price series. |
+| Alpaca market data, free plan (personal use; the operator's own keys) | Daily history (split- and dividend-adjusted) for the stock lines only, from the stock-sleeve go-live; never for the core lines | Yes, as derived percentages | Derived percentages only (returns, distances from averages, volatility ratios). No prices, no volumes, no price series. Until the publish layer lists Alpaca as a source, facts from it are withheld (`unknown_source`) and no daily change is shown for a stock line. |
 | FOMC calendar (`policy/calendar-2026.yaml`) | Event officer | Yes | Yes — it is public. |
 | Language-model output (cards, debate, PM decisions) | The council itself | — | Yes, after cleaning: control characters, links, handles, e-mail addresses, paths, money amounts, long numbers and bare price levels (a number with thousands separators, 3+ digits with decimals, or 4+ digits, not followed by a unit such as %, x, bp or days) are removed before publication. |
 
@@ -50,6 +51,8 @@ table above:
 | Book | `pnl_since_open_pct` | The book's own P/L on the line's open positions in % of the amount invested: price return since open times leverage, weighted by invested amount (in the instrument's currency). |
 | Book | `day_change_pct` | As in the cycle. |
 | Site | Open P/L of the book | Computed on the site from the published fields only: each line's `pnl_since_open_pct` weighted by the amount invested in it (`|weight_x|` / `leverage`). Shown only for a live book; a target book (rehearsal or no account) has no P/L. |
+| Site | Map of the book | Tile areas are the lines' published `|weight_x|` (and `cash_x`); each asset-class box is the sum of its lines' tiles, and its header shows that sum in %. Nothing else is drawn. |
+| Site | A line's weight across runs | From each published run: `reference[line].weight_ref_x`, the council's `risk.raw_x`, and the executed book, only where the record knows it: for `completed`, `execution.achieved_x` else `risk.final_x`; for `completed_partial`, `achieved_x`, else the unchanged `risk.base_x` when the plan had a leg on the line, else `final_x`; for `rejected`, `expired`, `superseded` and `reviewed_no_action`, the unchanged `risk.base_x` (nothing traded); for every other state (blocked, execution unknown, approved, executing, proposed, sealed) `achieved_x` if an execution record has the line, else nothing (the outcome is not known yet); nothing for a rehearsal. All in % of the portfolio. |
 
 ## Never published, whatever the source
 

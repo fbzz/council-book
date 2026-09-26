@@ -2,8 +2,9 @@
 
 Availability rules (the only way a bar may enter a fact pack):
 - Binance and eToro: a bar is usable once COMPLETE, i.e. start + interval <= now.
-- Tiingo daily: the bar for trading date D is usable from D 20:00 America/New_York (EOD files are
-  published after the close), whatever the UTC offset of the day.
+- End-of-day sources (Tiingo for the core lines, Alpaca for the stock lines; EOD_SOURCES): the bar
+  for trading date D is usable from D 20:00 America/New_York (EOD files are published after the
+  close), whatever the UTC offset of the day.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
 INDEX_NAME = "start"
 NEW_YORK = "America/New_York"
 TIINGO_AVAILABLE_HOURS = 20  # local New York time on the bar's own date
+EOD_SOURCES: frozenset[str] = frozenset({"tiingo", "alpaca"})   # daily bars under the 20:00 New York rule
 
 _INTERVALS: dict[str, pd.Timedelta] = {
     "1d": pd.Timedelta(days=1),
@@ -105,9 +107,9 @@ def available_times(index: pd.DatetimeIndex, *, source: str, interval: str) -> p
     if index.tz is None:
         raise ValueError("bars index must be timezone-aware (UTC)")
     idx = index.tz_convert("UTC")
-    if source == "tiingo":
+    if source in EOD_SOURCES:
         if interval_delta(interval) != pd.Timedelta(days=1):
-            raise ValueError("tiingo provides daily bars only")
+            raise ValueError(f"{source} provides daily bars only")
         days = idx.tz_localize(None).normalize()
         local = (days + pd.Timedelta(hours=TIINGO_AVAILABLE_HOURS)).tz_localize(NEW_YORK)
         return local.tz_convert("UTC")

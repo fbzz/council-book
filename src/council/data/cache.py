@@ -4,17 +4,23 @@ Rules:
 - The cache lives in the private state dir, never inside the repository.
 - Entries record their own `stored_at`; an entry older than the TTL (or unreadable) is a miss.
 - Writes are atomic (temp file + rename), so a crashed cycle never leaves a half-written entry.
-- JSON is the default format; pickle is available for local objects and is only ever read from
-  the private cache directory this process wrote.
+- JSON is the default format; `json.gz` is the same JSON, gzip-compressed (large provider
+  documents such as SEC companyfacts); pickle is available for local objects and is only ever read
+  from the private cache directory this process wrote.
+- A forced refresh (`get_or_fetch(..., refresh=True)`) never reads the entry: it fetches, then
+  overwrites it, so a caller that must see today's data (the quarterly stock rank) cannot be served
+  a stale copy however long the TTL.
 """
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
 import pickle
 import tempfile
+import zlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,7 +28,8 @@ from typing import Any, Literal, TypeVar
 
 from council.paths import assert_outside_repo, state_dir
 
-Format = Literal["json", "pickle"]
+Format = Literal["json", "json.gz", "pickle"]
+_SUFFIX: dict[str, str] = {"json": "json", "json.gz": "json.gz", "pickle": "pkl"}
 T = TypeVar("T")
 _SAFE_NAMESPACE = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 
@@ -55,7 +62,9 @@ class FileCache:
         return (self._root or state_dir() / "cache") / self.namespace
 
     def _path(self, key: str, fmt: Format) -> Path:
-        return self.directory / f"{key}.{'json' if fmt == 'json' else 'pkl'}"
+        if fmt not in _SUFFIX:
+            raise ValueError(f"unknown cache format {fmt!r}")
+        return self.directory / f"{key}.{_SUFFIX[fmt]}"
 
     def get(self, key: str, ttl_s: float, *, fmt: Format = "json", now: datetime | None = None) -> Any:
         """The cached value, or None on a miss (absent, expired, corrupt or future-dated)."""
@@ -63,12 +72,14 @@ class FileCache:
         try:
             if fmt == "json":
                 entry = json.loads(path.read_text())
+            elif fmt == "json.gz":
+                entry = json.loads(gzip.decompress(path.read_bytes()))
             else:
                 with path.open("rb") as fh:
                     entry = pickle.load(fh)  # private cache written by this process
             stored_at = datetime.fromisoformat(entry["stored_at"])
             value = entry["value"]
-        except (OSError, ValueError, KeyError, TypeError, EOFError, pickle.UnpicklingError):
+        except (OSError, ValueError, KeyError, TypeError, EOFError, zlib.error, pickle.UnpicklingError):
             return None
         age = (_now(now) - stored_at).total_seconds()
         if age < 0 or age > ttl_s:
@@ -86,6 +97,8 @@ class FileCache:
             with os.fdopen(fd, "wb") as fh:
                 if fmt == "json":
                     fh.write(json.dumps(entry, separators=(",", ":")).encode())
+                elif fmt == "json.gz":
+                    fh.write(gzip.compress(json.dumps(entry, separators=(",", ":")).encode(), mtime=0))
                 else:
                     pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(tmp, path)
@@ -102,12 +115,15 @@ class FileCache:
         *,
         fmt: Format = "json",
         now: datetime | None = None,
+        refresh: bool = False,
     ) -> T:
-        """Return the cached value for `request`, or call `fetch`, store and return its result."""
+        """Return the cached value for `request`, or call `fetch`, store and return its result.
+        `refresh=True` skips the lookup (a forced refresh) and overwrites the entry."""
         key = request_key(request)
-        cached = self.get(key, ttl_s, fmt=fmt, now=now)
-        if cached is not None:
-            return cached
+        if not refresh:
+            cached = self.get(key, ttl_s, fmt=fmt, now=now)
+            if cached is not None:
+                return cached
         value = fetch()
         self.put(key, value, fmt=fmt, now=now)
         return value

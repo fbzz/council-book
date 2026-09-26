@@ -25,9 +25,23 @@ Rules (every one is tested):
   that does not allow editing the stop or SL/TP → skipped `stop_not_allowed`), then
   `stop_loss_rate`: long ask × (1 − d), short bid × (1 + d).
 - Order: closes first (largest risk reduction first), then opens (largest first); at most
-  risk.proposal.max_legs legs, dropping from the tail; a leg whose dependency was dropped is dropped.
+  risk.proposal.max_legs COUNTED legs (risk-increasing or discretionary; a risk-reducing leg of a
+  reference-origin line does not count) and at most proposal.max_legs_total legs in all, dropping
+  from the tail; a leg whose dependency was dropped is dropped.
 - risk_increasing: opens (new, add, flip, re-open) = True; closes that do not flip = False.
-- Every leg carries `symbol` (the VEHICLE), `line` (the exposure line) and `whole_units`.
+- Every leg carries `symbol` (the VEHICLE), `line` (the exposure line) and `whole_units`, and, when
+  the caller passes them, its line's `origin` ("reference" | "discretionary"; missing = discretionary)
+  and `ref_level` (what a filled reference leg records as the held level).
+- Costs: `cost_bps(line, vehicle, direction, leverage)` returns (per side, carry) or (per side,
+  carry, fixed fee bps of NAV). `Leg.cost_bps_nav` = per side x |dw| (variable, publishable);
+  `Leg.fee_bps_nav` = the fee, charged on every leg that pays it (each tranche close pays its own);
+  `Leg.fee_drag` = `economics.real_drag_per_leg` on those legs. Fees and drags are PRIVATE.
+- Real-dollar floor (`economics`): an open, or a partial close, whose order amount (exposure /
+  leverage) copied at the mirror ratio is below the real trade floor is skipped
+  `below_real_minimum`; full closes are never skipped.
+- Gap guard (design D20): an open on a line in `gap_ref` (the cycle passes stock lines with the
+  pack's last close and daily sigma) is skipped `gap_guard` when |ln(planned price / last close)|
+  exceeds risk.anti_chase_sigma daily sigmas, and `gap_guard_no_reference` when either is missing.
 - `build_flatten_plan` closes EVERY position (unmapped ones included) with full closes only and
   no leg cap.
 """
@@ -46,6 +60,7 @@ from council.models.common import Direction, Settlement
 from council.models.plan import Leg, LegKind, Plan
 from council.models.risk import RiskDecision, changed_lines
 from council.policy import Policy, Universe
+from council.risk.costs import TradeEconomics
 from council.risk.stops import fit_to_eligibility, sl_margin_pct, stop_loss_rate
 
 MAX_TRANCHES = 3
@@ -55,20 +70,20 @@ UNITS_SCALE = 1_000_000    # units are floored/ceiled to 6 decimals
 UNMAPPED_PREFIX = "UNMAPPED_"
 
 VehicleFor = Callable[[str, Direction, int], VehicleChoice | None]
-CostFn = Callable[[str, str, Direction, int], tuple[float, float]]
+CostFn = Callable[[str, str, Direction, int], tuple[float, ...]]   # (per side, carry[, fee bps NAV])
+GapRef = Mapping[str, tuple[float, float] | None]                    # line -> (last close, daily sigma)
+REFERENCE_ORIGIN = "reference"
 SymbolFor = Mapping[int, str] | Callable[[int], str | None] | None
 
 
 def vehicle_to_line(universe: Universe) -> dict[str, str]:
-    """Every vehicle symbol (and each line symbol itself) → its line. Ambiguity is an error."""
-    mapping: dict[str, str] = {}
-    for line in universe.lines:
-        symbols = {line.symbol, *(v.symbol for v in line.vehicles.long), *(v.symbol for v in line.vehicles.short)}
-        for symbol in symbols:
-            owner = mapping.setdefault(symbol, line.symbol)
-            if owner != line.symbol:
-                raise ValueError(f"symbol {symbol} belongs to lines {owner} and {line.symbol}")
-    return mapping
+    """Every vehicle symbol (and each line symbol itself) → its line.
+
+    Ambiguity is rejected when the policy LOADS (the `Universe` validator enforces one namespace of
+    line ids and vehicle symbols), so a cycle never discovers it here. A universe built with
+    `model_copy` skips that validator; if it collides, this still raises (the same rule,
+    `policy.symbol_owners`) rather than mapping a symbol to the wrong line."""
+    return universe.vehicle_map()
 
 
 def bid_ask(quote: Any) -> tuple[float, float] | None:
@@ -131,10 +146,27 @@ class _Draft:
     carry_bps_day_nav: float = 0.0
     depends_on: list[int] = field(default_factory=list)
     whole_units: bool = False
+    fee_bps_nav: float = 0.0
+    fee_drag: float = 0.0
+    origin: str | None = None
+    ref_level: float | None = None
 
     @property
     def is_close(self) -> bool:
         return self.kind in ("close", "partial_close")
+
+    @property
+    def counted(self) -> bool:
+        """Counts toward risk.proposal.max_legs: every leg except a risk-reducing leg of a
+        reference-origin line."""
+        return self.risk_increasing or self.origin != REFERENCE_ORIGIN
+
+
+def _split_cost(value: tuple[float, ...]) -> tuple[float, float, float]:
+    """(per side, carry, fee) from a CostFn result of 2 or 3 numbers."""
+    per_side, carry = float(value[0]), float(value[1])
+    fee = float(value[2]) if len(value) > 2 else 0.0
+    return per_side, carry, max(fee, 0.0) if math.isfinite(fee) else 0.0
 
 
 class _Builder:
@@ -149,6 +181,10 @@ class _Builder:
         leverage_for: Mapping[str, int],
         eligibility: Mapping[str, EligibilityRow],
         cost_bps: CostFn,
+        origin: Mapping[str, str] | None = None,
+        ref_levels: Mapping[str, float] | None = None,
+        economics: TradeEconomics | None = None,
+        gap_ref: GapRef | None = None,
     ) -> None:
         self.nav = nav
         self.vehicle_for = vehicle_for
@@ -157,6 +193,11 @@ class _Builder:
         self.leverage_for = leverage_for
         self.eligibility = eligibility
         self.cost_bps = cost_bps
+        self.origin = dict(origin or {})
+        self.ref_levels = dict(ref_levels or {})
+        self.economics = economics
+        self.gap_ref = dict(gap_ref or {})
+        self.gap_sigma = float(policy.risk["anti_chase_sigma"])
         self.sl_buffer_pp = float(policy.risk["catastrophe_stop"]["margin_pct_buffer_pp"])
         self.drafts: list[_Draft] = []
         self.skipped: list[str] = []
@@ -198,13 +239,44 @@ class _Builder:
         row = self.eligibility.get(symbol)
         return whole_units_only(row) if row is not None else False
 
+    def below_real_minimum(self, exposure: float, leverage: int) -> bool:
+        """The order amount (exposure / leverage), copied at the mirror ratio, is below the real
+        trade floor (no check without `economics`)."""
+        if self.economics is None:
+            return False
+        return exposure / max(leverage, 1) < self.economics.min_amount_usd * (1 - 1e-9)
+
+    def gap_blocked(self, line: str, price: float) -> str | None:
+        """D20: the skip reason when the planned price has gapped from the pack's last close."""
+        if line not in self.gap_ref:
+            return None
+        ref = self.gap_ref[line]
+        if ref is None:
+            return "gap_guard_no_reference"
+        last, sigma_d = ref
+        if not (math.isfinite(last) and last > 0 and math.isfinite(sigma_d) and sigma_d > 0):
+            return "gap_guard_no_reference"
+        if abs(math.log(price / last)) > self.gap_sigma * sigma_d:
+            return "gap_guard"
+        return None
+
+    def stamp(self, draft: _Draft, fee: float) -> _Draft:
+        """Origin, reference level and the private fee fields of one draft."""
+        draft.origin = self.origin.get(draft.line)
+        level = self.ref_levels.get(draft.line)
+        draft.ref_level = float(level) if level is not None else None
+        draft.fee_bps_nav = fee
+        drag = self.economics.real_drag_per_leg if self.economics is not None else 0.0
+        draft.fee_drag = drag if fee > 0 else 0.0
+        return draft
+
     # ------------------------------------------------------------------ closes
     def close(self, line: str, p: Position, reason: str, units: float | None = None) -> _Draft:
         """Full close (units None) or partial close of `units`."""
         closed_units = p.units if units is None else units
         exposure = closed_units * self.unit_value(p)
         direction: Direction = "long" if p.is_buy else "short"
-        per_side, _carry = self.cost_bps(line, p.symbol, direction, p.leverage)
+        per_side, _carry, fee = _split_cost(self.cost_bps(line, p.symbol, direction, p.leverage))
         dw = exposure / self.nav
         draft = _Draft(
             key=self._next_key(), kind="close" if units is None else "partial_close", line=line,
@@ -214,7 +286,7 @@ class _Builder:
             risk_increasing=False, reason=reason, position_id=p.position_id,
             cost_bps_nav=per_side * dw, whole_units=self.whole(p.symbol),
         )
-        self.drafts.append(draft)
+        self.drafts.append(self.stamp(draft, fee))
         return draft
 
     def reduce(self, line: str, positions: list[Position], reduce_w: float) -> None:
@@ -245,6 +317,8 @@ class _Builder:
             elif row is not None and not row.allow_partial_close:
                 closing = self.close(line, p, f"{line}: reduce (full close, partial close not allowed)")
                 self.reopen_remainder(line, p, remainder_units, closing.key)
+            elif self.below_real_minimum(deduct * price, p.leverage):
+                self.skip(line, "below_real_minimum")
             else:
                 self.close(line, p, f"{line}: reduce (partial close, newest first)", units=deduct)
             remaining = 0.0
@@ -316,6 +390,13 @@ class _Builder:
         ):
             self.skip(line, "below_broker_minimum")
             return None
+        if self.below_real_minimum(exposure, leverage):
+            self.skip(line, "below_real_minimum")
+            return None
+        gap = self.gap_blocked(line, price)
+        if gap is not None:
+            self.skip(line, gap)
+            return None
         config = choice.config
         if not (config.allow_edit_stop_loss and config.allow_sl_tp):
             self.skip(line, "stop_not_allowed")
@@ -326,7 +407,7 @@ class _Builder:
             return None
         if fitted > distance:
             reason = f"{reason} [stop widened to the broker minimum]"
-        per_side, carry = self.cost_bps(line, choice.symbol, direction, leverage)
+        per_side, carry, fee = _split_cost(self.cost_bps(line, choice.symbol, direction, leverage))
         dw = exposure / self.nav
         draft = _Draft(
             key=self._next_key(), kind="open", line=line, symbol=choice.symbol,
@@ -338,7 +419,7 @@ class _Builder:
             sl_margin_pct=sl_margin_pct(fitted, leverage), cost_bps_nav=per_side * dw,
             carry_bps_day_nav=carry * dw, depends_on=list(depends_on or []), whole_units=whole,
         )
-        self.drafts.append(draft)
+        self.drafts.append(self.stamp(draft, fee))
         return draft
 
     # ------------------------------------------------------------------ one line
@@ -380,14 +461,23 @@ class _Builder:
             self.reduce(line, positions, abs(current) - abs(target))
 
 
-def _order_and_cap(drafts: list[_Draft], line_rank: Mapping[str, int], cap: int, skip: Callable[[str, str], None]) -> list[_Draft]:
+def _order_and_cap(drafts: list[_Draft], line_rank: Mapping[str, int], cap: int,
+                   skip: Callable[[str, str], None], *, total_cap: int | None = None) -> list[_Draft]:
+    """Closes first (largest first), then opens (largest first); keep at most `cap` COUNTED legs
+    (`_Draft.counted`) and at most `total_cap` legs in all (None: no total cap), dropping from the
+    tail; then drop every leg whose dependency was dropped."""
     ordered = sorted(
         drafts,
         key=lambda d: (0 if d.is_close else 1, -abs(d.delta_w), line_rank.get(d.line, 999), d.key),
     )
-    kept = ordered[:cap]
-    for dropped in ordered[cap:]:
-        skip(dropped.line, "leg_cap")
+    kept: list[_Draft] = []
+    counted = 0
+    for d in ordered:
+        if (d.counted and counted >= cap) or (total_cap is not None and len(kept) >= total_cap):
+            skip(d.line, "leg_cap")
+            continue
+        kept.append(d)
+        counted += int(d.counted)
     changed = True
     while changed:
         keys = {d.key for d in kept}
@@ -442,6 +532,8 @@ def _assemble(
                 risk_increasing=d.risk_increasing, reason=d.reason, amount_usd=d.amount_usd,
                 units=d.units, sl_rate=d.sl_rate, position_id=d.position_id,
                 depends_on=[seq_of[k] for k in d.depends_on], whole_units=d.whole_units,
+                origin=d.origin if d.origin in ("reference", "discretionary") else None,  # type: ignore[arg-type]
+                ref_level=d.ref_level, fee_bps_nav=d.fee_bps_nav, fee_drag=d.fee_drag,
             )
         )
     touched = {d.line for d in kept}
@@ -460,6 +552,7 @@ def _assemble(
         cost_bps_nav=sum(leg.cost_bps_nav for leg in legs),
         carry_bps_day_nav=sum(leg.carry_bps_day_nav for leg in legs),
         skipped=skipped,
+        fee_bps_nav=sum(leg.fee_bps_nav for leg in legs),
     )
 
 
@@ -476,25 +569,34 @@ def build_plan(
     nav_usd: float,
     policy: Policy,
     max_legs: int | None = None,
+    origin: Mapping[str, str] | None = None,
+    ref_levels: Mapping[str, float] | None = None,
+    economics: TradeEconomics | None = None,
+    gap_ref: GapRef | None = None,
 ) -> Plan:
     """Legs that move the lines in `target_w` from `snapshot` to their targets. See the module
     rules: ONLY lines present in `target_w` are planned (pass `changed_targets(decision)`), and a
     position's current exposure is the snapshot's broker `exposure_usd` when present.
 
     `nav_usd` should be the snapshot's equity (the denominator the engine used).
-    `cost_bps(line, vehicle_symbol, direction, leverage)` → (per-side bps, carry bps/day), both of
-    notional; a leg's cost in bps of NAV is per_side × |Δw|. `max_legs` overrides the policy cap;
-    a flatten uses `build_flatten_plan` instead."""
+    `cost_bps(line, vehicle_symbol, direction, leverage)` → (per-side bps, carry bps/day[, fixed
+    fee bps of NAV]); a leg's variable cost in bps of NAV is per_side × |Δw|. `max_legs` overrides
+    the policy's counted-leg cap (the total cap stays proposal.max_legs_total). `origin` and
+    `ref_levels` (per line) are stamped on the legs; `economics` (private) sets the real trade
+    floor and the fee drag; `gap_ref` arms the gap guard. A flatten uses `build_flatten_plan`."""
     if not (math.isfinite(nav_usd) and nav_usd > 0):
         raise ValueError("nav_usd must be positive")
     universe = policy.universe
     v2l = vehicle_to_line(universe)
     line_rank = {line.symbol: i for i, line in enumerate(universe.lines)}
-    cap = int(policy.risk["proposal"]["max_legs"]) if max_legs is None else max_legs
+    proposal = policy.risk["proposal"]
+    cap = int(proposal["max_legs"]) if max_legs is None else max_legs
+    total_cap = max(int(proposal.get("max_legs_total", cap)), int(proposal["max_legs"]))
     b = _Builder(
         policy=policy, nav=nav_usd, vehicle_for=vehicle_for, quotes=quotes,
         stop_distance=stop_distance, leverage_for=leverage_for, eligibility=eligibility,
-        cost_bps=cost_bps,
+        cost_bps=cost_bps, origin=origin, ref_levels=ref_levels, economics=economics,
+        gap_ref=gap_ref,
     )
 
     by_line: dict[str, list[Position]] = {}
@@ -522,7 +624,7 @@ def build_plan(
         b.plan_line(line, float(target_w[line]), current.get(line, 0.0), by_line.get(line, []))
 
     # Structural guarantee: only target lines were planned (plan_line never touches another line).
-    kept = _order_and_cap(b.drafts, line_rank, cap, b.skip)
+    kept = _order_and_cap(b.drafts, line_rank, cap, b.skip, total_cap=total_cap)
     return _assemble(
         kept, current=current, line_gross=line_gross, locked_gross=locked_gross,
         locked_net=locked_net, skipped=b.skipped,

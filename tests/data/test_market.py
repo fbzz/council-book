@@ -38,13 +38,17 @@ def test_gather_history_uses_signal_sources_and_availability(policy, mock_client
     assert len(calls) == 9
 
 
-def test_gather_history_cache_is_per_slot(policy, mock_client):
+def test_gather_history_cache_is_per_trading_day(policy, mock_client):
+    """The day key: every slot whose newest available bar is the same trading day reuses one fetch."""
     calls = []
     client = mock_client(_router(calls))
     gather_history(policy, now=NOW, tiingo_token="tok", client=client)
     gather_history(policy, now=utc(2026, 10, 1, 15, 30), tiingo_token="tok", client=client)   # same slot
     assert len(calls) == 9
-    gather_history(policy, now=utc(2026, 10, 1, 18, 40), tiingo_token="tok", client=client)   # next slot
+    gather_history(policy, now=utc(2026, 10, 1, 18, 40), tiingo_token="tok", client=client)   # same day key
+    gather_history(policy, now=utc(2026, 10, 1, 22, 40), tiingo_token="tok", client=client)   # 18:40 New York
+    assert len(calls) == 9
+    gather_history(policy, now=utc(2026, 10, 2, 2, 40), tiingo_token="tok", client=client)    # Oct 1 is out
     assert len(calls) == 18
 
 

@@ -27,6 +27,12 @@ class DataError(RuntimeError):
     """A provider failed or returned something unusable. Messages never contain URLs or secrets."""
 
 
+class RateLimited(DataError):
+    """The provider answered 429 and the caller asked for it not to be retried
+    (`get_with_retry(..., fail_fast_429=True)`): the caller's rate-limit breaker stops further calls
+    instead of sleeping through Retry-After inside a time-budgeted cycle."""
+
+
 @contextmanager
 def client_scope(client: httpx.Client | None) -> Iterator[httpx.Client]:
     """Yield the caller's client untouched, or a short-lived owned client that is always closed."""
@@ -69,11 +75,13 @@ def get_with_retry(
     headers: Mapping[str, str] | None = None,
     retries: int = DEFAULT_RETRIES,
     backoff_s: float = DEFAULT_BACKOFF_S,
+    fail_fast_429: bool = False,
 ) -> httpx.Response:
     """GET with retries on transport errors and on 408/425/429/5xx. Other 4xx fail at once.
 
     Rule: at most `retries` extra attempts; a definite client error (e.g. 400, 401, 404) is never
-    retried because repeating it cannot succeed and can burn a rate-limit pool."""
+    retried because repeating it cannot succeed and can burn a rate-limit pool. With
+    `fail_fast_429`, a 429 raises `RateLimited` at once (no retry, no Retry-After sleep)."""
     last = "no attempt"
     for attempt in range(retries + 1):
         wait_hint: float | None = None
@@ -84,6 +92,8 @@ def get_with_retry(
         else:
             if response.status_code < 400:
                 return response
+            if response.status_code == 429 and fail_fast_429:
+                raise RateLimited(f"{what}: HTTP 429")
             if response.status_code not in RETRY_STATUS:
                 raise DataError(f"{what}: HTTP {response.status_code}")
             last = f"HTTP {response.status_code}"

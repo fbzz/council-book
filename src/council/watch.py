@@ -4,7 +4,21 @@
   - reveals sealed cycles once their decision is terminal (exact sealed bytes + salt),
   - publishes execution records written by the operator terminal (the operator never runs git),
   - kill switch: on a fresh HALT it creates a standing flatten PROPOSAL and sends an urgent alert,
-  - checks that every open position carries a stop-loss and that the cycle heartbeat is fresh.
+  - checks that every open position carries a stop-loss and that the cycle heartbeat is fresh,
+  - resolves orders the broker holds until their market opens (waiting_for_market), read-only:
+    filled → reconcile → completed / completed_partial; cancelled or rejected → skipped legs →
+    completed_partial; a partial fill keeps waiting for its remainder until the leg's deadline,
+    then settles as partially filled. A fill is checked against the units sent and the broker's
+    exposure against units × the average fill price, never against the planned price (a held order
+    fills at the next open, where a gap is normal). Only a unit or exposure mismatch, a missing
+    stop-loss, an unknown position or a broken expected position blocks; drift from targets that
+    may be hours old is recorded as a reason. A fill whose stop-loss sits at or through the fill
+    price, or much closer than the class floor, raises an URGENT `sl_refit_needed:<line>` alert.
+    Still held one hour after the next full session closes → blocked with an URGENT alert (the
+    operator checks the broker and runs `council ops resolve`). The timeout applies on every run,
+    also when the broker read fails or no broker is connected. A timed-out hold keeps its blocker
+    scope (a stock-only hold still holds only the satellite); a broken fill holds the whole book.
+    The execution record of a waiting decision is published only once it is resolved.
 """
 
 from __future__ import annotations
@@ -20,6 +34,8 @@ from council.runtime import CycleContext, LockBusy, instance_lock
 TERMINAL = {"completed", "completed_partial", "rejected", "expired", "superseded",
             "reviewed_no_action", "blocked", "execution_unknown"}
 HEARTBEAT_MAX = timedelta(hours=5)
+WAITING_STATE = "waiting_for_market"
+SL_REFIT_FLOOR_SHARE = 0.8     # refit when the stop is closer than 80% of the class floor
 
 
 @dataclass
@@ -42,6 +58,7 @@ def run_watch(ctx: CycleContext) -> WatchOutcome:
 def _run(ctx: CycleContext) -> WatchOutcome:
     ledger, now = ctx.ledger, ctx.clock()
     out = WatchOutcome(status="ok", expired=list(ledger.expire_stale(now)))
+    out.alerts += _resolve_waiting(ctx, now)          # without a broker only the timeout applies
     files: dict[str, bytes] = {}
     out.revealed = _reveals(ctx, files)
     out.executions_published = _executions(ctx, files)
@@ -128,6 +145,8 @@ def _executions(ctx: CycleContext, files: dict[str, bytes]) -> list[str]:
         payload = ledger.get_runtime(f"exec_report:{key}")
         if not payload or not hasattr(redact, "public_execution"):
             continue
+        if _decision_state(ledger, key) == WAITING_STATE:     # published once resolved
+            continue
         from council.execution.executor import ExecutionReport
         from council.models.plan import Plan
 
@@ -192,7 +211,8 @@ def _stop_hits(ctx: CycleContext, snapshot: Any, now: datetime) -> list[str]:
     ledger = ctx.ledger
     live = {p.position_id: p.symbol for p in snapshot.positions}
     seen = {int(k): v for k, v in (ledger.get_runtime("watch_positions", {}) or {}).items()}
-    ours = {row.position_id for row in ledger.legs_in_states(["filled", "partially_filled", "submitted", "in_flight"])
+    ours = {row.position_id for row in ledger.legs_in_states(
+                ["filled", "partially_filled", "submitted", "in_flight", WAITING_STATE])
             if row.kind in ("close", "partial_close") and row.position_id is not None}
     v2l = vehicle_to_line(ctx.policy.universe)
     alerts = []
@@ -205,24 +225,267 @@ def _stop_hits(ctx: CycleContext, snapshot: Any, now: datetime) -> list[str]:
     return alerts
 
 
+def _decision_state(ledger: Any, decision_id: str) -> str | None:
+    try:
+        return ledger.get_decision(decision_id).state
+    except Exception:
+        return None
+
+
+# ------------------------------------------------------------------ waiting_for_market
+def _resolve_waiting(ctx: CycleContext, now: datetime) -> list[str]:
+    """Look up every order the broker holds for a closed market (read-only) and settle it. Without
+    a broker, or when a lookup fails, the decision stays waiting but its timeout still applies."""
+    alerts: list[str] = []
+    read = ctx.sources.broker
+    for d in ctx.ledger.decisions(states=[WAITING_STATE], limit=50):
+        if read is None:
+            alerts += _timeout_if_due(ctx.ledger, d.decision_id, now)
+            continue
+        try:
+            alerts += _resolve_one(ctx, d.decision_id, now)
+        except Exception as exc:  # a failed read leaves the decision waiting; the timeout still applies
+            alerts.append(f"waiting_check_error:{d.decision_id}:{type(exc).__name__}")
+            try:
+                alerts += _timeout_if_due(ctx.ledger, d.decision_id, now)
+            except Exception as err:
+                alerts.append(f"URGENT waiting_timeout_error:{d.decision_id}:{type(err).__name__}")
+    return alerts
+
+
+def _leg_deadline(row: Any) -> datetime | None:
+    raw = row.detail.get("waiting_deadline")
+    return datetime.fromisoformat(raw) if raw else None
+
+
+def _timeout_if_due(ledger: Any, decision_id: str, now: datetime) -> list[str]:
+    """A decision whose waiting legs are past their deadline (one hour after the next full session
+    closed; a waiting leg without a deadline fails closed at once) → blocked, the stored execution
+    record refreshed, and an URGENT alert asking for `council ops resolve`. The blocker scope is
+    kept: a timed-out stock-only hold still holds only the satellite. Returns the alerts."""
+    if _decision_state(ledger, decision_id) != WAITING_STATE:
+        return []
+    still = [r for r in ledger.legs(decision_id) if r.state == WAITING_STATE]
+    if not still:
+        return []
+    deadlines = [d for d in (_leg_deadline(r) for r in still) if d is not None]
+    if len(deadlines) == len(still) and now <= min(deadlines):
+        return []
+    ledger.transition(decision_id, "blocked", "waiting_for_market unresolved one hour after "
+                      "the next full session closed", actor="watch", now=now)
+    _refresh_report(ledger, decision_id, "blocked", ["order still held by the broker"])
+    return [f"URGENT {decision_id}: an order is still held by the broker after the session close; "
+            f"check the broker, then run `council ops resolve {decision_id} --filled|--cancelled`"]
+
+
+def _resolve_one(ctx: CycleContext, decision_id: str, now: datetime) -> list[str]:
+    from council.broker.instruments import InstrumentMap
+    from council.broker.parsing import (
+        STATUS_FAILED,
+        STATUS_FAILED_AFTER_PARTIAL,
+        STATUS_FILLED,
+        STATUS_PARTIALLY_FILLED,
+        parse_close_order,
+        parse_order_status,
+        parse_pnl,
+    )
+
+    ledger, read = ctx.ledger, ctx.sources.broker
+    imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
+    port = parse_pnl(read.pnl(), imap.symbol_for)  # type: ignore[union-attr]
+    tol = float(ctx.policy.risk["approval"]["post_fill_exposure_tolerance"])
+    alerts: list[str] = []
+    problems: list[str] = []        # block the decision
+    notes: list[str] = []           # recorded, never block
+    for row in ledger.legs(decision_id):
+        if row.state != WAITING_STATE:
+            continue
+        if row.kind == "open":
+            payload = (read.order_lookup(reference_id=row.request_id) if row.request_id  # type: ignore[union-attr]
+                       else read.order_lookup(order_id=row.order_id) if row.order_id else None)  # type: ignore[union-attr]
+            if payload is None:
+                continue
+            st = parse_order_status(payload)
+            sid = st.status_id
+            fill = {"units_filled": st.filled_units, "fill_price": st.avg_price,
+                    "broker_exposure": st.broker_exposure_usd}
+            common = {"order_id": st.order_id or row.order_id, "position_ids": st.position_ids,
+                      "broker_status": f"{sid}:{st.status_name}", "resolved_at": now,
+                      "detail": {**fill, "resolved_by": "watch"}}
+            deadline = _leg_deadline(row)
+            partial_final = sid == STATUS_PARTIALLY_FILLED and (deadline is None or now > deadline)
+            if sid == STATUS_PARTIALLY_FILLED and not partial_final:
+                # the remainder may still fill in this session: record the progress, keep waiting
+                ledger.update_leg(decision_id, row.seq, now=now, order_id=st.order_id or row.order_id,
+                                  position_ids=st.position_ids, broker_status=f"{sid}:{st.status_name}",
+                                  detail={**fill, "partial_seen_at": now.isoformat()})
+                continue
+            if sid == STATUS_FILLED or partial_final:
+                mismatch = _fill_mismatch(row, st, tol, full=sid == STATUS_FILLED)
+                state = "filled" if sid == STATUS_FILLED else "partially_filled"
+                ledger.update_leg(decision_id, row.seq, state=state, error=mismatch, now=now, **common)
+                if mismatch:
+                    problems.append(f"{row.line}: {mismatch}")
+                refit = _sl_refit(ctx, row, st)
+                if refit:
+                    notes.append(refit)
+                    alerts.append(f"URGENT {refit}: the stop-loss no longer protects the fill; "
+                                  "check it in the broker and propose a fix")
+            elif sid in STATUS_FAILED:
+                ledger.update_leg(decision_id, row.seq, state="skipped", now=now,
+                                  error=f"cancelled or rejected at the broker (status {sid})", **common)
+            elif sid in STATUS_FAILED_AFTER_PARTIAL:
+                ledger.update_leg(decision_id, row.seq, state="rejected_partial", now=now,
+                                  error=f"cancelled after a partial fill (status {sid})", **common)
+        elif row.kind in ("close", "partial_close"):
+            info = read.close_order_info(row.order_id) if row.order_id else None  # type: ignore[union-attr]
+            status = parse_close_order(info) if info is not None else None
+            if status is not None and status.failed:
+                ledger.update_leg(decision_id, row.seq, state="skipped", resolved_at=now, now=now,
+                                  error="close cancelled or rejected at the broker")
+            elif status is not None and status.waiting_for_market:
+                continue
+            elif row.position_id is not None and _close_done(port, row):
+                ledger.update_leg(decision_id, row.seq, state="filled", resolved_at=now, now=now,
+                                  position_ids=[row.position_id], detail={"resolved_by": "watch"})
+    rows = ledger.legs(decision_id)
+    if any(r.state == WAITING_STATE for r in rows):
+        return alerts + _timeout_if_due(ledger, decision_id, now)
+    fresh = parse_pnl(read.pnl(), imap.symbol_for)  # type: ignore[union-attr]  # after the fills
+    final, reasons = _final_after_wait(ctx, rows, fresh, now, problems, notes)
+    if final == "blocked":
+        ledger.set_blocker_scope(decision_id, "all", now=now)     # a broken fill holds every line
+    ledger.transition(decision_id, final, "; ".join(reasons) or f"market opened: {final}",
+                      actor="watch", now=now)
+    _refresh_report(ledger, decision_id, final, reasons)
+    alerts.append(("URGENT " if final == "blocked" else "") + f"{decision_id}: held order resolved → {final}")
+    return alerts
+
+
+def _fill_mismatch(row: Any, st: Any, tol: float, *, full: bool) -> str | None:
+    """The post-fill check for an order that filled after its market opened. The planned price is
+    NOT used: a held order fills at the next open and a gap there is normal (the stop-loss question
+    is `_sl_refit`'s). A full fill must match the units sent, a partial fill must not exceed them,
+    and the broker's exposure must match units filled × the average fill price."""
+    sent = row.detail.get("units_sent") or row.units
+    price, filled = st.avg_price, st.filled_units
+    if not sent or not price or filled <= 0:
+        return "fill unverifiable (units or fill price missing)"
+    sent = float(sent)
+    if full and abs(filled / sent - 1) > tol:
+        return "filled units differ from the units sent"
+    if not full and filled > sent * (1 + tol):
+        return "filled units exceed the units sent"
+    broker = st.broker_exposure_usd
+    if broker is not None and abs(broker / (filled * float(price)) - 1) > tol:
+        return "broker-reported exposure differs from units × fill price"
+    return None
+
+
+def _sl_refit(ctx: CycleContext, row: Any, st: Any) -> str | None:
+    """`sl_refit_needed:<line>` when the fill left the stop at or through the fill price, or
+    closer than SL_REFIT_FLOOR_SHARE of the class floor (a gap at the open)."""
+    from council.risk.config import risk_limits
+    from council.risk.stops import floor_key
+
+    price, sl = st.avg_price, st.sl_rate or row.sl_rate
+    spec = ctx.policy.universe.by_symbol().get(row.line)
+    if not price or not sl or spec is None:
+        return None
+    long = row.direction == "long"
+    distance = (price - sl) / price if long else (sl - price) / price
+    floor = risk_limits(ctx.policy).catastrophe_stop.floors.get(floor_key(spec))
+    if distance <= 0 or (floor is not None and distance < SL_REFIT_FLOOR_SHARE * floor):
+        return f"sl_refit_needed:{row.line}"
+    return None
+
+
+def _close_done(port: Any, row: Any) -> bool:
+    pos = port.position(row.position_id)
+    if pos is None:
+        return True
+    before, deduct = row.detail.get("position_units_before"), row.detail.get("units_to_deduct")
+    return (deduct is not None and before is not None
+            and float(before) - pos.units >= float(deduct) * 0.99)
+
+
+def _final_after_wait(ctx: CycleContext, rows: list[Any], port: Any, now: datetime,
+                      problems: list[str], notes: list[str] | None = None) -> tuple[str, list[str]]:
+    """blocked only for a unit/exposure mismatch (`problems`), a missing stop-loss, an unknown
+    position or a broken expected position. Drift from the approval's targets (which may be hours
+    or days old by the time a held order fills) is a reason, never a block: the next cycle trades
+    it. A gap at the open is `sl_refit_needed` (in `notes`), also never a block."""
+    from council.broker.parsing import snapshot_from_portfolio
+    from council.execution.reconcile import ExpectedPosition, reconcile
+
+    reasons = [*problems, *(notes or [])]
+    if problems:
+        return "blocked", reasons
+    expected = [
+        ExpectedPosition(position_id=pid, symbol=r.vehicle_symbol, direction=r.direction,
+                         leverage=r.leverage, sl_rate=r.sl_rate)
+        for r in rows if r.kind == "open" and r.state in ("filled", "partially_filled", "rejected_partial")
+        for pid in r.position_ids
+    ]
+    targets = {r.line: float(r.detail["weight_after"]) for r in rows if r.detail.get("weight_after") is not None}
+    rec = reconcile(snapshot_from_portfolio(port, now), targets, expected, ctx.policy)
+    if not rec.protected:
+        reasons += [*(f"missing stop-loss: {s}" for s in rec.missing_sl),
+                    *(f"unknown position: {s}" for s in rec.unknown_positions), *rec.issues]
+        return "blocked", reasons
+    if not rec.drift_ok:
+        reasons.append("drift above reconcile.drift_max against the approval's targets (recorded, not a "
+                       "block: the order filled after its market opened)")
+    if any(r.state in ("rejected", "skipped", "partially_filled", "rejected_partial") for r in rows):
+        return "completed_partial", reasons
+    return "completed", reasons
+
+
+def _refresh_report(ledger: Any, decision_id: str, final: str, reasons: list[str]) -> None:
+    """Rewrite the stored execution record with the resolved legs, so the watch publishes the
+    outcome (never the waiting state)."""
+    payload = ledger.get_runtime(f"exec_report:{decision_id}")
+    if not payload:
+        return
+    report = dict(payload["report"])
+    by_seq = {r.seq: r for r in ledger.legs(decision_id)}
+    legs = []
+    for leg in report.get("legs", []):
+        row = by_seq.get(leg.get("seq"))
+        if row is not None:
+            leg = {**leg, "state": row.state, "order_id": row.order_id, "position_ids": row.position_ids,
+                   "units_filled": row.detail.get("units_filled", leg.get("units_filled")),
+                   "fill_price": row.detail.get("fill_price", leg.get("fill_price")),
+                   "error": row.error or ""}
+        legs.append(leg)
+    report.update({"legs": legs, "final_state": final,
+                   "reasons": [*report.get("reasons", []), *reasons]})
+    ledger.set_runtime(f"exec_report:{decision_id}", {**payload, "report": report})
+
+
 def _flatten_proposal(ctx: CycleContext, snapshot: Any, now: datetime) -> str | None:
-    """HALT: a flatten PROPOSAL (closes only; the human still approves). Never executes."""
+    """HALT: a flatten PROPOSAL (closes only; the human still approves). Never executes. A position
+    whose full close the broker already holds gets no second close (`cycle._plan`)."""
     import uuid
 
     from council import clock
-    from council.cycle import _plan
+    from council.cycle import _plan, stamp_sessions
 
     if not snapshot.positions:
         return None
     plan = _plan(ctx, None, snapshot=snapshot, states={}, kill_state="HALTED")
     if plan is None or not plan.legs:
         return None
+    plan = stamp_sessions(plan, ctx.policy.universe, asof=now)
     slot = clock.slot_at_or_before(now)
     decision_id = f"{clock.cycle_id_for(slot)}-flatten-{uuid.uuid4().hex[:6]}"
+    base_w = dict(snapshot.signed_w)
+    for line, w in ctx.ledger.pending_open_weights().items():   # held opens count as held (as at approval)
+        base_w[line] = base_w.get(line, 0.0) + w
     ctx.ledger.create_decision(decision_id=decision_id, kind="flatten",
                                valid_until=clock.proposal_valid_until(slot), cycle_id=None,
-                               target={"final_w": {}, "base_w": dict(snapshot.signed_w),
+                               target={"final_w": {}, "base_w": base_w,
                                        "nav_usd": snapshot.equity_usd},
-                               plan=plan, state="proposed", now=now)
+                               plan=plan, state="proposed", now=now, policy_sha=ctx.policy.sha256)
     ctx.ledger.insert_legs(decision_id, plan.legs)
     return decision_id

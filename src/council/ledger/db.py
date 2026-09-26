@@ -7,7 +7,11 @@ Rules:
   supersedes every PENDING decision of equal or lower priority; if a pending decision of HIGHER
   priority exists the new one is refused (PriorityConflict) and nothing is written.
 - `expire_stale(now)` is ONE `UPDATE … RETURNING` (no read-then-write race), run eagerly.
-- `has_blocker()` is true while any decision is blocked / execution_unknown or any leg is unknown.
+- `has_blocker()` is true while any decision is blocked / execution_unknown / waiting_for_market
+  or any leg is unknown. `blockers()` names them; a waiting_for_market decision whose waiting legs
+  are all stock orders is reported as "satellite:<id>" (it holds only the satellite sleeve), and so
+  is such a hold after it times out to blocked (a broken fill resets its scope to `all`).
+- Each decision stores the `policy_sha` it was made under (approval re-checks it for rebalances).
 - Leg rows are written once per decision (state `planned`) and then only moved along the leg
   state machine; a leg's request_id is UNIQUE across the ledger.
 - Only actor "operator" may move a decision to `approved` (ApprovalRefused otherwise). Every
@@ -17,8 +21,12 @@ Rules:
   `vehicle_to_line(universe)`; a symbol that maps to no line is refused unless it is
   `UNMAPPED_<id>` (its own line). Never the vehicle symbol by accident.
 - Cycle queries read only resolved legs that moved exposure (filled, partially_filled,
-  rejected_partial; never modify_sl): `last_change`, `turnover_since`, `cost_bps_since`, and
-  `stop_hits_since` from `stop_hit` broker events.
+  rejected_partial; never modify_sl): `last_change`, `turnover_since`, `cost_bps_since`,
+  `fee_bps_since`, `reference_fills`, `level_resets`, `real_fee_drag`, and `stop_hits_since` from
+  `stop_hit` broker events. A leg's origin ("reference" | "discretionary") is kept in its detail;
+  a leg written before origins existed counts as discretionary (`origins=` filters). Costs: the
+  detail's `cost_bps_nav` is the variable cost and `fee_bps_nav` the private fixed fee;
+  `cost_bps_since` sums both unless `include_fee=False`.
 - Broker payloads are stored with credential-like keys redacted. The file never lives in the repo.
 """
 
@@ -40,12 +48,15 @@ from pydantic import BaseModel
 
 from council.clock import utcnow
 from council.ledger.states import (
+    BLOCKER_SCOPES,
     BLOCKER_STATES,
     DECISION_STATES,
     LEG_STATES,
     LEG_TERMINAL_STATES,
     PENDING_STATES,
     PRIORITY,
+    SATELLITE_BLOCKER_PREFIX,
+    WAITING_STATE,
     DecisionKind,
     can_transition,
     can_transition_leg,
@@ -56,7 +67,7 @@ from council.paths import assert_outside_repo, state_dir
 from council.policy import Universe
 from council.risk.nav import NavState
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 LEDGER_FILE = "ledger.sqlite3"
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _SENSITIVE_KEYS = ("authorization", "api_key", "api-key", "user_key", "user-key", "token", "secret", "password")
@@ -64,6 +75,8 @@ _SENSITIVE_KEYS = ("authorization", "api_key", "api-key", "user_key", "user-key"
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("decision_events", "actor", "TEXT NOT NULL DEFAULT 'unrecorded'"),
     ("decision_events", "process_role", "TEXT"),
+    ("decisions", "policy_sha", "TEXT"),
+    ("decisions", "blocker_scope", "TEXT"),
 )
 
 OPERATOR_ACTOR = "operator"
@@ -74,7 +87,8 @@ FILLED_LEG_STATES: tuple[str, ...] = ("filled", "partially_filled", "rejected_pa
 STOP_HIT_EVENT = "stop_hit"
 NAV_STATE_KEY = "nav_state"
 KILL_STATE_KEY = "kill_state"
-MATERIAL_FINGERPRINT_KEY = "last_material_fingerprint"
+MATERIAL_FINGERPRINT_KEY = "last_material_fingerprint"      # legacy single fingerprint (read only)
+MATERIAL_FINGERPRINTS_KEY = "last_material_fingerprints"    # per line + "_global" (design §11.4)
 KILL_STATES: frozenset[str] = frozenset({"NORMAL", "WARN", "HALTED", "FLAT", "RESUMED"})
 
 
@@ -175,6 +189,11 @@ def _same_planned_legs(rows: Sequence[LegRow], legs: Sequence[Leg], lines: Seque
     return True
 
 
+def leg_origin(detail: Mapping[str, Any]) -> str:
+    """A stored leg's origin; legs written before origins existed count as discretionary."""
+    return "reference" if detail.get("origin") == "reference" else "discretionary"
+
+
 def _fill_fraction(state: str, detail: Mapping[str, Any]) -> float:
     """Share of a leg's planned weight change that happened: 1 when filled; for a partial fill
     units_filled / units_sent when both are known, else 1 (conservative for budgets)."""
@@ -206,6 +225,8 @@ class DecisionRow:
     commitment_sha: str | None
     published_commit: str | None
     superseded_by: str | None
+    policy_sha: str | None = None
+    blocker_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -250,6 +271,7 @@ def _decision(row: sqlite3.Row) -> DecisionRow:
         plan=json.loads(row["plan_json"]) if row["plan_json"] else None,
         commitment_sha=row["commitment_sha"], published_commit=row["published_commit"],
         superseded_by=row["superseded_by"],
+        policy_sha=row["policy_sha"], blocker_scope=row["blocker_scope"],
     )
 
 
@@ -400,6 +422,7 @@ class Ledger:
         commitment_sha: str | None = None,
         actor: str = SYSTEM_ACTOR,
         now: datetime | None = None,
+        policy_sha: str | None = None,
     ) -> list[str]:
         """Create a pending decision; returns the ids it superseded. See the module rules."""
         actor = _check_actor(actor)
@@ -431,12 +454,12 @@ class Ledger:
                            f"superseded by {decision_id}", stamp, actor)
             conn.execute(
                 """INSERT INTO decisions (decision_id, cycle_id, kind, priority, state, created_at,
-                     updated_at, valid_until, target_json, plan_json, commitment_sha)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     updated_at, valid_until, target_json, plan_json, commitment_sha, policy_sha)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     decision_id, cycle_id, kind, priority, state, stamp, stamp, ts(valid_until),
                     _dump(dict(target or {})), _dump(plan) if plan is not None else None,
-                    commitment_sha,
+                    commitment_sha, policy_sha,
                 ),
             )
             _log_event(conn, decision_id, None, state, "created", stamp, actor)
@@ -536,15 +559,28 @@ class Ledger:
         return [_decision(r) for r in rows]
 
     def blockers(self) -> list[str]:
-        """Decision ids that halt new risk: blocked / execution_unknown, or with an unknown leg."""
-        placeholders = ",".join("?" * len(BLOCKER_STATES))
+        """Decisions that halt new risk: blocked / execution_unknown / waiting_for_market, or with
+        an unknown leg. Every id holds the whole book, except "satellite:<id>" for a
+        waiting_for_market decision whose blocker scope is `satellite` (stock orders only) or a
+        blocked one that kept that scope (a stock-only hold that timed out; the watch resets the
+        scope to `all` on a broken fill). An unknown leg or execution_unknown holds the whole book."""
+        states = (*sorted(BLOCKER_STATES), WAITING_STATE)
+        placeholders = ",".join("?" * len(states))
         with self._read() as conn:
+            unknown = {r["decision_id"] for r in conn.execute(
+                "SELECT decision_id FROM legs WHERE state = 'unknown'").fetchall()}
             rows = conn.execute(
-                f"""SELECT decision_id FROM decisions WHERE state IN ({placeholders})
-                    UNION SELECT decision_id FROM legs WHERE state = 'unknown'""",
-                tuple(BLOCKER_STATES),
+                f"SELECT decision_id, state, blocker_scope FROM decisions WHERE state IN ({placeholders})",
+                states,
             ).fetchall()
-        return sorted(r["decision_id"] for r in rows)
+        out = set(unknown)
+        for r in rows:
+            decision_id = r["decision_id"]
+            if decision_id in unknown:
+                continue
+            satellite = r["state"] in ("blocked", WAITING_STATE) and r["blocker_scope"] == "satellite"
+            out.add(f"{SATELLITE_BLOCKER_PREFIX}{decision_id}" if satellite else decision_id)
+        return sorted(out)
 
     def has_blocker(self) -> bool:
         return bool(self.blockers())
@@ -566,6 +602,25 @@ class Ledger:
 
     def set_plan(self, decision_id: str, plan: BaseModel | Mapping[str, Any], *, now: datetime | None = None) -> None:
         self._set_decision_field(decision_id, "plan_json", _dump(plan), now)
+
+    def set_blocker_scope(self, decision_id: str, scope: str, *, now: datetime | None = None) -> None:
+        """`all` (hold every line) or `satellite` (hold only the satellite sleeve)."""
+        if scope not in BLOCKER_SCOPES:
+            raise LedgerError(f"unknown blocker scope {scope!r}")
+        self._set_decision_field(decision_id, "blocker_scope", scope, now)
+
+    def pending_open_weights(self) -> dict[str, float]:
+        """Signed line weight still held at the broker by OPEN legs in waiting_for_market
+        (Σ weight_after − weight_before per line). The engine counts it as held."""
+        out: dict[str, float] = {}
+        for row in self.legs_in_states([WAITING_STATE]):
+            if row.kind != "open":
+                continue
+            before, after = row.detail.get("weight_before"), row.detail.get("weight_after")
+            if before is None or after is None:
+                continue
+            out[row.line] = out.get(row.line, 0.0) + float(after) - float(before)
+        return out
 
     # ------------------------------------------------------------------ legs
     def insert_legs(
@@ -610,7 +665,10 @@ class Ledger:
                         _dump({
                             "weight_before": leg.weight_before, "weight_after": leg.weight_after,
                             "reason": leg.reason, "cost_bps_nav": leg.cost_bps_nav,
-                            "whole_units": leg.whole_units,
+                            "whole_units": leg.whole_units, "session": leg.session,
+                            "valid_until": ts(leg.valid_until) if leg.valid_until else None,
+                            "origin": leg.origin, "ref_level": leg.ref_level,
+                            "fee_bps_nav": leg.fee_bps_nav, "fee_drag": leg.fee_drag,
                         }),
                         stamp,
                     ),
@@ -814,7 +872,7 @@ class Ledger:
         decision kinds."""
         states = ",".join("?" * len(FILLED_LEG_STATES))
         sql = [
-            f"""SELECT l.line, l.state, l.detail_json,
+            f"""SELECT l.line, l.state, l.kind, l.detail_json, d.kind AS decision_kind,
                        COALESCE(l.resolved_at, l.updated_at) AS done_at
                 FROM legs l JOIN decisions d ON d.decision_id = l.decision_id
                 WHERE l.state IN ({states}) AND l.kind != 'modify_sl'"""
@@ -848,27 +906,88 @@ class Ledger:
             out[r["line"]] = parse_ts(r["done_at"])  # type: ignore[assignment]  # ordered: last wins
         return out
 
-    def turnover_since(self, since: datetime, *, kinds: Iterable[str] | None = None) -> float:
-        """Σ |weight_after − weight_before| over legs resolved at or after `since` that moved
-        exposure (a partial fill counts its filled share when known, else in full). Pass
-        kinds=("rebalance",) for R13's discretionary turnover."""
-        total = 0.0
+    def _moved_details(
+        self,
+        *,
+        since: datetime | None = None,
+        kinds: Iterable[str] | None = None,
+        origins: Iterable[str] | None = None,
+    ) -> list[tuple[sqlite3.Row, dict[str, Any]]]:
+        """`_moved_legs` rows with their parsed detail, optionally only some leg origins."""
+        wanted = None if origins is None else frozenset(origins)
+        out = []
         for r in self._moved_legs(since=since, kinds=kinds):
             detail = json.loads(r["detail_json"] or "{}")
+            if wanted is not None and leg_origin(detail) not in wanted:
+                continue
+            out.append((r, detail))
+        return out
+
+    def turnover_since(self, since: datetime, *, kinds: Iterable[str] | None = None,
+                       origins: Iterable[str] | None = None) -> float:
+        """Σ |weight_after − weight_before| over legs resolved at or after `since` that moved
+        exposure (a partial fill counts its filled share when known, else in full). Pass
+        kinds=("rebalance",), origins=("discretionary",) for R13's discretionary turnover."""
+        total = 0.0
+        for r, detail in self._moved_details(since=since, kinds=kinds, origins=origins):
             before, after = detail.get("weight_before"), detail.get("weight_after")
             if before is None or after is None:
                 continue
             total += abs(float(after) - float(before)) * _fill_fraction(r["state"], detail)
         return total
 
-    def cost_bps_since(self, since: datetime, *, kinds: Iterable[str] | None = None) -> float:
-        """Σ planned cost (bps of NAV) of the legs `turnover_since` counts (legs written before
-        costs were stored count 0)."""
+    def cost_bps_since(self, since: datetime, *, kinds: Iterable[str] | None = None,
+                       origins: Iterable[str] | None = None, include_fee: bool = True) -> float:
+        """Σ planned cost (bps of NAV) of the legs `turnover_since` counts: the variable cost plus,
+        unless `include_fee=False`, the private fixed fee (legs written before costs were stored
+        count 0)."""
         total = 0.0
-        for r in self._moved_legs(since=since, kinds=kinds):
-            detail = json.loads(r["detail_json"] or "{}")
-            total += float(detail.get("cost_bps_nav") or 0.0) * _fill_fraction(r["state"], detail)
+        for r, detail in self._moved_details(since=since, kinds=kinds, origins=origins):
+            cost = float(detail.get("cost_bps_nav") or 0.0)
+            if include_fee:
+                cost += float(detail.get("fee_bps_nav") or 0.0)
+            total += cost * _fill_fraction(r["state"], detail)
         return total
+
+    def fee_bps_since(self, since: datetime, *, kinds: Iterable[str] | None = None,
+                      origins: Iterable[str] | None = None) -> float:
+        """Σ private fixed fees (bps of NAV) of the legs `cost_bps_since` counts."""
+        total = 0.0
+        for r, detail in self._moved_details(since=since, kinds=kinds, origins=origins):
+            total += float(detail.get("fee_bps_nav") or 0.0) * _fill_fraction(r["state"], detail)
+        return total
+
+    def reference_fills(self) -> dict[str, tuple[float, datetime]]:
+        """(reference level, when) of the latest filled REFERENCE-origin leg per line that recorded
+        its level: the held reference level (`risk.held_levels`)."""
+        out: dict[str, tuple[float, datetime]] = {}
+        for r, detail in self._moved_details(origins=("reference",)):
+            level = detail.get("ref_level")
+            if level is None:
+                continue
+            out[r["line"]] = (float(level), parse_ts(r["done_at"]))  # type: ignore[assignment]  # ordered
+        return out
+
+    def level_resets(self) -> dict[str, datetime]:
+        """When each line's position was last taken away from the rule: the latest broker stop-loss
+        hit, or filled close of a kill-switch flatten (the held reference level becomes 0)."""
+        out = dict(self.stop_hits_since(datetime(1970, 1, 1, tzinfo=UTC)))
+        for r in self._moved_legs(kinds=("flatten",)):
+            if r["kind"] in ("close", "partial_close"):
+                at = parse_ts(r["done_at"])
+                if at is not None and (r["line"] not in out or at > out[r["line"]]):
+                    out[r["line"]] = at
+        return out
+
+    def real_fee_drag(self) -> float:
+        """The real account's cumulative extra fee drag (D19, private): 1 − Π(1 − fee_drag × filled
+        share) over every filled leg that recorded one."""
+        keep = 1.0
+        for r, detail in self._moved_details():
+            drag = float(detail.get("fee_drag") or 0.0)
+            if drag > 0 and math.isfinite(drag):
+                keep *= max(0.0, 1.0 - min(drag, 1.0) * _fill_fraction(r["state"], detail))
+        return 1.0 - keep
 
     def record_stop_hit(
         self,
@@ -966,3 +1085,18 @@ class Ledger:
         if not fingerprint:
             raise LedgerError("empty material fingerprint")
         self.set_runtime(MATERIAL_FINGERPRINT_KEY, fingerprint, now=now)
+
+    def get_material_fingerprints(self) -> dict[str, str] | None:
+        """The per-line material fingerprints ({"_global": ..., line: ...}) stored when the last
+        proposal was issued, or None (never stored, or not a mapping of strings)."""
+        value = self.get_runtime(MATERIAL_FINGERPRINTS_KEY)
+        if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                                  for k, v in value.items()):
+            return None
+        return dict(value)
+
+    def set_material_fingerprints(self, fingerprints: Mapping[str, str], *, now: datetime | None = None) -> None:
+        if not fingerprints or not all(isinstance(k, str) and isinstance(v, str) and v
+                                       for k, v in fingerprints.items()):
+            raise LedgerError("material fingerprints must be a non-empty map of line -> fingerprint")
+        self.set_runtime(MATERIAL_FINGERPRINTS_KEY, dict(sorted(fingerprints.items())), now=now)

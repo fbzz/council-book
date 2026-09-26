@@ -10,14 +10,14 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from council.models.common import LEVEL_GRID
+from council.models.common import LEVEL_GRID, snap_level
 from council.policy import Policy
 from council.risk import checks as ck
 from council.risk.config import risk_limits
-from council.risk.engine import ForbiddenLegError, classify_risk_increasing
+from council.risk.engine import ForbiddenLegError, classify_risk_increasing, leg_origin
 from tests.risk.helpers import NOW, quotes_for, run, states_for
 
-POLICY = Policy.load()
+POLICY = Policy.load(include_sleeve=False)
 LIM = risk_limits(POLICY)
 LINES = [ln.symbol for ln in POLICY.universe.lines]
 CLASS = {ln.symbol: ln.asset_class for ln in POLICY.universe.lines}
@@ -139,13 +139,28 @@ def test_final_changes_respect_deadband_and_leg_budget(case):
     # compliance de-risking (gross above hard max) is exempt from the deadband and the leg cap
     assume(ck.gross(case["current"]) <= LIM.gross.hard_max)
     d = evaluate(case)
-    changed = [s for s in LINES if abs(d.final_w[s] - case["current"].get(s, 0.0)) > 1e-9]
-    legs = sum(2 if case["current"].get(s, 0.0) * d.final_w[s] < 0 else 1 for s in changed)
-    assert legs <= LIM.proposal.max_legs
+    cur = case["current"]
+    ref = {s: (TREND_LEVEL[case["trend"][s]] if IN_REF[s] else 0.0) for s in LINES}
+    changed = [s for s in LINES if abs(d.final_w[s] - cur.get(s, 0.0)) > 1e-9]
+    legs = {s: 2 if cur.get(s, 0.0) * d.final_w[s] < 0 else 1 for s in changed}
+    origin = {s: leg_origin(cur.get(s, 0.0), d.final_w[s], ref[s] * case["units"][s]) for s in changed}
+    # R21: risk-reducing reference-origin legs do not count toward max_legs; every leg toward the total
+    counted = sum(n for s, n in legs.items()
+                  if origin[s] == "discretionary" or ck.increased(cur.get(s, 0.0), d.final_w[s]))
+    assert counted <= LIM.proposal.max_legs and sum(legs.values()) <= LIM.proposal.total_cap
     for s in changed:
-        step = abs(d.final_w[s] - case["current"].get(s, 0.0)) / case["units"][s]
-        need = LIM.deadband.level_crypto if CLASS[s] == "crypto" else LIM.deadband.level
-        assert step >= need - 1e-9
+        unit = case["units"][s]
+        crypto = CLASS[s] == "crypto"
+        need = LIM.deadband.level_crypto if crypto else LIM.deadband.level
+        if origin[s] == "reference":
+            # the studied rule: a changed reference level (held level migrated from the current
+            # book) always trades; otherwise the drift to the target reaches the threshold
+            held = snap_level(cur.get(s, 0.0) / unit) if IN_REF[s] else 0.0
+            drift = abs(ref[s] * unit - cur.get(s, 0.0))
+            assert held != ref[s] or drift >= max(need * unit, LIM.deadband.min_nav_share) - 1e-9
+        else:
+            step = abs(d.final_w[s] - cur.get(s, 0.0)) / unit
+            assert step >= need - 1e-9
 
 
 _w = st.floats(min_value=-2.0, max_value=2.0, allow_nan=False)

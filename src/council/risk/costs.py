@@ -17,12 +17,30 @@ Rules (numbers in policy/costs.yaml and risk.yaml net_of_cost_gate):
   every `hold` days must earn just to pay its costs.
 - The gate passes when SR_be <= reference_max_srbe for reference-aligned or toward-reference
   moves, and <= council_max_srbe for council deviations.
+
+The $1 fixed fee (design D5; costs.yaml `fixed_commission_usd.real`, `fixed_commission_charged_on`):
+- It is a PRIVATE per-cycle scalar of NAV, `fee_nav_bps` = 1e4 x fee x sum over the charged levels
+  (virtual book, mirror = the real account) of 1 / that level's NAV. The real NAV is the virtual NAV
+  x the mirror ratio (`operator/mirror.py`; the policy's assumed ratio, flagged, while it is
+  missing). With both levels charged it is 1e4 x fee x (1 / virtual NAV + 1 / real NAV).
+- It applies to every real non-crypto vehicle (UCITS/ETCs and stocks; real crypto pays its
+  percentage fee through the crypto floor, CFDs pay none): R14 and the planner charge it on every
+  such leg; R15 charges it on risk-increasing discretionary legs only, as bps of the traded
+  notional (2 x fee_nav_bps / |dw| for a round trip); reference-origin and risk-reducing legs keep
+  today's variable-cost gate. The fee never holds a risk-reducing leg (R14: `engine.trim_costs`).
+- Hard trade floor: copy_min_multiple x copy_min_real_usd REAL dollars (3 x $1), i.e.
+  `copy_floor_share` of NAV; the broker minimum stays.
+- The kill switch sees the real account's extra fee drag per executed fee-bearing leg,
+  (fee / real NAV if the mirror is charged) - (fee / virtual NAV if the virtual book is), floored
+  at 0 (design D19).
+None of these numbers is ever published, put in a prompt, or written to a public hold reason.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -36,11 +54,11 @@ _ICF_CLASSES = frozenset({"index", "commodity", "fx"})
 
 
 def floor_key(settlement: str, asset_class: str) -> str:
-    """Which per_side_bps floor applies to a vehicle."""
+    """Which per_side_bps floor applies to a vehicle (real US shares: `stock_real`)."""
     if asset_class == "crypto":
         return "crypto"
     if settlement == "real":
-        return "etf_real"
+        return "stock_real" if asset_class == "stock" else "etf_real"
     if asset_class in _ICF_CLASSES:
         return f"{asset_class}_cfd"
     return "etf_cfd"
@@ -132,8 +150,21 @@ def srbe(round_trip_bps: float, carry_bps_day_: float, sigma_ann: float, hold_da
 
 
 def round_trip_bps(quote: CostQuote) -> float:
-    """Entry now plus exit later, both at the quoted per-side cost."""
+    """Entry now plus exit later, both at the quoted per-side cost (variable costs only)."""
     return 2.0 * quote.per_side_bps
+
+
+def discretionary_round_trip_bps(quote: CostQuote, delta_w: float) -> float:
+    """R15 round trip of a DISCRETIONARY leg of size |delta_w| (a NAV share): the variable round
+    trip plus the fixed fee paid twice, as bps of the traded notional (2 x fee_nav_bps / |dw|).
+    A fee-bearing leg of zero size is infinitely expensive."""
+    fee = max(quote.fixed_fee_nav_bps, 0.0)
+    if fee <= 0:
+        return round_trip_bps(quote)
+    size = abs(delta_w)
+    if size <= 0:
+        return math.inf
+    return round_trip_bps(quote) + 2.0 * fee / size
 
 
 def srbe_for_quote(
@@ -258,3 +289,111 @@ def cost_quote_from_whatif(
         floor_applied=floored,
         quoted_at=quoted_at,
     )
+
+
+# ------------------------------------------------------------------------ fixed fee (private)
+FEE_LEVELS: tuple[str, ...] = ("virtual", "mirror")
+MIRROR_RATIO_MISSING = "mirror_ratio_missing"
+VIRTUAL_NAV_ASSUMED = "virtual_nav_assumed"
+
+
+def fee_applies(settlement: str | None, asset_class: str) -> bool:
+    """The fixed fee is charged on real non-crypto trades (UCITS/ETCs and stocks)."""
+    return settlement == "real" and asset_class != "crypto"
+
+
+@dataclass(frozen=True)
+class TradeEconomics:
+    """The private per-cycle numbers of the fixed fee and the real-dollar trade floor.
+
+    Every property encodes the account's NAV: none may reach a public document, a prompt or a
+    public hold reason (the module docstring has the rules)."""
+
+    fee_usd: float
+    virtual_nav_usd: float
+    mirror_ratio: float                     # real / virtual
+    charged_on: tuple[str, ...]
+    floor_real_usd: float                   # copy_min_multiple x copy_min_real_usd
+    flags: tuple[str, ...] = ()
+
+    @property
+    def real_nav_usd(self) -> float:
+        return self.virtual_nav_usd * self.mirror_ratio
+
+    def _nav(self, level: str) -> float:
+        return self.virtual_nav_usd if level == "virtual" else self.real_nav_usd
+
+    @property
+    def fee_nav_bps(self) -> float:
+        """The fee of one real non-crypto trade in bps of NAV: 1e4 x fee x sum(1 / NAV_level)."""
+        if self.fee_usd <= 0:
+            return 0.0
+        return BPS * self.fee_usd * sum(1.0 / self._nav(level) for level in self.charged_on)
+
+    @property
+    def real_drag_per_leg(self) -> float:
+        """Extra fraction of the REAL account one fee-bearing leg costs beyond what the virtual book
+        records (D19): fee/real NAV if the mirror is charged, less fee/virtual NAV if the virtual
+        book is; never negative (the kill switch uses the worse of the two drawdowns)."""
+        if self.fee_usd <= 0:
+            return 0.0
+        real = self.fee_usd / self.real_nav_usd if "mirror" in self.charged_on else 0.0
+        virtual = self.fee_usd / self.virtual_nav_usd if "virtual" in self.charged_on else 0.0
+        return max(real - virtual, 0.0)
+
+    @property
+    def copy_floor_share(self) -> float:
+        """The real-dollar trade floor as a share of the (virtual) NAV."""
+        return self.floor_real_usd / self.real_nav_usd
+
+    @property
+    def min_amount_usd(self) -> float:
+        """The smallest virtual order amount (margin) whose mirrored copy clears the real floor."""
+        return self.floor_real_usd / self.mirror_ratio
+
+
+def _positive(value: float | None) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and out > 0 else None
+
+
+def trade_economics(
+    policy: Policy,
+    *,
+    virtual_nav_usd: float | None = None,
+    mirror_ratio: float | None = None,
+    flags: tuple[str, ...] = (),
+) -> TradeEconomics:
+    """The cycle's fee and floor figures. A missing (or unusable) virtual NAV uses the policy's
+    assumed NAV (flag `virtual_nav_assumed`); a missing mirror ratio the assumed ratio (flag
+    `mirror_ratio_missing`), which is the conservative side (a small real account)."""
+    cfg = cost_floors(policy)
+    out_flags = list(flags)
+    nav = _positive(virtual_nav_usd)
+    if nav is None:
+        nav = cfg.assumed.virtual_nav_usd
+        out_flags.append(VIRTUAL_NAV_ASSUMED)
+    ratio = _positive(mirror_ratio)
+    if ratio is None or ratio > 10:
+        ratio = cfg.assumed.mirror_ratio
+        if MIRROR_RATIO_MISSING not in out_flags:
+            out_flags.append(MIRROR_RATIO_MISSING)
+    return TradeEconomics(
+        fee_usd=max(float(cfg.fixed_commission_usd.get("real", 0.0)), 0.0),
+        virtual_nav_usd=nav,
+        mirror_ratio=ratio,
+        charged_on=tuple(dict.fromkeys(cfg.fixed_commission_charged_on)),
+        floor_real_usd=cfg.min_trade.floor_real_usd,
+        flags=tuple(dict.fromkeys(out_flags)),
+    )
+
+
+def fee_nav_bps(policy: Policy, virtual_nav: float | None, mirror: float | None) -> float:
+    """The private scalar: the fixed fee of one real non-crypto trade in bps of NAV
+    (1e4 x fee x sum over the charged levels of 1 / NAV_level)."""
+    return trade_economics(policy, virtual_nav_usd=virtual_nav, mirror_ratio=mirror).fee_nav_bps

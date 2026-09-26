@@ -12,7 +12,9 @@ Rules:
 - A position flagged `isNoStopLoss` or with a non-positive stop rate has NO stop-loss (None).
 - An instrument the caller cannot map becomes `UNMAPPED_<instrumentId>` — locked, never cash.
 - Order status ids follow ETORO_ROUTES.md: 3 filled; 5 partially filled (terminal after its poll
-  window); 4/7/8 failed; 9/10 failed after a partial fill; 1/2/6/11/12 in flight.
+  window); 4/7/8 failed; 9/10 failed after a partial fill; 1/2/6/12 in flight; 11 WaitingForMarket
+  is its own outcome (the broker holds the order until the market opens): never "in flight", so
+  it can never time out into an unknown leg. A close order reporting statusID 11 is the same.
 """
 
 from __future__ import annotations
@@ -40,7 +42,9 @@ STATUS_REJECTED = 4
 STATUS_PARTIALLY_FILLED = 5
 STATUS_FAILED = frozenset({4, 7, 8})                 # nothing filled
 STATUS_FAILED_AFTER_PARTIAL = frozenset({9, 10})     # some units filled, then cancelled/rejected
-STATUS_IN_FLIGHT = frozenset({1, 2, 6, 11, 12})
+STATUS_CANCELED = 7
+STATUS_WAITING_FOR_MARKET = 11                       # held by the broker until its market opens
+STATUS_IN_FLIGHT = frozenset({1, 2, 6, 12})
 
 SymbolFor = Callable[[int], str | None] | Mapping[int, str] | None
 
@@ -379,6 +383,10 @@ class CloseOrderStatus(Strict):
     @property
     def failed(self) -> bool:
         return bool(self.error_code)
+
+    @property
+    def waiting_for_market(self) -> bool:
+        return self.status_id == STATUS_WAITING_FOR_MARKET and not self.failed
 
     def occurred_for(self, position_id: int) -> bool:
         return any(p.position_id == position_id and p.occurred is not None for p in self.positions)

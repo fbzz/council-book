@@ -1,0 +1,101 @@
+# TEST FIXTURE (not the live universe). policy/universe.yaml with the design's core re-base
+# applied: every in-reference core base_weight x 0.45/0.95, rounded down to six decimals (sum
+# 0.449997), so the core plus a 0.50 stock sleeve fits reference_gross_max 0.95. Everything else is
+# a verbatim copy; tests/policy/test_sleeve_policy.py fails if it drifts from policy/universe.yaml.
+version: 2
+reference_gross_max: 0.95          # the reference book never levers; ~5% cash reserve for costs
+lines:
+  - symbol: NDX
+    name: Nasdaq-100
+    asset_class: index
+    sleeve: core
+    in_reference: true
+    base_weight: 0.165789          # weight at level 1.0 before vol capping
+    signal: {source: tiingo, ticker: QQQ}
+    vehicles:
+      long:  [{symbol: EQQQ.L, settlement: real}, {symbol: CNDX.L, settlement: real}, {symbol: QQQ, settlement: cfd}, {symbol: NSDQ100, settlement: cfd}]
+      short: [{symbol: NSDQ100, settlement: cfd}, {symbol: QQQ, settlement: cfd}]
+  - symbol: SEMIS
+    name: Semiconductors
+    asset_class: etf
+    sleeve: core
+    in_reference: true
+    base_weight: 0.071052
+    signal: {source: tiingo, ticker: SOXX}
+    vehicles:
+      long:  [{symbol: SMH.L, settlement: real}, {symbol: SOXX, settlement: cfd}, {symbol: SMH, settlement: cfd}]
+      short: [{symbol: SOXX, settlement: cfd}, {symbol: SMH, settlement: cfd}]
+  - symbol: SPX
+    name: S&P 500
+    asset_class: index
+    sleeve: core
+    in_reference: true
+    base_weight: 0.071052
+    signal: {source: tiingo, ticker: SPY}
+    vehicles:
+      long:  [{symbol: CSPX.L, settlement: real}, {symbol: VUSA.L, settlement: real}, {symbol: SPY, settlement: cfd}, {symbol: SPX500, settlement: cfd}]
+      short: [{symbol: SPX500, settlement: cfd}, {symbol: SPY, settlement: cfd}]
+  - symbol: GOLD
+    name: Gold
+    asset_class: commodity
+    sleeve: core
+    in_reference: true
+    base_weight: 0.056842
+    signal: {source: tiingo, ticker: GLD}
+    vehicles:
+      long:  [{symbol: SGLN.L, settlement: real}, {symbol: PHAU.L, settlement: real}, {symbol: GLD, settlement: cfd}, {symbol: GOLD, settlement: cfd}]
+      short: [{symbol: GOLD, settlement: cfd}]
+  - symbol: BTC
+    name: Bitcoin
+    asset_class: crypto
+    sleeve: crypto
+    in_reference: true
+    base_weight: 0.061578
+    council_deviations: false       # ~1% per side: reference-only in v1
+    signal: {source: binance, ticker: BTCUSDT}
+    vehicles:
+      long:  [{symbol: BTC, settlement: real}]
+      short: []
+  - symbol: ETH
+    name: Ether
+    asset_class: crypto
+    sleeve: crypto
+    in_reference: true
+    base_weight: 0.023684
+    council_deviations: false
+    signal: {source: binance, ticker: ETHUSDT}
+    vehicles:
+      long:  [{symbol: ETH, settlement: real}]
+      short: []
+  - symbol: OIL
+    name: Crude oil
+    asset_class: commodity
+    sleeve: overlay
+    in_reference: false             # council-only: reference level 0, trend-following bands
+    base_weight: 0.10
+    signal: {source: tiingo, ticker: USO}
+    vehicles:
+      long:  [{symbol: OIL, settlement: cfd}]
+      short: [{symbol: OIL, settlement: cfd}]
+  - symbol: EURUSD
+    name: Euro / US dollar
+    asset_class: fx
+    sleeve: overlay
+    in_reference: false
+    base_weight: 0.25
+    signal: {source: tiingo, ticker: FXE}
+    vehicles:
+      long:  [{symbol: EURUSD, settlement: cfd}]
+      short: [{symbol: EURUSD, settlement: cfd}]
+  - symbol: GBPUSD
+    name: Pound / US dollar
+    asset_class: fx
+    sleeve: overlay
+    in_reference: false
+    base_weight: 0.25
+    signal: {source: tiingo, ticker: FXB}
+    vehicles:
+      long:  [{symbol: GBPUSD, settlement: cfd}]
+      short: [{symbol: GBPUSD, settlement: cfd}]
+controls:
+  buy_and_hold: [SPY, BTCUSDT]

@@ -92,3 +92,7 @@ class CostQuote(Strict):
     weekend_multiplier: float = 3.0
     floor_applied: bool = False
     quoted_at: datetime
+    # The $1 fixed fee of one trade as bps of NAV (`risk.costs.TradeEconomics.fee_nav_bps`): filled
+    # for every real non-crypto vehicle, 0 otherwise. PRIVATE: it encodes the account's NAV, so it is
+    # never a fact, a prompt number or a public field (design D5/D18).
+    fixed_fee_nav_bps: float = 0.0

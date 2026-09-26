@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     plan_json        TEXT,
     commitment_sha   TEXT,
     published_commit TEXT,
-    superseded_by    TEXT
+    superseded_by    TEXT,
+    policy_sha       TEXT,             -- policy the decision was made under (schema v3)
+    blocker_scope    TEXT              -- 'all' | 'satellite' while waiting_for_market (schema v3)
 );
 CREATE INDEX IF NOT EXISTS decisions_by_state ON decisions (state);
 

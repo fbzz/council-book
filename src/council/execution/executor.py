@@ -21,9 +21,23 @@ Rules (each one has a chaos test against broker/fake.py):
   must be within risk.approval.post_fill_exposure_tolerance of the intended exposure (units sent
   × planned price); otherwise the decision is BLOCKED and nothing else is sent.
 - The first rejected open, or any rejected close, stops the remaining opens → completed_partial.
+- Market hours: legs the approval dropped (`dropped`: seq → reason) are marked skipped before
+  anything is sent. Every other leg's session is re-checked just before its write: closed →
+  skipped `market_closed` (a close skipped this way also stops every open, the drop rule).
+- Broker status 11 (WaitingForMarket) is not "in flight". While the leg's session is open by our
+  calendar (a trading halt, say) polling continues through 11 for the normal window; once the
+  session is closed, or the window ends with the order still held, the order is held for its
+  market. If the write client offers `cancel_order` AND declares `CANCEL_ROUTE_VERIFIED` (both
+  added only once the M5 route check verifies the cancel route) the order is cancelled and
+  re-looked-up: a confirmed cancel → rejected `cancelled_market_closed`. `resume` never cancels
+  (lookups only). Otherwise the leg becomes `waiting_for_market`, the remaining opens stop, and the
+  decision ends `waiting_for_market` (a blocker scoped to the satellite sleeve when every waiting
+  leg is a stock order, else to the whole book) that the watch resolves read-only. A close order
+  that reports status 11 is handled the same way (no cancel).
 - Final state: unknown leg → execution_unknown; blocked → blocked; unreadable portfolio, missing
-  stop-loss, unknown position or a broken fill → blocked; any rejected/skipped/partial leg →
-  completed_partial; drift ≤ risk.reconcile.drift_max → completed; otherwise blocked.
+  stop-loss, unknown position or a broken fill → blocked; a waiting leg → waiting_for_market;
+  any rejected/skipped/partial leg → completed_partial; drift ≤ risk.reconcile.drift_max →
+  completed; otherwise blocked.
 - `resume` does lookups and reconcile ONLY and never sends an order. A leg that provably never
   reached the broker (clean not-found) is marked skipped: it needs a fresh proposal and approval.
 - One executor at a time: an exclusive lock file in the private state dir.
@@ -46,12 +60,13 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import Field
 
+from council import clock as market_clock
 from council.broker.http import (
     RETRY_AFTER_DEFAULT_S,
     AmbiguousWriteError,
@@ -60,11 +75,13 @@ from council.broker.http import (
 )
 from council.broker.instruments import InstrumentMap
 from council.broker.parsing import (
+    STATUS_CANCELED,
     STATUS_FAILED,
     STATUS_FAILED_AFTER_PARTIAL,
     STATUS_FILLED,
     STATUS_IN_FLIGHT,
     STATUS_PARTIALLY_FILLED,
+    STATUS_WAITING_FOR_MARKET,
     OrderStatus,
     PortfolioRead,
     as_int,
@@ -80,7 +97,7 @@ from council.execution.planner import vehicle_to_line
 from council.execution.ratelimit import TokenBucket
 from council.execution.reconcile import ExpectedPosition, ReconcileResult, reconcile
 from council.ledger.db import Ledger, LegRow
-from council.ledger.states import LEG_ACTIVE_STATES, can_transition
+from council.ledger.states import LEG_ACTIVE_STATES, WAITING_STATE, can_transition
 from council.models.common import Direction, Strict
 from council.models.cycle import DecisionState
 from council.models.plan import Leg, Plan
@@ -97,6 +114,10 @@ UNITS_REFRESH_CAP = 1.02
 CLOSE_UNITS_TOLERANCE = 0.01
 LOCK_FILE = "exec.lock"
 ACTOR = "executor"
+CANCEL_ATTEMPT = 90          # request-id attempt number reserved for a leg's cancel request
+WAITING_GRACE_H = 1.0        # a held order unresolved 1 h after the next full session closes → blocked
+MARKET_CLOSED = "market_closed"
+CANCELLED_MARKET_CLOSED = "cancelled_market_closed"
 
 T = TypeVar("T")
 
@@ -128,6 +149,10 @@ class WriteClient(Protocol):
     def patch_stop_loss(
         self, *, request_id: str, position_id: int, stop_loss_rate: float
     ) -> dict[str, Any]: ...
+
+    # Optional, and absent from EtoroWriteClient until the M5 route check verifies the cancel route;
+    # used only when the client also declares CANCEL_ROUTE_VERIFIED = True:
+    # def cancel_order(self, *, request_id: str, order_id: int) -> dict[str, Any]: ...
 
 
 class ReadClient(Protocol):
@@ -186,6 +211,7 @@ class _LegCtx:
     position_id: int | None
     depends_on: tuple[int, ...]
     whole_units: bool = False
+    session: str | None = None
 
     @property
     def planned_price(self) -> float | None:
@@ -200,7 +226,7 @@ class _LegCtx:
             instrument_id=leg.instrument_id, direction=leg.direction, settlement=leg.settlement,
             leverage=leg.leverage, units=leg.units, amount_usd=leg.amount_usd,
             sl_rate=leg.sl_rate, position_id=leg.position_id, depends_on=tuple(leg.depends_on),
-            whole_units=leg.whole_units,
+            whole_units=leg.whole_units, session=leg.session,
         )
 
     @classmethod
@@ -211,6 +237,7 @@ class _LegCtx:
             settlement=row.settlement, leverage=row.leverage, units=row.units,
             amount_usd=row.amount_usd, sl_rate=row.sl_rate, position_id=row.position_id,
             depends_on=tuple(row.depends_on), whole_units=bool(row.detail.get("whole_units", False)),
+            session=row.detail.get("session"),
         )
 
 
@@ -225,7 +252,9 @@ class _Run:
     blocked: bool = False
     partial: bool = False
     stop_opens: bool = False
+    waiting: bool = False
     writes: int = 0
+    allow_cancel: bool = True       # False in resume: lookups only, never a write
 
     def reason(self, text: str) -> None:
         if text not in self.reasons:
@@ -289,8 +318,12 @@ class Executor:
         self._sl_tol = float(self.policy.risk["reconcile"]["sl_rate_tolerance"])
 
     # ================================================================== public
-    def execute(self, decision_id: str, plan: Plan, *, nav_usd: float) -> ExecutionReport:
-        """Run an approved plan. `nav_usd` is the equity the plan was sized with."""
+    def execute(
+        self, decision_id: str, plan: Plan, *, nav_usd: float, dropped: Mapping[int, str] | None = None,
+    ) -> ExecutionReport:
+        """Run an approved plan. `nav_usd` is the equity the plan was sized with; `dropped` maps
+        the seq of every leg the approval dropped (market hours) to its reason: those legs are
+        marked skipped and never sent."""
         if self.write is None:
             raise ExecutionError("execute needs a write client")
         if not (math.isfinite(nav_usd) and nav_usd > 0):
@@ -302,7 +335,12 @@ class Executor:
         if decision.state != "approved":
             raise ExecutionError(f"{decision_id} is {decision.state}, not approved")
         ordered = sorted(plan.legs, key=lambda leg: leg.seq)
-        legs = [_LegCtx.from_leg(leg, leg.line or self._line(leg.symbol)) for leg in ordered]
+        dropped = dict(dropped or {})
+        unknown_seqs = sorted(set(dropped) - set(seqs))
+        if unknown_seqs:
+            raise ValueError(f"dropped legs not in the plan: {unknown_seqs}")
+        legs = [_LegCtx.from_leg(leg, leg.line or self._line(leg.symbol)) for leg in ordered
+                if leg.seq not in dropped]
         with self._lock():
             self._load_symbols(legs)
             before = self._portfolio()            # a failing read changes nothing
@@ -315,6 +353,10 @@ class Executor:
             self.ledger.insert_legs(decision_id, ordered, line_of=self._line, now=now)
             self.ledger.transition(decision_id, "executing", "approved plan: execution started", actor=ACTOR, now=now)
             try:
+                for seq, why in sorted(dropped.items()):
+                    self.ledger.update_leg(decision_id, seq, state="skipped", resolved_at=now, now=now,
+                                           error=f"dropped at approval: {why}")
+                    run.partial = True
                 self._run_closes(run)
                 self._run_modifies(run)
                 self._run_opens(run, nav_usd)
@@ -332,7 +374,7 @@ class Executor:
         legs = [_LegCtx.from_row(r) for r in rows]
         with self._lock():
             self._load_symbols(legs)
-            run = _Run(decision_id, legs, before=self._portfolio())
+            run = _Run(decision_id, legs, before=self._portfolio(), allow_cancel=False)
             try:
                 for row, leg in zip(rows, legs, strict=True):
                     if row.state in LEG_ACTIVE_STATES:
@@ -383,6 +425,9 @@ class Executor:
                 self._skip(run, leg, "invalid open leg (stop-loss, units, instrument or settlement missing)")
                 run.stop_opens = True
                 continue
+            if self._market_closed(leg):
+                self._skip(run, leg, MARKET_CLOSED)
+                continue
             whole = leg.whole_units or self._whole_units.get(leg.symbol, False)
             units = self._rederive_units(leg.units, scale, whole=whole)
             if units <= 0:
@@ -401,6 +446,11 @@ class Executor:
             self._skip(run, leg, "position no longer open")
             run.stop_opens = True
             run.reason(f"{leg.symbol}: position set changed; opens stopped")
+            return
+        if self._market_closed(leg):
+            self._skip(run, leg, MARKET_CLOSED)
+            run.stop_opens = True            # the drop rule: a risk-reducing leg did not go
+            run.reason(f"{leg.symbol}: market closed; opens stopped")
             return
         units_before = pos.units
         deduct = (
@@ -425,12 +475,17 @@ class Executor:
         if sent.outcome == "accepted":
             order_id = close_order_id(sent.payload)
             self._leg(run, leg, "submitted", order_id=order_id)
-            verdict = self._await_close(position_id, units_before, deduct, order_id, self._window(), immediate=False)
+            verdict = self._await_close(position_id, units_before, deduct, order_id, self._window(),
+                                        immediate=False, leg=leg)
         else:
-            verdict = self._await_close(position_id, units_before, deduct, None, AMBIGUITY_WINDOW_S, immediate=True)
+            verdict = self._await_close(position_id, units_before, deduct, None, AMBIGUITY_WINDOW_S,
+                                        immediate=True, leg=leg)
         self._settle_close(run, leg, verdict, order_id)
 
     def _settle_close(self, run: _Run, leg: _LegCtx, verdict: str, order_id: int | None) -> None:
+        if verdict == "waiting":
+            self._wait(run, leg, order_id=order_id, broker_status=f"{STATUS_WAITING_FOR_MARKET}:WaitingForMarket")
+            return
         if verdict == "filled":
             self._resolve(run, leg, "filled", order_id=order_id, position_ids=[leg.position_id])
         elif verdict == "rejected":
@@ -444,12 +499,16 @@ class Executor:
 
     def _await_close(
         self, position_id: int, units_before: float, deduct: float | None,
-        order_id: int | None, window: float, *, immediate: bool,
+        order_id: int | None, window: float, *, immediate: bool, leg: _LegCtx | None = None,
     ) -> str:
         """'filled' once the portfolio shows the position gone (or reduced by the deducted
-        units); 'rejected' if the close order reports an error; else 'unconfirmed'."""
+        units); 'rejected' if the close order reports an error; 'waiting' when the broker holds
+        it for a closed market (at once when the leg's session is closed, else only if it is still
+        held at the end of the window); else 'unconfirmed'."""
+        held = False
 
         def check() -> str | None:
+            nonlocal held
             if order_id is not None:
                 try:
                     info = self.read.close_order_info(order_id)
@@ -457,6 +516,10 @@ class Executor:
                     info = None
                 if info is not None and parse_close_order(info).failed:
                     return "rejected"
+                if info is not None:
+                    held = parse_close_order(info).waiting_for_market
+                    if held and (leg is None or self._market_closed(leg)):
+                        return "waiting"
             try:
                 port = self._portfolio()
             except BrokerError:
@@ -468,13 +531,16 @@ class Executor:
                 return "filled"
             return None
 
-        return self._poll(check, window, immediate=immediate) or "unconfirmed"
+        return self._poll(check, window, immediate=immediate) or ("waiting" if held else "unconfirmed")
 
     # ================================================================== stop-loss PATCH
     def _modify_leg(self, run: _Run, leg: _LegCtx) -> None:
         pos = run.before.position(leg.position_id) if (run.before and leg.position_id) else None
         if pos is None or not leg.sl_rate:
             self._skip(run, leg, "stop-loss leg without an open position or a rate")
+            return
+        if self._market_closed(leg):
+            self._skip(run, leg, MARKET_CLOSED)
             return
         position_id, rate = pos.position_id, float(leg.sl_rate)
         sent = self._submit(
@@ -573,6 +639,10 @@ class Executor:
             sid = status.status_id
             if sid == STATUS_FILLED or sid in STATUS_FAILED or sid in STATUS_FAILED_AFTER_PARTIAL:
                 return True
+            if sid == STATUS_WAITING_FOR_MARKET:
+                # held until the market opens: stop polling once the session is closed by our
+                # calendar; while it is open (a halt) keep polling through the normal window
+                return self._market_closed(leg)
             elapsed = (self.clock() - submitted_at).total_seconds()
             return sid == STATUS_PARTIALLY_FILLED and elapsed >= PARTIAL_WINDOW_S
 
@@ -635,6 +705,18 @@ class Executor:
             self._resolve(run, leg, "rejected_partial", error=status.error_message or "rejected after a partial fill", **common)
             run.partial = run.stop_opens = True
             run.reason(f"{leg.symbol}: open rejected after a partial fill; remaining opens stopped")
+        elif sid == STATUS_WAITING_FOR_MARKET:
+            after = self._cancel_waiting(run, leg, status)
+            if after is not None and after.status_id != STATUS_WAITING_FOR_MARKET:
+                if after.status_id == STATUS_CANCELED:
+                    self._resolve(run, leg, "rejected", error=CANCELLED_MARKET_CLOSED,
+                                  order_id=after.order_id, broker_status=f"{after.status_id}:{after.status_name}")
+                    run.partial = run.stop_opens = True
+                    run.reason(f"{leg.symbol}: market closed; order cancelled; remaining opens stopped")
+                    return
+                self._settle_open(run, leg, after, units, planned_price)
+                return
+            self._wait(run, leg, order_id=status.order_id, broker_status=f"{sid}:{status.status_name}")
         else:
             self._resolve(run, leg, "unknown", error=f"still in flight (status {sid})", **common)
             run.unknown = True
@@ -666,6 +748,82 @@ class Executor:
                 leverage=leg.leverage, sl_rate=leg.sl_rate,
             ))
 
+    # ================================================================== market hours
+    def _session(self, leg: _LegCtx) -> str | None:
+        if leg.session:
+            return leg.session
+        spec = self.policy.universe.by_symbol().get(leg.line)
+        return market_clock.vehicle_session(spec, leg.symbol) if spec is not None else None
+
+    def _market_closed(self, leg: _LegCtx) -> bool:
+        """Pre-send check: is the leg's session closed right now? A leg without a known session
+        (an unmapped position) is sent: the broker decides, and status 11 is handled."""
+        session = self._session(leg)
+        if session is None:
+            return False
+        closing = leg.kind in ("close", "partial_close")
+        return not market_clock.session_open(session, self.clock(), closing=closing)
+
+    def _cancel_waiting(self, run: _Run, leg: _LegCtx, status: OrderStatus) -> OrderStatus | None:
+        """Cancel an order held for a closed market, when the write client has a verified cancel
+        route, and look it up again. None when no cancel was possible or nothing was learned."""
+        if not run.allow_cancel or self.write is None or status.order_id is None:
+            return None
+        cancel = getattr(self.write, "cancel_order", None)
+        if not callable(cancel) or getattr(self.write, "CANCEL_ROUTE_VERIFIED", False) is not True:
+            return None
+        request_id = leg_request_id(run.decision_id, leg.seq, CANCEL_ATTEMPT)
+        self.limiter.acquire()
+        run.writes += 1
+        order_id = status.order_id
+        try:
+            payload = cancel(request_id=request_id, order_id=order_id)
+            self._event(run, leg, "cancel_accepted", request_id, None, payload)
+        except DefiniteRejection as exc:
+            self._event(run, leg, "cancel_rejected", request_id, exc.status, {"body": exc.body})
+        except AmbiguousWriteError as exc:
+            self._event(run, leg, "cancel_ambiguous", request_id, exc.status, {"error": str(exc)})
+        except ValueError as exc:
+            self._event(run, leg, "cancel_invalid", request_id, None, {"error": str(exc)})
+            return None
+        found: OrderStatus | None = None
+
+        def check() -> OrderStatus | None:
+            nonlocal found
+            try:
+                payload = self.read.order_lookup(order_id=order_id)
+            except BrokerError:
+                return None
+            if payload is None:
+                return None
+            found = parse_order_status(payload)
+            settled = found.status_id not in STATUS_IN_FLIGHT and found.status_id != STATUS_WAITING_FOR_MARKET
+            return found if settled else None
+
+        self._poll(check, self._window(), immediate=True)
+        return found
+
+    def _wait(self, run: _Run, leg: _LegCtx, *, order_id: int | None, broker_status: str) -> None:
+        """The broker holds the order until the market opens: waiting_for_market, not unknown."""
+        now = self.clock()
+        session = self._session(leg)
+        close = market_clock.next_session_close(session, now) if session else None
+        deadline = close + timedelta(hours=WAITING_GRACE_H) if close else now + timedelta(hours=24)
+        self._leg(run, leg, WAITING_STATE, order_id=order_id, broker_status=broker_status,
+                  detail={"waiting_since": now.isoformat(), "waiting_deadline": deadline.isoformat()})
+        run.waiting = run.stop_opens = True
+        run.reason(f"{leg.symbol}: order held by the broker until its market opens; remaining opens stopped")
+
+    def _blocker_scope(self, decision_id: str) -> str:
+        """`satellite` when every waiting leg is a stock order on a satellite line, else `all`."""
+        specs = self.policy.universe.by_symbol()
+        waiting = [r for r in self.ledger.legs(decision_id) if r.state == WAITING_STATE]
+        stock = all(
+            (spec := specs.get(r.line)) is not None and spec.asset_class == "stock" and spec.sleeve == "satellite"
+            for r in waiting
+        )
+        return "satellite" if waiting and stock else "all"
+
     # ================================================================== resume
     def _recover(self, run: _Run, leg: _LegCtx, row: LegRow) -> None:
         if leg.kind == "open":
@@ -693,7 +851,7 @@ class Executor:
                 return
             verdict = self._await_close(
                 leg.position_id, float(units_before), row.detail.get("units_to_deduct"),
-                row.order_id, AMBIGUITY_WINDOW_S, immediate=True,
+                row.order_id, AMBIGUITY_WINDOW_S, immediate=True, leg=leg,
             )
             if verdict == "unconfirmed" and row.order_id is None and row.state in ("submitting", "unknown"):
                 try:
@@ -719,7 +877,9 @@ class Executor:
                 run.unknown = True
 
     def _account_existing(self, run: _Run, leg: _LegCtx, row: LegRow) -> None:
-        """Carry the outcome of legs that were already terminal into the resumed run."""
+        """Carry the outcome of legs that were already terminal (or waiting) into the resumed run."""
+        if row.state == WAITING_STATE:
+            run.waiting = run.stop_opens = True
         if row.state in ("rejected", "skipped", "partially_filled", "rejected_partial"):
             run.partial = True
         if leg.kind == "open" and row.state in ("filled", "partially_filled", "rejected_partial"):
@@ -750,6 +910,8 @@ class Executor:
         except (BrokerError, ValueError) as exc:
             run.reason(f"post-execution reconcile unavailable ({type(exc).__name__})")
         final = self._final_state(run, rec)
+        if final == WAITING_STATE:
+            self.ledger.set_blocker_scope(run.decision_id, self._blocker_scope(run.decision_id), now=now)
         current = self.ledger.get_decision(run.decision_id).state
         reason = "; ".join(run.reasons) or final
         if current != final and can_transition(current, final):
@@ -774,6 +936,8 @@ class Executor:
             for issue in rec.issues:
                 run.reason(issue)
             return "blocked"
+        if run.waiting:
+            return WAITING_STATE
         if run.partial:
             return "completed_partial"
         if rec.drift_ok:

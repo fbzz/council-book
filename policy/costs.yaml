@@ -1,8 +1,13 @@
 # Cost floors: per-side cost = max(broker what-if, floor, live half-spread). Floors only ratchet UP
 # after the first fills (the broker what-if returned 0 on an older account).
 version: 2
-per_side_bps: {crypto: 100, etf_real: 5, etf_cfd: 15, index_cfd: 5, commodity_cfd: 8, fx_cfd: 3}
+per_side_bps: {crypto: 100, etf_real: 5, stock_real: 10, etf_cfd: 15, index_cfd: 5, commodity_cfd: 8, fx_cfd: 3}   # stock_real: real US shares (ratchets up from fills)
 fixed_commission_usd: {real: 1.0, cfd: 0.0}       # divided by the REAL mirrored amount (amount x mirror ratio)
+# The fixed fee per real non-crypto trade (UCITS/ETCs and stocks) as a PRIVATE per-cycle scalar of NAV:
+# fee_nav_bps = 1e4 x fee x sum over the charged levels of 1 / that level's NAV (never published).
+fixed_commission_charged_on: [virtual, mirror]     # both until the smoke ticket settles where it is charged
+min_trade: {copy_min_real_usd: 1.0, copy_min_multiple: 3}   # hard floor: 3 x the copy minimum, in REAL dollars
+assumed: {virtual_nav_usd: 10000, mirror_ratio: 0.1}         # conservative when state_dir/account/mirror.json is missing
 slippage_buffer_bps: 10
 overnight_annual:                                  # carry on leveraged/short CFD exposure; 1x long ETF/stock CFD = 0
   benchmark_rate: 0.043                            # refreshed at onboarding; published

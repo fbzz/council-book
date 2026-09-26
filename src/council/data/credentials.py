@@ -6,6 +6,9 @@ Rules:
 - An explicit env-var override wins (tests and CI).
 - Stub mode never touches the Keychain.
 - Values are never logged, printed or placed in exception messages.
+- The SEC user agent (EDGAR's fair-access rule: a name and a contact address on every request) is a
+  required credential: `sec_user_agent()` raises when it is missing or malformed, and its errors
+  name the Keychain item and the env override, never the value.
 """
 
 from __future__ import annotations
@@ -16,9 +19,15 @@ import subprocess
 TIINGO = "council-book.tiingo"
 FRED = "council-book.fred"
 SEC_USER_AGENT = "council-book.sec-user-agent"
+SEC_USER_AGENT_ENV = "COUNCIL_SEC_USER_AGENT"
 ALLOWED_SERVICES = frozenset({TIINGO, FRED, SEC_USER_AGENT})
 KEYCHAIN_ACCOUNT = "council"
 KEYCHAIN_TIMEOUT_S = 10
+_SEC_UA_MIN, _SEC_UA_MAX = 8, 200
+
+
+class MissingCredential(RuntimeError):
+    """A required data credential is absent or malformed. The message never contains the value."""
 
 
 def keychain_command(service: str) -> list[str]:
@@ -53,3 +62,31 @@ def secret(service: str, env_override: str | None = None) -> str | None:
         return None
     value = proc.stdout.strip()
     return value or None
+
+
+def check_sec_user_agent(value: str) -> str:
+    """`value` when it is one printable ASCII line of 8-200 characters with a space and an `@` (SEC
+    refuses anonymous clients); otherwise MissingCredential, whose message never echoes the value."""
+    text = value.strip() if isinstance(value, str) else ""
+    printable = all(32 <= ord(ch) < 127 for ch in text)
+    if not (printable and _SEC_UA_MIN <= len(text) <= _SEC_UA_MAX and " " in text and "@" in text):
+        raise MissingCredential(
+            f"SEC user agent in {SEC_USER_AGENT} / {SEC_USER_AGENT_ENV} is malformed: it must be one "
+            "printable line with a name and a contact e-mail address"
+        )
+    return text
+
+
+def sec_user_agent() -> str:
+    """The SEC EDGAR user agent ("Name contact@example.org"): `COUNCIL_SEC_USER_AGENT`, else the
+    Keychain item `council-book.sec-user-agent` (account `council`; never read in stub mode).
+
+    Raises MissingCredential when it is absent or malformed (`check_sec_user_agent`). The value is
+    never logged or echoed."""
+    value = secret(SEC_USER_AGENT, env_override=SEC_USER_AGENT_ENV)
+    if not value:
+        raise MissingCredential(
+            f"SEC user agent not configured: add the Keychain item {SEC_USER_AGENT} "
+            f"(account {KEYCHAIN_ACCOUNT}) or set {SEC_USER_AGENT_ENV}; stub mode reads only the env var"
+        )
+    return check_sec_user_agent(value)

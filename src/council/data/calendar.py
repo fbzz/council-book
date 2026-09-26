@@ -1,4 +1,5 @@
-"""Scheduled macro events: FOMC from the frozen policy calendar; CPI/NFP/PCE from FRED release dates.
+"""Scheduled events: FOMC from the frozen policy calendar; CPI/NFP/PCE from FRED release dates; and,
+when the caller supplies them, the stock lines' earnings (`council.stocks.earnings`).
 
 Rules:
 - FOMC decisions come from policy/calendar-2026.yaml (severity 3), always.
@@ -8,10 +9,15 @@ Rules:
 - A release that fails to load is skipped with a quality flag; FOMC events still apply.
 - The FRED key is a query parameter, so no URL and no key ever reaches an error or a flag.
 - Scheduled events are public in advance; they are admitted by their schedule, not their time.
+- Earnings (`earnings=`, a function of (start, end) returning (events, flags)): its events are
+  merged as returned, i.e. while their R16 window overlaps [start, end] even when the report time
+  itself lies outside it. They are stock-only evidence, so an unexpected failure of that function
+  is the flag `calendar:earnings_error:<type>` and never costs the macro events.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime, time
 from typing import Any, Literal
 
@@ -30,6 +36,7 @@ RELEASES: dict[int, tuple[ReleaseKind, int]] = {10: ("cpi", 3), 50: ("nfp", 2), 
 RELEASE_TIME_NY = time(8, 30)
 FOMC_SEVERITY = 3
 RELEASE_DATES_LIMIT = 120
+EarningsFn = Callable[[datetime, datetime], tuple[list[EventItem], list[str]]]
 
 
 def fomc_events(policy: Policy, start: datetime, end: datetime) -> list[EventItem]:
@@ -94,8 +101,9 @@ def load_events(
     *,
     fred_key: str | None = None,
     client: httpx.Client | None = None,
+    earnings: EarningsFn | None = None,
 ) -> tuple[list[EventItem], list[str]]:
-    """(events sorted by time then ID, quality flags)."""
+    """(events sorted by time then ID, quality flags); `earnings` adds the stock lines' earnings."""
     events = fomc_events(policy, start, end)
     flags: list[str] = []
     if not fred_key:
@@ -123,6 +131,13 @@ def load_events(
                                 source=f"fred_release_{release_id}",
                             )
                         )
+    if earnings is not None:
+        try:
+            found, earnings_flags = earnings(start, end)
+        except Exception as exc:  # stock-only evidence: its failure never costs the macro events
+            found, earnings_flags = [], [f"calendar:earnings_error:{type(exc).__name__}"]
+        events += list(found)
+        flags += list(earnings_flags)
     unique = {e.id: e for e in events}
     return sorted(unique.values(), key=lambda e: (e.at_utc, e.id)), flags
 

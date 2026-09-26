@@ -312,7 +312,7 @@ def test_the_studied_plan_rows_are_the_live_targets(study):
 
 
 def test_the_studied_overlay_level_is_the_live_mapping(study):
-    pol = Policy.load()
+    pol = Policy.load(include_sleeve=False)
     rng = np.random.default_rng(5)
     idx = pd.bdate_range("2015-01-02", periods=700)
     spy = pd.Series(100 * np.exp(np.cumsum(rng.normal(0.0002, 0.012, len(idx)))), index=idx)

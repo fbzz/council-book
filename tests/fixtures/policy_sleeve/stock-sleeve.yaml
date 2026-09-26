@@ -1,0 +1,79 @@
+# TEST FIXTURE (not live policy): a synthetic quarter. Tickers are invented except the one-letter
+# id F, kept to exercise single-character ids; TSTC_B exercises a class share ("." written "_" in
+# the line id, "-" in the history ticker). Four of eight names selected, two shortlisted, one
+# retired company in the registry. Every string is quoted, as the rank's writer does.
+version: 1
+quarter: "2026Q4"
+rank_asof: "2026-11-20"
+rank_config_sha256: "38779044cb74a00ca57b94e61d57b18c44b8f952dbfd0f183ce03662085988fd"
+sleeve_weight: 0.50
+names_target: 8
+lines:
+  - symbol: "TSTA"
+    name: "Test Alpha Inc"
+    role: selected
+    sector: "BusEq"
+    cik: "0000900001"
+    rank: 1
+    signal_ticker: "TSTA"
+    etoro_symbol: "TSTA"
+    eligibility_checked_at: "2026-11-20T15:02:00Z"
+    credited: null
+    aliases: []
+  - symbol: "TSTB"
+    name: "Test Beta Corp"
+    role: selected
+    sector: "Hlth"
+    cik: "0000900002"
+    rank: 2
+    signal_ticker: "TSTB"
+    etoro_symbol: "TSTB"
+    eligibility_checked_at: "2026-11-20T15:02:00Z"
+    credited: null
+    aliases: []
+  - symbol: "TSTC_B"
+    name: "Test Gamma Holdings Class B"
+    role: selected
+    sector: "Manuf"
+    cik: "0000900003"
+    rank: 3
+    signal_ticker: "TSTC-B"
+    etoro_symbol: "TSTC.B"
+    eligibility_checked_at: "2026-11-20T15:02:00Z"
+    credited: null
+    aliases: []
+  - symbol: "F"
+    name: "Test F Motors"
+    role: selected
+    sector: "Durbl"
+    cik: "0000900004"
+    rank: 4
+    signal_ticker: "F"
+    etoro_symbol: "F"
+    eligibility_checked_at: "2026-11-20T15:02:00Z"
+    credited: null
+    aliases: []
+  - symbol: "TSTD"
+    name: "Test Delta Systems"
+    role: shortlist
+    sector: "BusEq"
+    cik: "0000900005"
+    rank: 5
+    signal_ticker: "TSTD"
+    etoro_symbol: "TSTD"
+    eligibility_checked_at: "2026-11-20T15:02:00Z"
+    credited: null
+    aliases: []
+  - symbol: "TSTE"
+    name: "Test Epsilon Energy"
+    role: shortlist
+    sector: "Enrgy"
+    cik: "0000900006"
+    rank: 6
+    signal_ticker: "TSTE"
+    etoro_symbol: "TSTE"
+    eligibility_checked_at: null
+    credited: null
+    aliases: []
+retired:
+  - {cik: "0000900099", symbol: "TSTZ", name: "Test Zeta Stores", sector: "Shops", from: "2026Q3", to: "2026Q4", vehicles: ["TSTZ"]}

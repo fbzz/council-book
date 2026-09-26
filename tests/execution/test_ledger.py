@@ -50,10 +50,12 @@ def test_migrate_creates_wal_schema(ledger):
         "cycles", "role_calls", "decisions", "decision_events", "legs", "positions_observed",
         "broker_events", "equity_marks", "runtime_state",
     } <= tables
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
-    assert ledger.migrate() == 2                     # idempotent
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert ledger.migrate() == 3                     # idempotent
     columns = {r[1] for r in conn.execute("PRAGMA table_info(decision_events)")}
     assert {"actor", "process_role"} <= columns
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
+    assert {"policy_sha", "blocker_scope"} <= columns
 
 
 def test_ledger_refuses_a_path_inside_the_repo():
@@ -360,12 +362,14 @@ def test_migrates_a_v1_ledger_in_place(tmp_path, fclock):
     """)
     conn.close()
     ledger = Ledger(path, clock=fclock.now)
-    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 2
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 3
     (legacy,) = ledger.events("old")
     assert legacy["actor"] == "unrecorded" and legacy["process_role"] is None
+    old = ledger.get_decision("old")
+    assert old.policy_sha is None and old.blocker_scope is None       # v3 columns, NULL on old rows
     ledger.transition("old", "approved", "ok", actor="operator")
     assert ledger.events("old")[-1]["actor"] == "operator"
-    assert ledger.migrate() == 2
+    assert ledger.migrate() == 3
 
 
 # ------------------------------------------------------------------------------ leg lines

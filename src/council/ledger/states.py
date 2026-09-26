@@ -6,6 +6,14 @@ Decision rules:
   re-checks; execution ends completed | completed_partial | blocked | execution_unknown.
 - execution_unknown is resolved only by `resume` (lookups + reconcile, never a new order) or by an
   operator review; blocked is cleared only by an operator review (reviewed_no_action).
+- waiting_for_market: an order the broker holds until its market opens (status 11). The watch
+  resolves it read-only (filled → completed/completed_partial; cancelled/rejected → skipped legs,
+  completed_partial); unresolved one hour after the next full session closes it becomes blocked. The
+  operator may record the outcome (`council ops resolve`, → reviewed_no_action).
+Blockers: blocked, execution_unknown and any unknown leg hold every line (scope `all`); a
+waiting_for_market decision holds every line too unless every waiting leg is a stock order, which
+holds only the satellite sleeve (scope `satellite`; `blockers()` reports it as "satellite:<id>").
+Such a hold that times out to blocked keeps its satellite scope; a broken fill resets it to `all`.
 - Terminal states never move again.
 Priority: flatten > compliance > rebalance (policy risk.priority); a lower priority never
 supersedes a pending higher one.
@@ -23,6 +31,9 @@ LEG_STATES: frozenset[str] = frozenset(get_args(LegState))
 
 PENDING_STATES: frozenset[str] = frozenset({"awaiting_publication", "proposed"})
 BLOCKER_STATES: frozenset[str] = frozenset({"blocked", "execution_unknown"})
+WAITING_STATE = "waiting_for_market"
+BLOCKER_SCOPES: frozenset[str] = frozenset({"all", "satellite"})
+SATELLITE_BLOCKER_PREFIX = "satellite:"   # a blocker id that holds only the satellite sleeve
 TERMINAL_STATES: frozenset[str] = frozenset(
     {"completed", "completed_partial", "rejected", "expired", "superseded", "reviewed_no_action"}
 )
@@ -33,10 +44,13 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
         {"approved", "rejected", "expired", "superseded", "blocked", "reviewed_no_action"}
     ),
     "approved": frozenset({"executing", "expired", "rejected", "blocked"}),
-    "executing": frozenset({"completed", "completed_partial", "blocked", "execution_unknown"}),
-    "execution_unknown": frozenset(
-        {"completed", "completed_partial", "blocked", "reviewed_no_action"}
+    "executing": frozenset(
+        {"completed", "completed_partial", "blocked", "execution_unknown", WAITING_STATE}
     ),
+    "execution_unknown": frozenset(
+        {"completed", "completed_partial", "blocked", "reviewed_no_action", WAITING_STATE}
+    ),
+    WAITING_STATE: frozenset({"completed", "completed_partial", "blocked", "reviewed_no_action"}),
     "blocked": frozenset({"reviewed_no_action"}),
     **{state: frozenset() for state in TERMINAL_STATES},
 }
@@ -54,9 +68,11 @@ LEG_TRANSITIONS: dict[str, frozenset[str]] = {
     "planned": frozenset({"submitting", "skipped"}),
     # submitting -> submitting = a new attempt after a definite 429
     "submitting": frozenset({"submitting", "submitted", "in_flight", "unknown", "skipped"} | _RESOLUTIONS),
-    "submitted": frozenset({"in_flight", "unknown"} | _RESOLUTIONS),
-    "in_flight": frozenset({"in_flight", "unknown"} | _RESOLUTIONS),
-    "unknown": frozenset({"submitted", "in_flight", "skipped"} | _RESOLUTIONS),
+    "submitted": frozenset({"in_flight", "unknown", WAITING_STATE} | _RESOLUTIONS),
+    "in_flight": frozenset({"in_flight", "unknown", WAITING_STATE} | _RESOLUTIONS),
+    "unknown": frozenset({"submitted", "in_flight", "skipped", WAITING_STATE} | _RESOLUTIONS),
+    # a held order: filled/rejected when the market opens, skipped when cancelled (nothing filled)
+    WAITING_STATE: frozenset({"unknown", "skipped"} | _RESOLUTIONS),
     **{state: frozenset() for state in LEG_TERMINAL_STATES},
 }
 

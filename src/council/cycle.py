@@ -8,6 +8,30 @@ Order of operations (each step fails closed):
 
 This module never imports the broker writer and never places an order: a proposal only becomes an
 order when the human operator approves it in the operator terminal (council.operator.approve).
+
+Market hours: every leg is stamped with its vehicle's session and its own deadline
+(`stamp_sessions`: min(next slot - 5 min, session close - 10 min), early closes and FX breaks
+included). A rebalance stays approvable until its latest leg's deadline (the approval drops expired
+or closed legs by the drop rule); flatten and compliance are valid until the next slot - 5 min.
+Each decision records the policy SHA it was made under. Orders the broker holds for a closed
+market (waiting_for_market) are resolved read-only before the broker snapshot, and a flatten never
+adds a second close for a position whose close the broker already holds.
+
+Costs and trade size (WP-E): the cycle prices the $1 fixed fee as a PRIVATE scalar of NAV from the
+snapshot's equity and the operator's mirror ratio (`runtime.cycle_trade_economics`; missing →
+the policy's assumed ratio and the flag `mirror_ratio_missing`), sets it on the real non-crypto cost
+quotes, gives the engine the held reference levels (`risk.held_levels`), the real-dollar trade
+floor and discretionary-only trailing budgets, stamps each leg with its origin, reference level
+and fee, arms the planner's gap guard on stock lines, and feeds the kill switch the real account's
+cumulative extra fee drag. None of these numbers is published or shown to the council.
+
+Live data path (WP-G, design §11): stock lines take their history from the dedicated stock source
+(`facts.market.history_source`; their states use its availability rule and label); returns are
+aligned on the core lines' calendar, so a short-history stock never shortens the core's covariance
+window; the stock lines' fundamentals facts enter the pack; the material-change rule is per line
+(`runtime.material_fingerprints`: a discretionary change needs new evidence on its own line or
+market-wide, and session admission is not evidence); and the plan reads eligibility and rates only
+for the vehicles of the current lines and the instruments of held positions.
 """
 
 from __future__ import annotations
@@ -24,20 +48,28 @@ from typing import Any
 from council import clock
 from council.invariants import check_policy
 from council.models.cycle import CycleRecord, Debate
+from council.models.plan import Plan
 from council.models.risk import Band, RiskDecision, changed_lines
-from council.policy import LineSpec
+from council.policy import LineSpec, Universe
 from council.runtime import (
     CycleContext,
     LockBusy,
+    consume_fingerprints,
     cost_hints,
+    cycle_trade_economics,
     disk_ok,
     engine_quotes,
+    fingerprints_digest,
     first_cycle_of_utc_day,
     floor_cost_quotes,
     instance_lock,
+    material_changes,
     material_fingerprint,
+    material_fingerprints,
     window,
 )
+
+REAL_PEAK_KEY = "real_adjusted_peak"      # ledger runtime: lifetime peak of the real-adjusted equity (D19)
 
 
 @dataclass
@@ -92,6 +124,7 @@ def _bare_record(ctx: CycleContext, info: clock.SlotInfo, now: datetime, *, stat
 async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleOutcome:
     from council.deliberation.officers import event_cards, vol_cards
     from council.facts.features import market_states
+    from council.facts.market import history_sources
     from council.facts.pack import build_fact_pack
     from council.facts.returns import returns_matrix
     from council.reference.book import build_reference
@@ -113,13 +146,16 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     # ---- broker snapshot, NAV and kill switch (only once the Agent Portfolio is connected)
     snapshot, kill_state, nav = None, "NORMAL", None
     if ctx.sources.broker is not None:
+        _settle_held_orders(ctx, now)       # before the snapshot, so a filled hold is not counted twice
         snapshot, kill_state, nav = _snapshot_and_kill(ctx, now)
+    # PRIVATE: the fixed fee and the real trade floor as NAV shares (never published or prompted)
+    econ = cycle_trade_economics(policy, ctx.state_dir, snapshot.equity_usd if snapshot is not None else None)
 
     # ---- history → states → pack
     history, hist_flags = ctx.sources.history(slot)
     flags += hist_flags
-    raw_states = market_states(policy, history, now=slot)
-    returns = returns_matrix(history)
+    raw_states = market_states(policy, history, now=slot, sources=history_sources(policy) or None)
+    returns = returns_matrix(history, master=core_lines(policy))
     ev_start, ev_end = window(slot)
     events, ev_flags = ctx.sources.events(ev_start, ev_end)
     flags += ev_flags
@@ -129,11 +165,18 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     if ctx.sources.macro is not None:
         macro, m_flags = ctx.sources.macro(slot)
         flags += m_flags
-    quotes = floor_cost_quotes(policy, quoted_at=slot)
+    fundamentals: list[Any] = []
+    if ctx.sources.fundamentals is not None and policy.universe.stock_lines():
+        try:
+            fundamentals, f_flags = ctx.sources.fundamentals(slot)
+        except Exception as exc:  # stock-only evidence: its failure never stops the core's cycle
+            fundamentals, f_flags = [], [f"fundamentals_error:{type(exc).__name__}"]
+        flags += f_flags
+    quotes = floor_cost_quotes(policy, quoted_at=slot, fee_bps=econ.fee_nav_bps)
     cost_facts = _cost_facts(quotes, slot)
     pack = build_fact_pack(cycle_id=cycle_id, slot=slot, now=now, policy=policy, states=raw_states,
                            news=news, events=events, macro=macro, cost_facts=cost_facts,
-                           quality_flags=flags)
+                           quality_flags=flags, fundamental_facts=fundamentals)
     states = pack.states
 
     # ---- reference book
@@ -177,6 +220,8 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         kill_state=kill_state if kill_state in ("NORMAL", "WARN", "HALTED", "FLAT") else "NORMAL",
         reference=ref, bands=bands, cards=list(code_cards), flags=list(flags) + ref_flags,
     )
+    if snapshot is not None:            # connected: say when the fee uses an assumed mirror ratio
+        rec.flags += [f for f in econ.flags if f.startswith("mirror_ratio")]
     rec.model_digest = await _digest(ctx)
     basis, levels, raw = await _council(ctx, rec, pack=pack, ref=ref, bands=bands, bands_fn=bands_fn,
                                    code_cards=code_cards, current_levels=current_levels,
@@ -186,20 +231,22 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         ledger.set_runtime("last_macro_day", slot.date().isoformat())
 
     # ---- risk engine
-    fp = material_fingerprint(pack, rec.cards, kill_state)
-    rec.material_fingerprint = fp
-    material_changed = fp != ledger.get_runtime("last_material_fingerprint")
+    fps, material_changed = _material(ledger, pack, rec.cards, kill_state)
+    rec.material_fingerprint = fingerprints_digest(fps)
     decision = _evaluate(ctx, rec, levels=levels, ref_levels=ref_levels, bands=rec.bands or bands,
                          states=states, snapshot=snapshot, unit=unit, kill_state=kill_state,
                          quotes=quotes, pack=pack, material_changed=material_changed, basis=basis,
-                         slot=slot, returns=returns, nav=nav)
+                         slot=slot, returns=returns, nav=nav, econ=econ)
     rec.risk = decision
 
     # ---- plan (connected account only)
     plan = None
     if snapshot is not None and ctx.sources.broker is not None:
         try:
-            plan = _plan(ctx, decision, snapshot=snapshot, states=states, kill_state=kill_state)
+            plan = _plan(ctx, decision, snapshot=snapshot, states=states, kill_state=kill_state,
+                         ref_levels=ref_levels, unit=unit, econ=econ, history=history)
+            if plan is not None:
+                plan = stamp_sessions(plan, policy.universe, asof=slot)
         except Exception as exc:  # planning failure never trades; it is published as a flag
             import logging
 
@@ -210,15 +257,17 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     # ---- ledger + decision
     rec.finished_at = ctx.clock()
     decision_id = None
+    valid_until: datetime | None = None
     if plan is not None and plan.legs:
         kind = "flatten" if kill_state in ("HALTED", "FLAT") else ("compliance" if decision.compliance and not _discretionary(decision) else "rebalance")
         decision_id = f"{cycle_id}-{kind}-{uuid.uuid4().hex[:6]}"
+        valid_until = decision_valid_until(plan, kind, slot)
         ledger.create_decision(
-            decision_id=decision_id, kind=kind, valid_until=clock.proposal_valid_until(slot),
+            decision_id=decision_id, kind=kind, valid_until=valid_until,
             cycle_id=cycle_id,
             target={"final_w": decision.final_w, "base_w": decision.base_w,
                     "nav_usd": snapshot.equity_usd if snapshot else None},
-            plan=plan, state="awaiting_publication", now=now)
+            plan=plan, state="awaiting_publication", now=now, policy_sha=policy.sha256)
         ledger.insert_legs(decision_id, plan.legs)
         rec.decision_id, rec.decision_state = decision_id, "awaiting_publication"
     else:
@@ -239,15 +288,122 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
             state = "proposed"
             if sha:
                 ledger.set_published_commit(decision_id, sha)
-            if material_changed:
-                ledger.set_runtime("last_material_fingerprint", fp)
-            _notify_proposal(ctx, rec, plan, urgent=kill_state in ("HALTED", "FLAT"))
+            # evidence is consumed when a proposal issues, only by the lines that could act on it
+            ledger.set_material_fingerprints(consume_fingerprints(
+                fps, ledger.get_material_fingerprints(), evidence_lines(policy, pack, engine_blockers(ctx))))
+            _notify_proposal(ctx, rec, plan, urgent=kill_state in ("HALTED", "FLAT"),
+                             valid_until=valid_until)
         else:
             rec.flags.append("publish_failed_risk_increasing_held")
     ledger.set_runtime("last_cycle", {"cycle_id": cycle_id, "at": ctx.clock().isoformat()})
     return CycleOutcome(cycle_id=cycle_id, status=rec.status, basis=decision.basis, decision_id=decision_id,
                         decision_state=state, legs=len(plan.legs) if plan else 0, commit_sha=sha,
                         published=published, flags=rec.flags)
+
+
+def _settle_held_orders(ctx: CycleContext, now: datetime) -> None:
+    """Resolve orders the broker holds for a closed market (the watch's read-only lookups) BEFORE
+    the snapshot: a hold that filled since the last watch run would otherwise be counted twice, in
+    the snapshot and in ledger.pending_open_weights. A failure only leaves them waiting (the
+    engine then counts them as held, the conservative side)."""
+    from council import watch
+
+    try:
+        alerts = watch._resolve_waiting(ctx, now)
+    except Exception as exc:  # never stops the cycle
+        alerts = [f"waiting_check_error:{type(exc).__name__}"]
+    for alert in alerts:
+        watch._alert(ctx, alert)
+
+
+def core_lines(policy: Any) -> list[str]:
+    """The lines whose common dates form the returns calendar: every line outside the satellite."""
+    return [ln.symbol for ln in policy.universe.lines if ln.sleeve != "satellite"]
+
+
+def _material(ledger: Any, pack: Any, cards: list, kill_state: str) -> tuple[dict[str, str], dict[str, bool]]:
+    """(per-line fingerprints, {line: new material evidence since the last issued proposal}). A
+    ledger that stored only the legacy single fingerprint answers once through it."""
+    fps = material_fingerprints(pack, cards, kill_state)
+    stored = ledger.get_material_fingerprints()
+    legacy_equal = None
+    if stored is None:
+        legacy = ledger.get_runtime("last_material_fingerprint")
+        if legacy:
+            legacy_equal = material_fingerprint(pack, cards, kill_state) == legacy
+    return fps, material_changes(fps, stored, legacy_equal=legacy_equal)
+
+
+def evidence_lines(policy: Any, pack: Any, blockers: list[str]) -> list[str]:
+    """The lines that could act on their material evidence this cycle, so a proposal issued now
+    consumes it (`runtime.consume_fingerprints`): admitted by the pack (usable, fresh data and an
+    open session), minus every line under a whole-book blocker, minus the satellite under a
+    satellite-scoped one."""
+    from council.ledger.states import SATELLITE_BLOCKER_PREFIX
+
+    scoped = [str(b).startswith(SATELLITE_BLOCKER_PREFIX) for b in blockers]
+    if not all(scoped):
+        return []
+    satellite_held = any(scoped)
+    by_line = policy.universe.by_symbol()
+    return [s for s in pack.admitted
+            if not (satellite_held and s in by_line and by_line[s].sleeve == "satellite")]
+
+
+def plan_instrument_ids(policy: Any, imap: Any, snapshot: Any) -> list[int]:
+    """The instruments a plan reads eligibility and rates for (design §11.5): the vehicles of the
+    current lines that the instrument map resolves, plus the instruments of held positions (unmapped
+    and retired ones included, so a flatten can price them). Never the whole append-only map."""
+    ids: set[int] = set()
+    for line in policy.universe.lines:
+        for vehicle in (*line.vehicles.long, *line.vehicles.short):
+            iid = imap.get(vehicle.symbol)
+            if iid is not None:
+                ids.add(int(iid))
+    for position in getattr(snapshot, "positions", None) or ():
+        ids.add(int(position.instrument_id))
+    return sorted(ids)
+
+
+def without_held_closes(plan: Plan | None, ledger: Any) -> Plan | None:
+    """A flatten gets no second close for a position whose full close the broker already holds
+    for a closed market (waiting_for_market): the held close fills when the market opens."""
+    from council.ledger.states import WAITING_STATE
+
+    if plan is None:
+        return None
+    held = {r.position_id for r in ledger.legs_in_states([WAITING_STATE])
+            if r.kind == "close" and r.position_id is not None}
+    if not held:
+        return plan
+    legs = [leg for leg in plan.legs
+            if not (leg.kind in ("close", "partial_close") and leg.position_id in held)]
+    return plan.model_copy(update={"legs": legs})
+
+
+def stamp_sessions(plan: Plan, universe: Universe, *, asof: datetime) -> Plan:
+    """Each leg with its vehicle's trading session and its own deadline, min(next slot - 5 min,
+    session close - 10 min) from `asof` (the cycle's slot; the watch passes the time it makes a
+    standing flatten). A leg on a line the policy does not know (an unmapped position) gets no
+    session and the slot deadline: the broker decides, and status 11 is handled."""
+    by_line = universe.by_symbol()
+    legs = []
+    for leg in plan.legs:
+        spec = by_line.get(leg.line or "")
+        session = clock.vehicle_session(spec, leg.symbol) if spec is not None else None
+        legs.append(leg.model_copy(update={"session": session,
+                                           "valid_until": clock.leg_valid_until(session, asof)}))
+    return plan.model_copy(update={"legs": legs})
+
+
+def decision_valid_until(plan: Plan | None, kind: str, slot: datetime) -> datetime:
+    """A rebalance is approvable while any leg is (its latest leg deadline, never past the next
+    slot - 5 min); flatten and compliance are never clipped below the next slot - 5 min."""
+    limit = clock.proposal_valid_until(slot)
+    if kind != "rebalance" or plan is None:
+        return limit
+    latest = plan.latest_valid_until()
+    return limit if latest is None else min(limit, latest)
 
 
 def q_lev_class(line: LineSpec, quote: Any) -> str:
@@ -316,8 +472,13 @@ def _snapshot_and_kill(ctx: CycleContext, now: datetime) -> tuple[Any, str, Any]
     reads = [r for r in reads if now - r[0] <= timedelta(hours=6)][-20:] + [(now, snapshot.equity_usd)]
     ledger.set_runtime("equity_reads", [[t.isoformat(), e] for t, e in reads])
     prev = ledger.get_runtime("kill_state", "NORMAL")
+    real_peak = ledger.get_runtime(REAL_PEAK_KEY)
     kd = killswitch.evaluate(nav=nav, equity_reads=reads, prev_state=prev,
-                             has_positions=bool(snapshot.positions), policy=policy)
+                             has_positions=bool(snapshot.positions), policy=policy,
+                             real_drag=ledger.real_fee_drag(),       # D19: the real account's fee drag
+                             real_peak=float(real_peak) if isinstance(real_peak, int | float) else None)
+    if kd.real_peak is not None:        # PRIVATE: lifetime peak of the real-adjusted equity
+        ledger.set_runtime(REAL_PEAK_KEY, kd.real_peak)
     ledger.set_runtime("kill_state", kd.state)
     ledger.add_equity_mark(now, snapshot.equity_usd, credit_usd=snapshot.credit_usd, source="cycle")
     return snapshot, kd.state, nav
@@ -395,15 +556,24 @@ def _council_extras(code_cards, bands_fn, call_log: list | None = None) -> dict[
 
 # ------------------------------------------------------------------------------- risk
 def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands, states, snapshot, unit,
-              kill_state, quotes, pack, material_changed, basis, slot, returns, nav) -> RiskDecision:
+              kill_state, quotes, pack, material_changed, basis, slot, returns, nav,
+              econ=None) -> RiskDecision:
     from council.risk.engine import RiskEngine
+    from council.risk.held_levels import ledger_held_levels
 
     ledger, policy = ctx.ledger, ctx.policy
     last_change = ledger.last_changes()
-    turnover_7d = ledger.turnover_since(slot - timedelta(days=7), kinds=("rebalance",))
-    turnover_30d = ledger.turnover_since(slot - timedelta(days=30), kinds=("rebalance",))
-    cost_30d = ledger.cost_bps_since(slot - timedelta(days=30), kinds=("rebalance",))
+    # R13 turnover and the R14 30-day budget count discretionary legs only (legacy legs count)
+    disc = {"kinds": ("rebalance",), "origins": ("discretionary",)}
+    turnover_7d = ledger.turnover_since(slot - timedelta(days=7), **disc)
+    turnover_30d = ledger.turnover_since(slot - timedelta(days=30), **disc)
+    cost_30d = ledger.cost_bps_since(slot - timedelta(days=30), **disc)
+    fee_30d = ledger.fee_bps_since(slot - timedelta(days=30), **disc)
     stop_hits = ledger.stop_hits_since(slot - timedelta(days=14), universe=policy.universe)
+    pending = ledger.pending_open_weights()      # orders the broker holds until their market opens
+    held = ledger_held_levels(ledger, policy.universe.lines,
+                              current_w=snapshot.signed_w if snapshot is not None else None,
+                              units=unit, now=slot, persist=snapshot is not None)
     vol_fn = _vol_fn(policy, returns, states)
     return RiskEngine(policy).evaluate(
         levels=levels, ref=ref_levels, bands=bands, states=states, snapshot=snapshot,
@@ -411,9 +581,26 @@ def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands,
         last_change=last_change, turnover_7d=float(turnover_7d), material_changed=material_changed,
         basis=basis, now=slot, ex_ante_vol_fn=vol_fn,
         turnover_30d=float(turnover_30d), cost_30d_bps=float(cost_30d),
-        stop_hits=stop_hits, blockers=ledger.blockers(),
+        stop_hits=stop_hits, blockers=engine_blockers(ctx),
         nav_drawdown=nav.drawdown if nav is not None else None,
+        pending_w=pending, held_levels=held,
+        copy_min_share=econ.copy_floor_share if econ is not None else 0.0,
+        cost_30d_fee_bps=float(fee_30d),
     )
+
+
+def engine_blockers(ctx: CycleContext) -> list[str]:
+    """R20 inputs: the ledger's blockers plus those found while loading policy (e.g.
+    `sleeve_policy_untagged`). A satellite-scoped one is passed as "satellite:<code>" and holds only
+    the stock sleeve; anything else holds every line."""
+    from council.ledger.states import SATELLITE_BLOCKER_PREFIX
+
+    out = list(ctx.ledger.blockers())
+    for blocker in getattr(ctx, "policy_blockers", ()) or ():
+        code = str(getattr(blocker, "code", blocker))
+        satellite = getattr(blocker, "scope", "all") == "satellite"
+        out.append(f"{SATELLITE_BLOCKER_PREFIX}{code}" if satellite else code)
+    return out
 
 
 def _vol_fn(policy, returns, states):
@@ -426,29 +613,32 @@ def _vol_fn(policy, returns, states):
 
 
 # ------------------------------------------------------------------------------- plan
-def _plan(ctx: CycleContext, decision: RiskDecision, *, snapshot, states, kill_state):
+def _plan(ctx: CycleContext, decision: RiskDecision, *, snapshot, states, kill_state,
+          ref_levels=None, unit=None, econ=None, history=None):
     from council.broker.eligibility import resolve_vehicle
     from council.broker.instruments import InstrumentMap
     from council.broker.parsing import parse_rates
     from council.execution.planner import build_plan
-    from council.risk.costs import carry_bps_day, per_side_bps
+    from council.risk.costs import carry_bps_day, fee_applies, per_side_bps
+    from council.risk.engine import leg_origins
     from council.risk.stops import catastrophe_stop_distance
     from council.runtime import vehicle_asset_class
 
     policy, broker = ctx.policy, ctx.sources.broker
     by_line = policy.universe.by_symbol()
     imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
-    ids = imap.ids()
-    rows = broker.eligibility(instrument_ids=sorted(ids.values()))  # type: ignore[union-attr]
+    ids = plan_instrument_ids(policy, imap, snapshot)
+    rows = broker.eligibility(instrument_ids=ids)  # type: ignore[union-attr]
     rows_by_symbol = {r.symbol: r for r in rows}
-    quotes = parse_rates(broker.rates(sorted(ids.values())), imap.symbol_for)  # type: ignore[union-attr]
+    quotes = parse_rates(broker.rates(ids), imap.symbol_for)  # type: ignore[union-attr]
     nav_usd = snapshot.equity_usd
 
     if kill_state in ("HALTED", "FLAT"):
         from council.execution.planner import build_flatten_plan
 
-        return build_flatten_plan(snapshot=snapshot, quotes=quotes, eligibility=rows_by_symbol,
-                                  nav_usd=nav_usd, policy=policy, symbol_for=imap.symbol_for)
+        flatten = build_flatten_plan(snapshot=snapshot, quotes=quotes, eligibility=rows_by_symbol,
+                                     nav_usd=nav_usd, policy=policy, symbol_for=imap.symbol_for)
+        return without_held_closes(flatten, ctx.ledger)
 
     def expected_cost(vehicle, row, config):
         cls = vehicle_asset_class(by_line[_line_of(policy, vehicle.symbol)], vehicle.settlement)
@@ -462,21 +652,50 @@ def _plan(ctx: CycleContext, decision: RiskDecision, *, snapshot, states, kill_s
     settlement_of = {v.symbol: v.settlement for ln in by_line.values()
                      for v in (*ln.vehicles.long, *ln.vehicles.short)}
 
+    fee = econ.fee_nav_bps if econ is not None else 0.0
+
     def cost_bps(line: str, vehicle, direction: str, leverage: int):
         symbol = vehicle if isinstance(vehicle, str) else vehicle.symbol
         settlement = settlement_of.get(symbol, "cfd") if leverage == 1 and direction == "long" else "cfd"
         cls = vehicle_asset_class(by_line[line], settlement)
         return (per_side_bps(settlement, cls, None, None, policy),
-                carry_bps_day(direction, settlement, leverage, cls, None, policy))
+                carry_bps_day(direction, settlement, leverage, cls, None, policy),
+                fee if fee_applies(settlement, cls) else 0.0)     # PRIVATE fixed fee, bps of NAV
 
     changed = changed_lines(decision)
     target = {s: decision.final_w.get(s, 0.0) for s in changed}
     stop = {s: catastrophe_stop_distance(states[s], by_line[s], policy) for s in changed if s in states}
     # leverage 2 only for the leverage extension (|level| > 1, cost-gated in the bands)
     lev = {s: (2 if abs(decision.banded_levels.get(s, 0.0)) > 1.0 + 1e-9 else 1) for s in changed}
+    levels = dict(ref_levels or {})
+    ref_w = {s: float(levels.get(s, 0.0)) * float((unit or {}).get(s, 0.0)) for s in by_line}
+    origin = leg_origins(decision.base_w, decision.final_w, ref_w) if ref_levels is not None else None
     return build_plan(snapshot=snapshot, target_w=target, vehicle_for=vehicle_for, quotes=quotes,
                       stop_distance=stop, leverage_for=lev, eligibility=rows_by_symbol,
-                      cost_bps=cost_bps, nav_usd=nav_usd, policy=policy)
+                      cost_bps=cost_bps, nav_usd=nav_usd, policy=policy, origin=origin,
+                      ref_levels=levels or None, economics=econ,
+                      gap_ref=gap_references(policy, changed, states, history))
+
+
+def gap_references(policy, lines, states, history) -> dict[str, tuple[float, float] | None]:
+    """D20 inputs for the planner's gap guard: for each STOCK line among `lines`, the pack's last
+    completed close and its daily sigma; None when either is missing (the open is then skipped)."""
+    from council.risk.stops import sigma_daily_of
+
+    by_line = policy.universe.by_symbol()
+    out: dict[str, tuple[float, float] | None] = {}
+    for s in lines:
+        spec = by_line.get(s)
+        if spec is None or spec.asset_class != "stock":
+            continue
+        frame = (history or {}).get(s)
+        state = states.get(s)
+        last = None
+        if frame is not None and "close" in frame and not frame["close"].dropna().empty:
+            last = float(frame["close"].dropna().iloc[-1])
+        sigma = sigma_daily_of(state, spec.asset_class) if state is not None else None
+        out[s] = (last, float(sigma)) if last is not None and sigma is not None else None
+    return out
 
 
 def _line_of(policy, vehicle_symbol: str) -> str:
@@ -567,13 +786,15 @@ def _publish_ops_only(ctx: CycleContext, rec: CycleRecord) -> tuple[bool, str | 
     return bool(result.pushed or result.dry_run), result.commit_sha
 
 
-def _notify_proposal(ctx: CycleContext, rec: CycleRecord, plan, *, urgent: bool) -> None:
+def _notify_proposal(ctx: CycleContext, rec: CycleRecord, plan, *, urgent: bool,
+                     valid_until: datetime | None = None) -> None:
     if ctx.notifier is None or plan is None or rec.risk is None:
         return
     risk = rec.risk
+    deadline = valid_until or clock.proposal_valid_until(rec.slot)
     body = (f"{len(plan.legs)} legs, gross {plan.gross_before:.2f}x → {plan.gross_after:.2f}x, "
             f"cost {plan.cost_bps_nav:.1f} bp, valid until "
-            f"{clock.proposal_valid_until(rec.slot).strftime('%H:%MZ')} (basis {risk.basis})")
+            f"{deadline.strftime('%H:%MZ')} (basis {risk.basis})")
     try:
         ctx.notifier.send(f"council {rec.cycle_id}", body, priority="urgent" if urgent else "default")
     except Exception as exc:

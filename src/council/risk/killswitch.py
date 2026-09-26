@@ -8,10 +8,19 @@ Rules:
 - HALTED is latched: code proposes an urgent flatten (a human still approves it). HALTED with no
   positions is FLAT. Only `resume(prev, reason)` with a non-empty reason leaves HALTED/FLAT.
 - Resuming never resets the peak: the next evaluation measures from the same lifetime peak.
+- Real-adjusted (design D19): `real_drag` is the real account's cumulative extra fixed-fee drag
+  (`Ledger.real_fee_drag`, private). WARN and HALT use the worse of the virtual drawdown (from the
+  virtual lifetime peak) and the drawdown of the real-adjusted equity, virtual equity x
+  (1 - real_drag), from ITS OWN lifetime peak `real_peak` (stored by the caller; the virtual peak
+  when none is stored yet, which is exact while no drag has accrued). Measuring the adjusted
+  equity from the virtual peak instead would turn the cumulative drag into a permanent drawdown
+  that eventually trips WARN and HALT at an all-time high. The switch never trips later than the
+  virtual rule; it trips earlier when the real account's extra fees deepen a drawdown.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Literal
@@ -32,6 +41,7 @@ class KillDecision(Frozen):
     equity: float | None = None
     drawdown: float | None = None
     confirmed_reads: int = 0
+    real_peak: float | None = None      # PRIVATE: lifetime peak of the real-adjusted equity (store it)
 
 
 def allows_increase(state: str) -> bool:
@@ -63,34 +73,45 @@ def evaluate(
     prev_state: str,
     has_positions: bool,
     policy: Policy,
+    real_drag: float = 0.0,
+    real_peak: float | None = None,
 ) -> KillDecision:
-    """Kill state for this cycle (rules in the module docstring)."""
+    """Kill state for this cycle (rules in the module docstring). `real_peak` is the stored
+    lifetime peak of the real-adjusted equity (None: not stored yet); the decision's `real_peak`
+    is the updated value for the caller to store."""
     cfg = risk_limits(policy).killswitch
     for ts, _ in equity_reads:
         if ts.tzinfo is None:
             raise ValueError("naive datetime in equity reads")
-    reads = list(equity_reads) or [(nav.updated_at, nav.last)]
-    latest_ts, latest = max(reads, key=lambda r: r[0])
-    peak = max([nav.peak, *(eq for _, eq in reads)])
-    drawdown = max(0.0, 1.0 - latest / peak)
-    info = {"peak": peak, "equity": latest, "drawdown": drawdown}
+    raw = list(equity_reads) or [(nav.updated_at, nav.last)]
+    peak = max([nav.peak, *(eq for _, eq in raw)])
+    drag = float(real_drag) if math.isfinite(float(real_drag)) else 0.0
+    keep = 1.0 - min(max(drag, 0.0), 0.999999)
+    stored = float(real_peak) if real_peak is not None and math.isfinite(float(real_peak)) else 0.0
+    # the adjusted series never exceeds the virtual one, so its peak is at most the virtual peak
+    start = min(stored, peak) if stored > 0 else peak
+    r_peak = max([start, *(eq * keep for _, eq in raw)])
+    # per read, the worse of the two ratios to their own lifetime peaks
+    ratios = [(ts, min(eq / peak, eq * keep / r_peak)) for ts, eq in raw]
+    _, latest_eq = max(raw, key=lambda r: r[0])
+    ratio = min(latest_eq / peak, latest_eq * keep / r_peak)
+    adjusted = latest_eq * keep / r_peak < latest_eq / peak - 1e-12
+    info = {"peak": peak, "equity": latest_eq, "drawdown": max(0.0, 1.0 - ratio), "real_peak": r_peak}
+    label = "real-adjusted " if adjusted else ""
 
     if prev_state in LATCHED:
         state: KillState = "HALTED" if has_positions else "FLAT"
         return KillDecision(state=state, reason="latched until an operator resume", **info)
 
-    halt_line = cfg.halt_at * peak
-    confirmed = confirmed_breach_reads(reads, halt_line, cfg.confirm_gap_s)
+    confirmed = confirmed_breach_reads(ratios, cfg.halt_at, cfg.confirm_gap_s)
     if confirmed >= cfg.confirm_reads:
         state = "HALTED" if has_positions else "FLAT"
-        reason = (
-            f"equity {latest / peak:.1%} of lifetime peak <= halt {cfg.halt_at:.0%} "
-            f"on {confirmed} reads"
-        )
+        reason = (f"{label}equity {ratio:.1%} of lifetime peak <= halt {cfg.halt_at:.0%} "
+                  f"on {confirmed} reads")
         return KillDecision(state=state, reason=reason, confirmed_reads=confirmed, **info)
-    if latest <= cfg.warn_at * peak:
-        pending = " (halt breach awaiting confirmation)" if latest <= halt_line else ""
-        reason = f"equity {latest / peak:.1%} of lifetime peak <= warn {cfg.warn_at:.0%}{pending}"
+    if ratio <= cfg.warn_at:
+        pending = " (halt breach awaiting confirmation)" if ratio <= cfg.halt_at else ""
+        reason = f"{label}equity {ratio:.1%} of lifetime peak <= warn {cfg.warn_at:.0%}{pending}"
         return KillDecision(state="WARN", reason=reason, confirmed_reads=confirmed, **info)
     return KillDecision(state="NORMAL", reason="within limits", **info)
 
