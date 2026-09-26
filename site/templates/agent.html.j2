@@ -4,13 +4,14 @@
 {% block toc %}
 {{ m.toc_item("what", "What it does", agent.accent) }}
 {{ m.toc_item("numbers", "Its numbers", "neutral") }}
+{{ m.toc_item("overview", "Run by run", "neutral") }}
 {{ m.toc_item("history", "History (" ~ (agent.entries | length) ~ ")", agent.accent) }}
 {% if agent.older %}{{ m.toc_item("older", "Older runs", "neutral") }}{% endif %}
-{{ m.toc_group("Other agents") }}
-{% for a in agents if a.slug != agent.slug %}<li><a href="{{ a.slug }}.html"><span class="dot accent-{{ a.accent }}" aria-hidden="true"></span><span class="toc-label">{{ a.name }}</span></a></li>{% endfor %}
+{{ m.toc_group("Other agents", "toc-desk") }}
+{% for a in agents if a.slug != agent.slug %}<li class="toc-desk"><a href="{{ a.slug }}.html"><span class="dot accent-{{ a.accent }}" aria-hidden="true"></span><span class="toc-label">{{ a.name }}</span></a></li>{% endfor %}
+<li class="toc-phone"><details class="toc-more"><summary>Other agents ({{ agents | length - 1 }})</summary><ol>{% for a in agents if a.slug != agent.slug %}<li><a href="{{ a.slug }}.html"><span class="dot accent-{{ a.accent }}" aria-hidden="true"></span><span class="toc-label">{{ a.name }}</span></a></li>{% endfor %}</ol></details></li>
 {% endblock %}
-{% block main %}
-{% set s = agent.stats %}
+{% block hero %}
 <header class="hero hero-agent">
   <p class="eyebrow"><a href="index.html">Agents</a> / {{ agent.spec.group }}</p>
   <div class="ahead ahead-hero">
@@ -21,13 +22,16 @@
     </div>
   </div>
 </header>
+{% endblock %}
+{% block main %}
+{% set s = agent.stats %}
 
 {% macro turn_block(a, href) %}
 {% set b = a.body %}
-{% if a.calls or a.failure %}{{ m.terminal(a.calls, a.name ~ " — " ~ plural(a.calls | length, "call"), a.meta, a.failure, "Model calls of " ~ a.name) }}{% endif %}
+{% if a.calls or a.failure %}{{ m.terminal(a.calls, a.name, a.meta, a.failure, "Model calls of " ~ a.name, plural(a.calls | length, "call")) }}{% endif %}
 {{ m.failure(a.failure) }}
 {% if b %}
-<p class="stance">{{ "Wants to" if b.changes else "Stance:" }} <strong>{{ b.stance if not b.changes else b.stance[:1] | lower ~ b.stance[1:] }}</strong></p>
+<p class="stance">{% if b.changes %}Wants to <strong>{{ m.changes_stance(b.stance_parts, "../") }}</strong>{% else %}Stance: <strong>{{ b.stance }}</strong>{% endif %}</p>
 <blockquote class="argument"><p>{{ b.argument }}</p></blockquote>
 {% if b.legacy_cut %}<p class="small muted legacy">Shortened when published: early runs kept only the first 600 characters of each argument; later runs publish it whole.</p>{% endif %}
 {% if b.claims %}
@@ -53,12 +57,11 @@
 {% endmacro %}
 
 {% call m.section("what", 1, "What it does", agent.accent) %}
-<p class="big">{{ agent.job }}</p>
 {% if agent.more %}<p>{{ agent.more }}</p>{% endif %}
 <dl class="facts facts-plain">
-  <div><dt>Kind</dt><dd>{{ "a language model" if agent.kind == "LLM" else "code" }}</dd></div>
+  <div><dt>Kind</dt><dd>{{ "a language model" if agent.kind == "LLM" else "a person" if agent.kind == "HUMAN" else "code" }}</dd></div>
   {% if agent.kind == "LLM" %}<div><dt>Model</dt><dd><code>{{ agent.model }}</code></dd></div>{% endif %}
-  {% if agent.source %}<div><dt>{{ "Prompt" if agent.kind == "LLM" else "Source" }}</dt><dd><a href="{{ agent.source }}">{{ agent.source_path }}</a></dd></div>{% endif %}
+  {% if agent.source %}<div><dt>{{ "Prompt" if agent.kind == "LLM" else "Source" }}</dt><dd class="prompt"><a href="{{ agent.source }}">{{ agent.source_dir }}<wbr>{{ agent.source_file }}</a></dd></div>{% endif %}
 </dl>
 {% if agent.prompts %}
 <p class="small">Prompts in force: {% for p in agent.prompts %}<a href="{{ p.href }}">{{ p.id }}</a> <span class="n muted">{{ p.sha }}</span>{% if not loop.last %} · {% endif %}{% endfor %}. Each run records the hash of the prompts it used; a prompt change is a versioned policy change.</p>
@@ -66,7 +69,8 @@
 {% endcall %}
 
 {% call m.section("numbers", 2, "Its numbers", "neutral") %}
-<dl class="strip strip-agent">
+{% set n_tiles = (3 if agent.kind == "LLM" else 0) + 1 + (2 if s.got is defined else 0) + (2 if s.valid is defined else 0) + (2 if s.asked is defined else 0) + (1 if s.differs is defined else 0) %}
+<dl class="strip strip-agent strip-n{{ n_tiles }}">
   {% if agent.kind == "LLM" %}
   <div class="st st-ring"><dt>{{ icon("circle-check") }}Usable replies</dt><dd>{{ m.pring(s.ok_num, s.ok_css, (s.ok_pct ~ " of calls usable") if s.calls else "no calls yet") }}</dd><dd class="st-v st-v-sm">{{ s.ok }} <span class="st-of">of {{ s.calls }} calls</span></dd></div>
   <div class="st"><dt>{{ icon("circle-x") }}Failed calls</dt><dd class="st-v">{{ s.failed | length }}</dd><dd class="st-sub">{% if s.failed %}{{ s.fail_words | join(", ") }}{% else %}none{% endif %}{% if s.corrected %} · {{ s.corrected }} fixed by a correction{% endif %}</dd></div>
@@ -81,6 +85,10 @@
   <div class="st"><dt>{{ icon("file-check") }}Valid attempts</dt><dd class="st-v">{{ s.valid }}</dd><dd class="st-sub">after the auditor</dd></div>
   <div class="st"><dt>{{ icon("git-compare-arrows") }}Runs with a change</dt><dd class="st-v">{{ s.changed }}</dd><dd class="st-sub">away from the reference</dd></div>
   {% endif %}
+  {% if s.asked is defined %}
+  <div class="st"><dt>{{ icon("user") }}Proposals to decide</dt><dd class="st-v">{{ s.asked }}</dd><dd class="st-sub">live runs with orders</dd></div>
+  <div class="st"><dt>{{ icon("circle-check") }}Approved</dt><dd class="st-v">{{ s.approved }}</dd><dd class="st-sub">rejected {{ s.rejected }} · expired {{ s.expired }}</dd></div>
+  {% endif %}
   {% if s.differs is defined %}
   <div class="st"><dt>{{ icon("git-compare-arrows") }}Differs from the council</dt><dd class="st-v">{{ s.differs }}</dd><dd class="st-sub">runs</dd></div>
   {% endif %}
@@ -93,24 +101,40 @@
 {% endif %}
 {% endcall %}
 
-{% call m.section("history", 3, "History", agent.accent) %}
+{% call m.section("overview", 3, "Run by run", "neutral") %}
+{% if agent.overview %}
+{{ m.wrap_open("Run by run (scrolls sideways)") }}
+<table class="wide stack runs overview">
+  <caption class="small muted">Newest run first; each row opens the agent's part of the run.</caption>
+  <thead><tr><th>Run</th><th>Status</th><th>{{ "Asked" if agent.slug in ("bull", "bear") else "Decided" if agent.slug == "pm" else "Said or did" }}</th>{% if agent.debate %}<th>Manager sided with</th><th class="n">{{ "Set aside" if agent.slug == "pm" else "Claims set aside" }}</th>{% endif %}<th>Outcome</th></tr></thead>
+  <tbody>
+  {% for o in agent.overview %}
+  <tr><td class="when"><a href="{{ o.href }}#{{ o.anchor }}">{{ o.cv.doc.slot | short_when }}</a></td><td data-label="Status">{{ m.mark(o.status) }}</td><td class="text" data-label="{{ 'Asked' if agent.slug in ('bull', 'bear') else 'Decided' if agent.slug == 'pm' else 'Said or did' }}">{{ o.said or "—" }}</td>{% if agent.debate %}<td data-label="Manager sided with">{{ o.sided }}</td><td class="n" data-label="Set aside">{{ o.set_aside if o.set_aside is not none else "—" }}</td>{% endif %}<td data-label="Outcome">{{ m.chip(o.chip) }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+{{ m.empty("No runs yet", "This agent has not appeared in a published run.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("history", 4, "History", agent.accent) %}
 {% if agent.entries %}
-<p class="small muted">Newest first{% if agent.older %}; the latest {{ agent.entries | length }} runs{% endif %}. Each entry opens its place in the run.</p>
+<p class="small muted">Newest first{% if agent.older %}; the latest {{ agent.entries | length }} runs{% endif %}. The latest run is open; each other run opens on a click, and each entry links to its place in the run.</p>
 {% for e in agent.entries %}
 {% set cv = e.cv %}
-<article class="entry" id="run-{{ cv.doc.cycle_id }}">
-  <header class="entry-head">
-    <a class="entry-when" href="{{ e.href }}#{{ e.sections[0].id }}">{{ cv.doc.slot | when }} <span class="entry-open">Open in run →</span></a>
-    {{ m.chip(cv.mode_chip) }} {{ m.mark(e.status) }}
-  </header>
-  {% if e.chain %}{{ m.chain(e.chain, e.href) }}{% endif %}
+<details class="entry" id="run-{{ cv.doc.cycle_id }}"{% if loop.first %} open{% endif %}>
+  <summary class="entry-head">{{ icon("chevron-right", "chev") }}<span class="entry-when">{{ cv.doc.slot | when }}</span> {{ m.chip(cv.mode_chip) }} {{ m.mark(e.status) }}{% set ov = agent.overview[loop.index0] if loop.index0 < agent.overview | length else none %}{% if ov and ov.said %} <span class="entry-sum">{{ ov.said }}</span>{% endif %}</summary>
+  <p class="entry-open small"><a href="{{ e.href }}#{{ e.anchor }}">Open in the run →</a></p>
+  {% if e.chain %}{{ m.chain(e.chain, e.href, "../") }}{% endif %}
   {% for a in e.sections %}
   {% set b = a.body %}
   {% if agent.slug == "bull" %}<h4 class="entry-turn"><a href="{{ e.href }}#{{ a.id }}">{{ a.name }}</a> {{ m.mark(a.status) }}</h4>{% endif %}
   {% if agent.slug in ("bull", "bear") %}
   {{ turn_block(a, e.href) }}
   {% elif agent.slug in ("news", "macro") %}
-  {{ m.terminal(a.calls, a.name ~ " — " ~ plural(a.calls | length, "call"), a.meta, a.failure, "Model calls of " ~ a.name) }}
+  {{ m.terminal(a.calls, a.name, a.meta, a.failure, "Model calls of " ~ a.name, plural(a.calls | length, "call")) }}
   {{ m.failure(a.failure) }}
   {% if agent.slug == "macro" %}
     {% if b.note %}<p class="small muted">{{ b.note }}</p>{% endif %}
@@ -119,10 +143,10 @@
   {% for k in b.cards %}{{ m.kcard(k) }}{% endfor %}
   {% if agent.slug == "news" and not b.cards and not a.failure %}<p class="muted small">No cards.</p>{% endif %}
   {% elif agent.slug in ("pm", "control") %}
-  {{ m.terminal(a.calls, a.name ~ " — " ~ plural(a.calls | length, "call"), a.meta, a.failure, "Model calls of " ~ a.name) }}
+  {{ m.terminal(a.calls, a.name, a.meta, a.failure, "Model calls of " ~ a.name, plural(a.calls | length, "call")) }}
   {{ m.failure(a.failure) }}
   {% if agent.slug == "control" and b.control %}{{ m.control_strip(b.control) }}{% endif %}
-  {% if agent.slug == "pm" %}<p>{% if b.decision %}Decision: <strong>{{ b.decision }}</strong>.{% elif b.reps %}Decision: <strong>hold the reference</strong>.{% else %}No decision: the reference applied.{% endif %} Valid attempts: {{ b.valid }} of {{ b.total }}.</p>{% endif %}
+  {% if agent.slug == "pm" %}<p>{% if b.decision %}Decision: <strong>{{ m.changes_phrase(b.decision_parts, "../") }}</strong>.{% elif b.reps %}Decision: <strong>hold the reference</strong>.{% else %}No decision: the reference applied.{% endif %} Valid attempts: {{ b.valid }} of {{ b.total }}.</p>{% endif %}
   {{ m.reps(b.reps) }}
   {% elif agent.slug == "data" %}
   <p>{{ plural(b.n_lines, "line") }} read{% if b.trends %} · trend {{ b.trends }}{% endif %}{% if b.n_facts %} · {{ plural(b.n_facts, "fact") }}{% endif %}.{% if b.stale %} <span class="warn-text">Too old: {{ b.stale | join(", ") }}.</span>{% endif %}{% if b.calendar %} <span class="warn-text">{{ b.calendar | capitalize }}.</span>{% endif %}</p>
@@ -135,12 +159,16 @@
   {% if b.notes %}<ul class="ticks">{% for x in b.notes %}<li>Attempt {{ x.n }} {{ x.kind }}: <span title="{{ x.raw }}">{{ x.text }}</span></li>{% endfor %}</ul>{% else %}<p class="small">Nothing reverted.</p>{% endif %}
   {% if b.clipped %}<p class="small">Clipped: {% for x in b.clipped %}{{ x.name }} {{ x.asked }} → {{ x.got }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>{% endif %}
   {% elif agent.slug == "risk" %}
-  <p>{{ a.status.word | cap }}.{% if b.held %} Held back: {% for r in b.held %}{{ r.name }} ({{ r.held | join("; ") }}){% if not loop.last %}, {% endif %}{% endfor %}.{% endif %}</p>
+  <p>{{ a.status.word | cap }}.{% if b.held %} Held back: {% for r in b.held %}{{ m.ln(r.line, "../") }} ({{ r.held | join("; ") }}){% if not loop.last %}, {% endif %}{% endfor %}.{% endif %}</p>
   {% elif agent.slug == "costs" %}
-  <p>{% if b.legs %}{{ plural(b.legs | length, "order") }}, cost {{ cv.doc.plan.cost_bp_total | bp }} of the portfolio: {% for x in b.legs %}{{ x.leg.line | line_name }} ({{ x.why | lower }}){% if not loop.last %}; {% endif %}{% endfor %}.{% else %}No orders.{% endif %}{% if cv.rehearsal %} Rehearsal: nothing was sent.{% endif %}</p>
+  <p>{% if b.legs %}{{ plural(b.legs | length, "order") }}, cost {{ cv.doc.plan.cost_bp_total | bp }} of the portfolio: {% for x in b.legs %}{{ m.ln(x.leg.line, "../") }} ({{ x.why | lower }}){% if not loop.last %}; {% endif %}{% endfor %}.{% else %}No orders.{% endif %}{% if cv.rehearsal %} Rehearsal: nothing was sent.{% endif %}</p>
   {% endif %}
   {% endfor %}
-</article>
+  {% if e.decision is defined %}
+  {% set d = e.decision %}
+  <p>{{ m.chip(d.chip) }} {% if cv.rehearsal %}Rehearsal: no order existed, so no one had to approve anything.{% elif d.legs %}A proposal with {{ plural(d.legs, "order") }}.{% else %}Nothing to approve: no order was needed.{% endif %}{% if d.reason %} Reason given: {{ d.reason }}{% endif %}{% if d.approved %} <span class="small muted">Approved during the slot starting {{ d.approved }}.</span>{% endif %}</p>
+  {% endif %}
+</details>
 {% endfor %}
 {% else %}
 {{ m.empty("No history yet", "This agent has not appeared in a published run.") }}
@@ -148,8 +176,8 @@
 {% endcall %}
 
 {% if agent.older %}
-{% call m.section("older", 4, "Older runs", "neutral") %}
-<ul class="older">{% for e in agent.older %}<li><a href="{{ e.href }}#{{ e.sections[0].id }}">{{ e.cv.doc.slot | when }}</a> {{ m.mark(e.status) }}</li>{% endfor %}</ul>
+{% call m.section("older", 5, "Older runs", "neutral") %}
+<ul class="older">{% for e in agent.older %}<li><a href="{{ e.href }}#{{ e.anchor }}">{{ e.cv.doc.slot | when }}</a> {{ m.mark(e.status) }}</li>{% endfor %}</ul>
 {% endcall %}
 {% endif %}
 {% endblock %}

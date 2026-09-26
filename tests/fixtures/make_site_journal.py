@@ -120,14 +120,14 @@ MARKET: dict[str, tuple[str, float, float, float, float, float, float, float, fl
 }
 UNIT = {"NDX": 0.35, "SEMIS": 0.134, "SPX": 0.15, "GOLD": 0.12, "BTC": 0.113, "ETH": 0.05, "OIL": 0.10,
         "EURUSD": 0.25, "GBPUSD": 0.25}
-LEVEL_BY_TREND = {"up": 1.0, "mixed": 0.5, "down": 0.25}
+LEVEL_BY_TREND = {"up": 1.0, "mixed": 0.75, "down": 0.25}   # as policy/reference.yaml
 TICKERS = {"NDX": "QQQ", "SEMIS": "SOXX", "SPX": "SPY", "GOLD": "GLD", "OIL": "USO", "EURUSD": "FXE",
            "GBPUSD": "FXB", "BTC": "BTCUSDT", "ETH": "ETHUSDT", "BRK_B": "BRK-B"}
 
 # The book before and after the executed proposal (signed weight, x NAV). Crude oil and the euro
 # are flat; sterling is the short CFD at leverage 2.
-BOOK_BEFORE = {"NDX": 0.35, "SEMIS": 0.134, "SPX": 0.15, "GOLD": 0.06, "BTC": 0.113, "ETH": 0.025,
-               "AVGO": 0.02, "MSFT": 0.02, "META": 0.01, "AMD": 0.02, "ANET": 0.02, "VRT": 0.02, "PLTR": 0.01,
+BOOK_BEFORE = {"NDX": 0.35, "SEMIS": 0.134, "SPX": 0.15, "GOLD": 0.09, "BTC": 0.113, "ETH": 0.0375,
+               "AVGO": 0.02, "MSFT": 0.02, "META": 0.015, "AMD": 0.02, "ANET": 0.02, "VRT": 0.02, "PLTR": 0.015,
                "BRK_B": 0.02, "SMCI": 0.005}
 BOOK_AFTER = {**BOOK_BEFORE, "SEMIS": 0.067, "GBPUSD": -0.0625, "NVDA": 0.02}
 # vehicle, open rate, current rate, leverage, settlement, is_buy: PRIVATE (the P/L % is published)
@@ -220,7 +220,7 @@ BULL = {
         "Nothing material has changed since the last run, and the reference is the right book. Trends are intact on "
         "every line the reference holds at full size: the Nasdaq-100 is {ndx_d200}% above its 200-day average, the "
         "S&P 500 {spx_d200}% and bitcoin {btc_d200}%, each with volatility at or below its one-year norm. Gold is "
-        "mixed, which the reference already reflects by holding half a unit. The single stocks split the same way: "
+        "mixed, which the reference already reflects by holding three quarters of a unit. The single stocks split the same way: "
         "NVIDIA, Broadcom, Vertiv and AMD are in clean uptrends with three-month gains above 14%, while Palantir and "
         "Super Micro are the weak names and are already held at reduced levels by the trend rule. The macro backdrop "
         "is supportive rather than threatening: the 10-year yield is lower over twenty observations and the dollar "
@@ -269,7 +269,7 @@ REBUTTAL = {
     "calm": (
         "c1: concentration is real, and I accept that the equity lines move together; the reference caps each line "
         "and the risk engine caps the equity cluster, so it is already priced in. c2: Super Micro and Palantir are "
-        "weak, but the trend rule has already cut them to a quarter and a half of their unit weight; cutting further "
+        "weak, but the trend rule has already cut them to a quarter and three quarters of their unit weight; cutting further "
         "would put a second rule on top of the first with no new evidence. Ether's drawdown is the same story. The "
         "one-day moves in the pack are ordinary: none is beyond two of its own daily standard deviations, and the "
         "largest, Super Micro at {smci_r1}%, is on a line the book barely holds. The bear asks for a prepared "

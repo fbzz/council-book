@@ -1,5 +1,5 @@
-"""Site v3, built from the ~20-line fixture journal (tests/fixtures/site_journal): the broker-style
-holdings list, the per-agent run transcript, the agents pages, the dark OpenSourceUI-derived look,
+"""Site v3/v4, built from the ~20-line fixture journal (tests/fixtures/site_journal): the broker-style
+holdings list, the per-agent run transcript, the agents pages, the dark look (v4: "council chamber"),
 and the rules every page keeps (no script, no inline style, percent only, relative links)."""
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ def test_every_relative_link_and_fragment_resolves(built):
 def test_every_geometry_class_is_defined(built):
     out, pages = built
     css = (out / "static" / "geometry.css").read_text()
-    used = {c for html in pages.values() for c in re.findall(r"\bg[wlrp]-\d+\b", html)}
+    used = {c for html in pages.values() for c in re.findall(r"\bg[wlrpth]-\d+\b", html)}
     assert any(c.startswith("gp-") for c in used)                            # progress rings are used
     for cls in used:
         assert f".{cls} " in css, cls
@@ -147,28 +147,46 @@ def _contrast(a: str, b: str) -> float:
     return (la + 0.05) / (lb + 0.05)
 
 
-def test_dark_is_the_default_theme():
+def test_dark_is_the_only_theme():
+    """v4 is dark only: the ink-navy chamber. No light token set remains."""
     css = (REPO_ROOT / "site" / "static" / "style.css").read_text()
     dark = _tokens(css, ':root,\n:root[data-theme="dark"]')
-    assert dark["--bg"] == "#0a0a0a" and dark["--card"] == "#141414"
+    assert dark["--bg"] == "#0e1320" and dark["--card"] == "#151b2b" and dark["--line"] == "#243049"
+    assert dark["--ink"] == "#e6e8ef" and dark["--muted"] == "#8b93a7"
     assert '@media (prefers-color-scheme: dark) {\n  :root:not([data-theme="light"])' in css
-    light = _tokens(css, ':root[data-theme="light"]')
-    assert light["--bg"] == "#fafafa"
+    assert ':root[data-theme="light"] {' not in css
+    assert re.search(r"\nbody \{[^}]*background: var\(--bg\)", css)          # the body has its own background
     base = (REPO_ROOT / "site" / "templates" / "base.html.j2").read_text()
     assert '<meta name="color-scheme" content="dark">' in base and "data-theme" not in base
 
 
 def test_text_colours_meet_wcag_aa_on_every_surface():
+    """Text tokens meet 4.5:1 on every surface and every map tile; seat colours are marks (dots,
+    rules, strokes, never text) and meet 3:1 on every surface."""
     css = (REPO_ROOT / "site" / "static" / "style.css").read_text()
-    for selector, surfaces in ((':root,\n:root[data-theme="dark"]', ("--bg", "--card", "--raised", "--inset")),
-                               (':root[data-theme="light"]', ("--card", "--raised", "--inset"))):
-        t = _tokens(css, selector)
-        texts = ["--ink", "--ink-strong", "--muted", "--link", "--up", "--down", "--warn", "--halted",
-                 "--executed", "--proposed", "--code", "--analyst", "--bull", "--bear", "--pm", "--risk", "--human"]
-        for fg in texts:
-            for bg in surfaces:
-                assert _contrast(t[fg], t[bg]) >= 4.5, (selector, fg, bg, round(_contrast(t[fg], t[bg]), 2))
-    term = _tokens(css, ':root,\n:root[data-theme="dark"]')
+    t = _tokens(css, ':root,\n:root[data-theme="dark"]')
+    surfaces = ("--bg", "--card", "--raised", "--inset", "--hover")
+    texts = ["--ink", "--ink-strong", "--muted", "--link", "--up", "--down", "--warn", "--halted",
+             "--executed", "--proposed", "--rehearsal"]
+    for fg in texts:
+        for bg in surfaces:
+            assert _contrast(t[fg], t[bg]) >= 4.5, (fg, bg, round(_contrast(t[fg], t[bg]), 2))
+    # the map's tiles: one neutral fill (--raised); hover is a ring, never a lighter fill; a short's
+    # "short" word is a solid pill and its hatch is a band along the coral edge, never under the text
+    for fg in ("--ink-strong", "--tile-ink2", "--up", "--down", "--short"):
+        assert _contrast(t[fg], t["--raised"]) >= 4.5, (fg, round(_contrast(t[fg], t["--raised"]), 2))
+    assert _contrast(t["--on-accent"], t["--short"]) >= 4.5
+    assert "a.tm-in:hover { box-shadow: inset 0 0 0 2px var(--ink-strong); }" in css
+    assert "background: var(--short); color: var(--on-accent);" in css[css.index(".tm-s {"):]
+    short_rule = css[css.index(".tm.short .tm-in {"):css.index("}", css.index(".tm.short .tm-in {"))]
+    assert "background-size: 12px 100%" in short_rule and "no-repeat" in short_rule and "padding-left: 20px" in short_rule
+    assert not re.search(r"--tile-(fund|stock|crypto|commodity|fx|other):", css)       # no asset-class hues
+    seats = [k for k in t if k.startswith("--seat-") and k != "--seat-none"]
+    assert len(seats) == 14
+    for fg in seats:
+        for bg in surfaces:
+            assert _contrast(t[fg], t[bg]) >= 3.0, (fg, bg, round(_contrast(t[fg], t[bg]), 2))
+    term = t
     for fg in ("--term-ink", "--term-muted", "--term-cmd", "--term-ok", "--term-err", "--term-fb", "--term-link"):
         assert _contrast(term[fg], term["--term-bg"]) >= 4.5, fg
 
@@ -257,9 +275,9 @@ def test_arguments_are_published_whole_and_evidence_resolves_to_facts(built):
         text = adv.argument.replace("&", "&amp;").replace("'", "&#39;").replace('"', "&#34;")
         assert text in run                                                     # the FULL argument
     anchors = set(re.findall(r'\sid="([^"]+)"', run))
-    chips = re.findall(r'<a class="ev ev-[a-z]+" href="#(f-[^"]+)"', run)
+    chips = re.findall(r'<a class="(?:ev ev-[a-z]+|ev-what)" href="#(f-[^"]+)"', run)
     assert chips and all(c in anchors for c in chips)
-    assert re.search(r'<a class="ev ev-[a-z]+" href="#f-[^"]+" title="[^"]+">[^<]+: <strong class="ev-val">', run)
+    assert re.search(r'<a class="ev-what" href="#f-[^"]+">[^<]+: <strong class="ev-val">', run)
     assert "Facts the council saw" in run and "licensed series: cited by name, value not republished" in run
 
 
@@ -314,12 +332,12 @@ def test_run_header_has_stat_tiles_and_a_progress_ring(built):
 def test_agents_index_is_a_team_table_with_records(site, built):
     _, pages = built
     idx = pages["agents/index.html"]
-    assert idx.count('<table class="team stack">') == 5                     # one per group
+    assert idx.count('<table class="team stack">') == 6                     # one per group, the person included
     news_calls = sum(1 for p in (FIXTURE / "cycles").rglob("*.json") if not p.name.endswith(".reveal.json")
                      for c in json.loads(p.read_bytes())["calls"] if c["role"] == "news")
     news = idx[idx.index('id="ag-news"'):idx.index('id="ag-macro"')]
     assert f'data-label="Calls">{news_calls}</td>' in news
-    assert 'class="avatar accent-analyst"' in news and "deepseek" not in news   # the model is said once, above
+    assert 'class="avatar accent-news"' in news and "deepseek" not in news      # the model is said once, above
     assert "deepseek" in idx[:idx.index('id="ag-data"')]
     bull = idx[idx.index('id="ag-bull"'):idx.index('id="ag-bear"')]
     assert "The manager did what it asked in 3 of 5 runs" in bull and "claims set aside by the used attempt" in bull
@@ -328,7 +346,7 @@ def test_agents_index_is_a_team_table_with_records(site, built):
 def test_agent_pages_show_history_newest_first(site, built):
     _, pages = built
     bull = pages["agents/bull.html"]
-    whens = re.findall(r'<article class="entry" id="run-([^"]+)">', bull)
+    whens = re.findall(r'<details class="entry" id="run-([^"]+)"', bull)
     assert len(whens) == 5 and whens == sorted(whens, reverse=True)
     assert len(whens) <= site.HISTORY_CAP
     assert "Bull · opening" in bull and "Bull · rebuttal" in bull and '<figure class="term"' in bull
@@ -480,8 +498,9 @@ def test_every_order_says_why(built):
     assert "Reference: not yet held, bought up to its reference weight (2%)" in execution
     changed = run[run.index('id="changed"'):run.index('id="officers"')]
     assert "Also traded to reach the reference: <strong>NVIDIA 0% → 2%</strong>" in changed
-    steady = re.search(r"stayed at the reference: ([^<]+)\.</p>", changed).group(1)
-    assert "NVIDIA" not in steady
+    steady = re.sub(r"<[^>]+>", "", re.search(r"stayed at the reference: (.+?)\.</p>", changed).group(1))
+    assert "NVIDIA" not in steady and "Nasdaq-100" in steady
+    assert '<a class="ln" href="../assets/SEMIS.html">Semiconductors</a>' in changed      # lines open their page
 
 
 def test_what_happened_to_an_advocate_goes_by_outcome(built):
@@ -502,12 +521,13 @@ def test_agent_pages_end_with_the_outcome(built):
     bear = pages["agents/bear.html"]
     assert bear.count('<ol class="chain"') == 5
     chain = bear[bear.index('<ol class="chain"'):bear.index("</ol>", bear.index('<ol class="chain"'))]
-    for step in ("Bull asked", "Bear asked", "Manager", "Risk engine", "Human"):
+    for step in ("Bull</a>", "Bear</a> <span class=\"chain-t\">asked to", "Manager", "Risk engine", "Human"):
         assert step in chain, step
     assert "approved · executed" in chain                                   # the newest run was executed
+    assert '<a class="ln" href="../assets/SEMIS.html">Semiconductors</a>' in chain  # lines link to their pages
     assert '<q class="muted">' in bear                                     # the bull's claim a rebuttal answers
     assert '<p class="list-label">Concedes</p>' in bear and ".; " not in bear
-    assert "Open in run →" in bear
+    assert "Open in the run →" in bear
     pm = pages["agents/pm.html"]
     assert "Failed calls" in pm and 'href="../cycles/2026-09-24T1040Z.html#a-pm-3"' in pm
     idx = pages["agents/index.html"]

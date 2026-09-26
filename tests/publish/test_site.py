@@ -27,11 +27,12 @@ SITE_BUILD = REPO_ROOT / "site" / "build.py"
 NOW = SLOT + timedelta(hours=3, minutes=5)
 PAGES = {"index.html", "cycles.html", "how.html", "rules.html", "record.html", "agents/index.html"}
 AGENT_SLUGS = ("data", "reference", "vol", "event", "news", "macro", "bull", "bear", "pm", "control", "audit",
-               "risk", "costs")
+               "risk", "costs", "human")
+LINE_IDS = ("NDX", "SEMIS", "SPX", "GOLD", "BTC", "ETH", "OIL", "EURUSD", "GBPUSD")
 REDIRECTS = {"council.html": "how.html", "book.html": "index.html", "failures.html": "record.html"}
-# The CSP must not change: no script at all, and styles come from files.
+# The CSP must not loosen: no script at all, styles and the self-hosted fonts come from files.
 EXPECTED_CSP = (
-    "default-src 'none'; style-src 'self'; img-src 'self' data:; "
+    "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self' data:; "
     "script-src 'none'; base-uri 'none'; form-action 'none'"
 )
 LINE_NAMES = ("Nasdaq-100", "Semiconductors", "S&amp;P 500", "Gold", "Bitcoin", "Ether", "Crude oil",
@@ -110,7 +111,8 @@ def _build_empty(site, tmp_path) -> tuple[Path, dict[str, str]]:
 # ------------------------------------------------------------------------------ empty journal
 def test_builds_with_zero_cycles(site, tmp_path):
     out, pages = _build_empty(site, tmp_path)
-    assert set(pages) == PAGES | set(REDIRECTS) | {f"agents/{slug}.html" for slug in AGENT_SLUGS}
+    assert set(pages) == (PAGES | set(REDIRECTS) | {f"agents/{slug}.html" for slug in AGENT_SLUGS}
+                          | {f"assets/{k}.html" for k in LINE_IDS})        # a page per line of the policy
     assert "AWAITING ACCOUNT" in pages["index.html"]
     assert "No runs yet" in pages["cycles.html"] and "No runs yet" in pages["index.html"]
     assert "Nothing held yet" in pages["index.html"] and "No performance data yet" in pages["index.html"]
@@ -120,14 +122,16 @@ def test_builds_with_zero_cycles(site, tmp_path):
     assert leakscan.scan_paths([out]) == []
 
 
-def test_empty_home_shows_the_pipeline_waiting(site, tmp_path):
+def test_empty_home_shows_the_council_waiting(site, tmp_path):
     _, pages = _build_empty(site, tmp_path)
     home = pages["index.html"]
-    assert home.count('<li class="node ') == 9
-    assert home.count("not run yet") == 9
+    assert home.count('<li class="agent-card ') == len(AGENT_SLUGS)          # the whole council, waiting
+    assert home.count('<span class="ac-verdict">not run yet</span>') == len(AGENT_SLUGS)
+    assert 'class="bmap' not in home and 'class="ledger' not in home          # no map and no figures yet
     # nothing held: the broker-list skeleton, one flat row per line of the policy, and no numbers
     rows = re.findall(r'<tr class="hr ([^"]*)"', home)
     assert len(rows) == len(LINE_NAMES) and all(r.endswith(" flat") for r in rows)
+    assert all(f'href="assets/{k}.html"' in home for k in LINE_IDS)          # each row opens its line
     assert "Nothing held yet" in home and "Not held (" not in home and 'class="strip' not in home
     assert 'data-label="P/L since open"' not in home and 'class="wbar"' not in home
     assert "REHEARSAL" not in home and 'class="alert alert-rehearsal"' not in home
@@ -144,7 +148,11 @@ def test_every_page_has_a_strict_csp_and_no_script(site, tmp_path):
         assert "fonts.googleapis" not in html and "http://" not in html
     for name in ("style.css", "geometry.css"):
         css = (out / "static" / name).read_text()
-        assert "@import" not in css and "url(" not in css, name
+        assert "@import" not in css and "http" not in css, name
+        # the only url() references are the self-hosted fonts, next to the stylesheet
+        for ref in re.findall(r"url\(([^)]*)\)", css):
+            assert re.fullmatch(r'"fonts/[a-z0-9-]+\.woff2"', ref), (name, ref)
+            assert (out / "static" / ref.strip('"')).exists(), ref
     assert "prefers-color-scheme: dark" in (out / "static" / "style.css").read_text()
 
 
@@ -397,8 +405,8 @@ def test_home_with_a_rehearsal_cycle_says_so(rehearsal_site):
     out, pages = rehearsal_site
     home = pages["index.html"]
     assert "Rehearsal — no broker account is connected yet" in home
-    assert "The table shows the weights the council would hold; nothing has been traded." in home
-    assert "REHEARSAL" in home and "Gross · target" in home
+    assert "The map and the list show the weights the council would hold; nothing has been traded." in home
+    assert "REHEARSAL" in home and "Invested · target" in home and "Cash · target" in home
     assert "Target book — no account connected, nothing traded" in home
     assert "Last run 1 Oct 2026, 14:52 UTC (12 min after its 14:40 UTC slot) · page built 17:45 UTC" in home
     assert " h ago" not in home and "data-last-cycle" not in home
@@ -423,39 +431,57 @@ def test_home_holdings_show_every_line(rehearsal_site):
     assert all('class="wbar"' in r for r in rows if 'class="wv">0.0%' not in r or '<span class="wref ' in r)
     assert "P/L since open" not in home[home.index('class="hx'):home.index('id="latest"')]
     assert "Council cut: 15% → 7.5%" in home                              # percent of the portfolio
-    assert "Assets (" in home and "Not held (" in home
+    assert "Held (" in home and "Not held (" in home
     geometry = (out / "static" / "geometry.css").read_text()
     for cls in set(re.findall(r"\bg[wlp]-\d+\b", home)):
         assert f".{cls} " in geometry, cls                               # every width class is defined
 
 
-def test_home_diagram_has_nine_nodes_and_a_plain_summary(rehearsal_site):
+def test_home_council_says_what_each_agent_did_and_the_run_page_has_the_diagram(rehearsal_site):
     _, pages = rehearsal_site
     home = pages["index.html"]
+    council = home[home.index('id="council"'):home.index('id="latest"')]
+    verdicts = dict(re.findall(r'<a class="ac-link" href="agents/([a-z]+)\.html">.*?<span class="ac-verdict">([^<]+)</span>',
+                               council, re.S))
+    assert list(verdicts) == list(AGENT_SLUGS)                              # speaking order, one card each
+    # the bull speaks twice: its opening and, when it asks for something else, its rebuttal
+    assert verdicts["bull"] == "hold ref → cut SEMIS" and verdicts["bear"] == "cut SEMIS"
+    assert verdicts["pm"] == "cut SEMIS · 2/2 agree" and verdicts["control"] == "differs on SEMIS"
+    assert verdicts["human"] == "not needed: rehearsal" and verdicts["costs"].startswith("would need 1 order")
     latest = home[home.index('id="latest"'):home.index('id="recent"')]
-    assert latest.count('<li class="node ') == 9
-    for kind in ("CODE", "LLM", "HUMAN"):
-        assert f">{kind}</span>" in latest, kind
-    for word in ("no trade: rehearsal", "not needed: rehearsal", "holds the reference · 1 claim", "cut Semiconductors"):
-        assert word in latest, word
-    assert "The council reviewed its 9 lines on 1 Oct 2026, 14:40 UTC — a rehearsal, so nothing was traded." in latest
-    assert ("The bull argued to keep the reference and the bear to cut Semiconductors from 15% to 7.5% of the "
-            "portfolio, and both valid portfolio-manager attempts chose to cut Semiconductors from 15% to 7.5% "
-            "of the portfolio.") in latest
-    assert "Semiconductors 15% → 7.5%" in latest                           # the manager step, in percent
-    assert "one agent, no analysts or debate:" in latest
-    assert "differs from the council on Semiconductors" in latest
     assert f'href="cycles/{CYCLE_ID}.html"' in latest and "Open the full run" in latest
+    for step in ("Bull</a> <span class=\"chain-t\">opened: keep the reference", "rebuttal: cut",
+                 "Bear</a> <span class=\"chain-t\">asked to", "Manager", "Risk engine", "Human"):
+        assert step in latest, step
+    run = pages[f"cycles/{CYCLE_ID}.html"]
+    glance = run[run.index('id="glance"'):run.index('id="changed"')]
+    assert glance.count('<li class="node ') == 9
+    for kind in ("CODE", "LLM", "HUMAN"):
+        assert f">{kind}</span>" in glance, kind
+    for word in ("no trade: rehearsal", "not needed: rehearsal", "opening: holds the reference · 1 claim",
+                 "rebuttal: Semiconductors", "cut Semiconductors"):
+        assert word in glance, word
+    assert "The council reviewed its 9 lines on 1 Oct 2026, 14:40 UTC — a rehearsal, so nothing was traded." in glance
+    # the bull's two turns are both named: its opening, then its rebuttal after the bear
+    assert ("The bull argued to keep the reference, then, answering the bear, to cut Semiconductors from 15% to "
+            "11.2% of the portfolio; the bear to cut Semiconductors from 15% to 7.5% of the portfolio. Both valid "
+            "portfolio-manager attempts chose to cut Semiconductors from 15% to 7.5% of the portfolio.") in glance
+    assert "Semiconductors 15% → 7.5%" in glance                           # the manager step, in percent
+    assert "one agent, no analysts or debate:" in glance
+    assert "differs from the council on Semiconductors" in glance
 
 
 def test_run_page_uses_human_evidence_labels(rehearsal_site):
     _, pages = rehearsal_site
     run = pages[f"cycles/{CYCLE_ID}.html"]
     assert run.count('<li class="node ') == 9
-    for label, raw in (("Semiconductors · volatility vs its 1-year norm", "V:SEMIS:vol_ratio"),
-                       ("Nasdaq-100 · vs 200-day average", "F:NDX:dist_sma200_pct"),
-                       ("volatility card 1", "K:vol:1")):
-        assert re.search(rf'title="{re.escape(raw)}[^"]*">{re.escape(label)}', run), label
+    # a line's evidence chip: its name opens the line's page, the rest opens the fact's row
+    for line, name, what, raw in (("SEMIS", "Semiconductors", "volatility vs its 1-year norm", "V:SEMIS:vol_ratio"),
+                                  ("NDX", "Nasdaq-100", "vs 200-day average", "F:NDX:dist_sma200_pct")):
+        assert re.search(rf'title="{re.escape(raw)}[^"]*"><a class="ev-ln" href="\.\./assets/{line}\.html">{re.escape(name)}'
+                         rf'</a><span class="ev-sep" aria-hidden="true">·</span><(a|span) class="ev-what"[^>]*>{re.escape(what)}',
+                         run), raw
+    assert re.search(r'title="K:vol:1[^"]*">volatility card 1', run)
     assert re.search(r'title="N:1a2b3c4d[^"]*">news item<', run)
     assert ">V:SEMIS:vol_ratio<" not in run                               # raw ids only in titles
     assert "What changed" in run and "7 lines stayed at the reference" in run and "change too small to trade" in run
@@ -525,10 +551,11 @@ def test_home_leads_with_one_sentence_and_the_summary(rehearsal_site):
     latest = home[home.index('id="latest"'):home.index('id="recent"')]
     assert ("Latest run (1 Oct, 14:40 UTC): the council cut Semiconductors from 15% to 7.5% of the portfolio; "
             "the other 8 lines follow the rules.") in latest
-    # the holdings come first: the rehearsal banner, then the summary tiles and the table, then the run
-    assert home.index('class="alert alert-rehearsal"') < home.index('class="strip strip-home') < home.index('class="htable"')
-    assert home.index('class="htable"') < home.index('id="latest"')
-    assert latest.index('class="story"') < latest.index('class="flow')       # the words before the diagram
+    # the book comes first: the council's teaser beside the title, the rehearsal banner, the map, its figures
+    # and the list; then the council, then the run
+    assert (home.index('class="teaser"') < home.index('class="alert alert-rehearsal"') < home.index('class="bmap"')
+            < home.index('class="ledger') < home.index('class="htable"') < home.index('id="council"')
+            < home.index('id="latest"'))
     run = pages[f"cycles/{CYCLE_ID}.html"]
     glance = run[run.index('id="glance"'):run.index('id="changed"')]
     assert glance.index('class="story"') < glance.index('class="flow')
@@ -603,7 +630,8 @@ def test_debate_reads_in_words(site, rehearsal_site):
     run = pages[f"cycles/{CYCLE_ID}.html"]
     debate = run[run.index('id="a-bull"'):run.index('id="a-pm"')]
     assert "Stance: <strong>Keep the reference</strong>" in debate
-    assert "Wants to <strong>cut Semiconductors 15% → 7.5%</strong>" in debate
+    assert ('Wants to <strong>cut <a class="ln" href="../assets/SEMIS.html">Semiconductors</a> 15% → 7.5%</strong>'
+            in debate)
     assert "contests</span>" in debate and "Nasdaq is 6.2% above its 200-day average" in debate
     defs = site.shorthand(["NDX dd52 -0.9% and vol 0.99x median; DGS10 +47bps, T10Y2Y -21bps"], _lines(site))
     terms = {d["term"]: d["meaning"] for d in defs}
@@ -623,7 +651,7 @@ def test_manager_attempts_collapse_when_they_agree(rehearsal_site):
 
 def test_invested_is_one_number_on_both_pages(rehearsal_site):
     _, pages = rehearsal_site
-    tile = re.search(r'<dd class="st-sub">([^<]+?) of the portfolio invested</dd>', pages["index.html"]).group(1)
+    tile = re.search(r'<dt>Invested · target</dt><dd class="lg-v">([^<]+?)</dd>', pages["index.html"]).group(1)
     fact = re.search(r'<dt>Invested</dt><dd class="n">([^<]+?) <span', pages[f"cycles/{CYCLE_ID}.html"]).group(1)
     assert tile == fact
 
@@ -645,7 +673,7 @@ def test_holdings_are_filtered_by_asset_class_without_script(rehearsal_site):
 def test_phone_tables_stack_and_scroll_regions_are_focusable(rehearsal_site):
     _, pages = rehearsal_site
     run = pages[f"cycles/{CYCLE_ID}.html"]
-    for name, marker in (("index.html", 'class="wide stack runs"'), ("cycles.html", 'class="wide stack runs"'),
+    for name, marker in (("index.html", 'class="runlist"'), ("cycles.html", 'class="wide stack runs"'),
                          (f"cycles/{CYCLE_ID}.html", 'class="wide stack changes"'), ("rules.html", 'class="rules wide stack"')):
         assert marker in pages[name], name
     assert 'data-label="After risk"' in run and 'data-label="What changed"' in pages["index.html"]
@@ -656,10 +684,15 @@ def test_phone_tables_stack_and_scroll_regions_are_focusable(rehearsal_site):
 def test_accessibility_and_plain_words(rehearsal_site):
     _, pages = rehearsal_site
     home = pages["index.html"]
-    assert '<ol class="flow linked" role="list"' in home and '<table class="htable">' in home
-    assert '<span class="num" aria-hidden="true">1</span>' in home
+    run = pages[f"cycles/{CYCLE_ID}.html"]
+    assert '<ol class="flow linked" role="list"' in run and '<table class="htable">' in home
+    assert '<span class="phase-n" aria-hidden="true">1</span>' in home
+    # the hemicycle is a pointer shortcut: hidden from assistive tech, out of the tab order, numbered seats
+    hemi = home[home.index('<svg class="hemi hemi-teaser"'):home.index("</svg>", home.index('<svg class="hemi hemi-teaser"'))]
+    assert 'aria-hidden="true"' in hemi and 'role="img"' not in hemi
+    assert hemi.count('tabindex="-1"') == len(AGENT_SLUGS) and hemi.count('<text class="hemi-n"') == len(AGENT_SLUGS)
     assert 'aria-label="Fall from peak: not tracked until go-live; no new risk at −20%, stop at −25%"' in home
-    assert "What each step does" in home and "Bull</strong> makes the case for a set of positions" in home
+    assert "What each step does" in run and "Bull</strong> makes the case for a set of positions" in run
     gloss = "scaled by its trend (up = full, mixed = ¾, down = ¼) and trimmed when the line is unusually volatile"
     assert gloss in home and gloss in pages["how.html"]
     for name, html in pages.items():

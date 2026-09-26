@@ -7,23 +7,23 @@
 {% if a.spec.group != ns.group %}{% set ns.group = a.spec.group %}{{ m.toc_group(a.spec.group) }}{% endif %}
 {{ m.toc_item("ag-" ~ a.slug, a.name, a.accent, a.stats.worst) }}
 {% endfor %}
-{{ m.toc_group("People") }}
-{{ m.toc_item("ag-human", "Human operator", "human") }}
 {% endblock %}
 {% block toc_foot %}<p class="toc-legend">The mark is the worst status over the published runs.</p>{{ m.toc_legend() }}{% endblock %}
-{% block main %}
+{% block hero %}
 <header class="hero">
   <p class="eyebrow">Agents</p>
   <h1>Every agent, and how it has behaved</h1>
   <p class="lede">The council is a chain of agents: code officers that build the facts, language-model analysts and advocates that argue, a manager that decides within limits, and code that checks everything. Each row shows one agent's job and its record over {{ plural(cycles_count, "published run") }}; its page has every output it gave.</p>
 </header>
+{% endblock %}
+{% block main %}
 
 {% set llm = agents | selectattr("kind", "equalto", "LLM") | list %}
 {% set calls = llm | sum(attribute="stats.calls") %}
 {% set ok = llm | sum(attribute="stats.ok") %}
 {% set okp = (100.0 * ok / calls) if calls else none %}
 <dl class="strip strip-agents">
-  <div class="st"><dt>{{ icon("users") }}Agents</dt><dd class="st-v">{{ agents | length + 1 }}</dd><dd class="st-sub">{{ llm | length }} language models · {{ agents | length - llm | length }} code · 1 person</dd></div>
+  <div class="st"><dt>{{ icon("users") }}Agents</dt><dd class="st-v">{{ agents | length }}</dd><dd class="st-sub">{{ llm | length }} language models · {{ agents | selectattr("kind", "equalto", "CODE") | list | length }} code · 1 person</dd></div>
   <div class="st"><dt>{{ icon("cpu") }}Model</dt><dd class="st-v st-v-sm st-model"><code>{{ model or "—" }}</code></dd><dd class="st-sub">every language-model agent · thinking {{ "on" if think else "off" }}</dd></div>
   <div class="st st-ring"><dt>{{ icon("circle-check") }}Usable replies</dt><dd>{{ m.pring(okp, ring_css(okp), (ok ~ " of " ~ calls ~ " calls usable") if calls else "no calls yet") }}</dd><dd class="st-v st-v-sm">{{ ok }} <span class="st-of">of {{ calls | count }} calls</span></dd></div>
   <div class="st"><dt>{{ icon("circle-x") }}Failed calls</dt><dd class="st-v">{{ calls - ok }}</dd><dd class="st-sub">over {{ plural(cycles_count, "run") }}; each is listed on its agent's row</dd></div>
@@ -57,10 +57,5 @@
 {% endfor %}
 {% if ns.group %}</tbody></table></div></section>{% endif %}
 
-{% set ns.n = ns.n + 1 %}
-<section class="card accent-human" aria-labelledby="grp-human">
-<h2 id="grp-human"><span class="num" aria-hidden="true">{{ ns.n }}</span>People</h2>
-<div class="member member-solo" id="ag-human">{{ m.avatar("user", "human") }}<div class="member-text"><p class="member-name">Human operator <span class="node-kind kind-human">HUMAN</span></p><p class="member-sub">Approves or rejects every order in a separate operator terminal. Nothing trades without this step; each run's decision is on its page.</p></div></div>
-</section>
 <p class="small muted">Usable counts a call whose reply could be used, including one fixed by its single correction turn. Each failure links to its place in the run. The error text itself is never published, only a fixed code. "Did what it asked" compares the call the used manager attempt made with the advocate's final proposal (keeping the reference counts); "named" is the side the manager wrote down.</p>
 {% endblock %}

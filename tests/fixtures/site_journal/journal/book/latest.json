@@ -1,7 +1,7 @@
 {
   "as_of_cycle_id": "2026-09-25T1440Z",
-  "cash_x": 0.008,
-  "gross_x": 0.992,
+  "cash_x": 0.0,
+  "gross_x": 1.044,
   "kill_state": "NORMAL",
   "lines": {
     "AMD": {
@@ -73,14 +73,14 @@
       "asset_class": "crypto",
       "day_change_pct": -2.61,
       "direction": "long",
-      "level": 0.5,
+      "level": 0.75,
       "leverage": 1,
       "name": "Ether",
       "pnl_since_open_pct": -9.31,
-      "reference_weight_x": 0.025,
+      "reference_weight_x": 0.037,
       "session": "crypto",
       "settlement": "real",
-      "weight_x": 0.025
+      "weight_x": 0.037
     },
     "EURUSD": {
       "asset_class": "fx",
@@ -109,27 +109,27 @@
       "asset_class": "commodity",
       "day_change_pct": -0.47,
       "direction": "long",
-      "level": 0.5,
+      "level": 0.75,
       "leverage": 1,
       "name": "Gold",
       "pnl_since_open_pct": 1.59,
-      "reference_weight_x": 0.06,
+      "reference_weight_x": 0.09,
       "session": "lse",
       "settlement": "real",
-      "weight_x": 0.06
+      "weight_x": 0.09
     },
     "META": {
       "asset_class": "stock",
       "day_change_pct": -0.72,
       "direction": "long",
-      "level": 0.5,
+      "level": 0.75,
       "leverage": 1,
       "name": "Meta Platforms",
       "pnl_since_open_pct": -3.72,
-      "reference_weight_x": 0.01,
+      "reference_weight_x": 0.015,
       "session": "us",
       "settlement": "real",
-      "weight_x": 0.01
+      "weight_x": 0.015
     },
     "MSFT": {
       "asset_class": "stock",
@@ -184,14 +184,14 @@
       "asset_class": "stock",
       "day_change_pct": -3.05,
       "direction": "long",
-      "level": 0.5,
+      "level": 0.75,
       "leverage": 1,
       "name": "Palantir",
       "pnl_since_open_pct": -6.77,
-      "reference_weight_x": 0.01,
+      "reference_weight_x": 0.015,
       "session": "us",
       "settlement": "real",
-      "weight_x": 0.01
+      "weight_x": 0.015
     },
     "SEMIS": {
       "asset_class": "etf",
@@ -246,6 +246,6 @@
       "weight_x": 0.02
     }
   },
-  "net_x": 0.868,
+  "net_x": 0.92,
   "schema_id": "council-book/book/v1"
 }

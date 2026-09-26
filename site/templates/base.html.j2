@@ -1,3 +1,4 @@
+{% macro m_brand() %}<svg class="brand-mark" viewBox="{{ brand_seats.box }}" aria-hidden="true" focusable="false">{% for s in brand_seats.dots %}<circle class="hemi-seat accent-{{ s.slug }}" cx="{{ s.cx }}" cy="{{ s.cy }}" r="{{ brand_seats.r }}"></circle>{% endfor %}</svg>{% endmacro %}
 <!doctype html>
 <html lang="en">
 <head>
@@ -6,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="{{ csp }}">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0a0a0a">
+<meta name="theme-color" content="#0E1320">
 <meta name="description" content="An LLM agent council proposes trades every four hours; code enforces the risk limits and a human approves every order. The public record.">
 <title>{% block title %}council-book{% endblock %} · council-book</title>
 <link rel="stylesheet" href="{{ root }}static/style.css">
@@ -16,7 +17,7 @@
 <a class="skip" href="#main">Skip to content</a>
 <header class="top">
   <div class="top-inner">
-    <a class="brand" href="{{ root }}index.html"><span class="brand-mark" aria-hidden="true">cb</span><span class="brand-name">council-book</span></a>
+    <a class="brand" href="{{ root }}index.html">{{ m_brand() }}<span class="brand-name">council<span class="brand-dash">-</span>book</span></a>
     <nav class="pages" aria-label="Pages">
     {% for p in nav %}
       <a href="{{ root }}{{ p.href }}"{% if p.key == page %} aria-current="page"{% endif %}>{{ p.label }}</a>
@@ -27,7 +28,12 @@
     </div>
   </div>
 </header>
-<div class="layout">
+{# The page's own header comes first at every width (on a phone: header, then contents, then the
+   page); on desktop it spans the contents column and the page. #}
+<main id="main" class="{% block layout %}layout{% endblock %}">
+  {% if self.hero() | trim %}<div class="page-hero">{% block hero %}{% endblock %}</div>{% endif %}
+  <div class="page-body">
+  {% block toc_nav %}
   <nav class="toc" id="toc" aria-label="On this page">
     <p class="toc-title">On this page</p>
     <ol>
@@ -35,10 +41,12 @@
     </ol>
     {% block toc_foot %}{% endblock %}
   </nav>
-  <main id="main">
+  {% endblock %}
+  <div class="page-main">
   {% block main %}{% endblock %}
-  </main>
-</div>
+  </div>
+  </div>
+</main>
 <footer class="foot">
   <div class="foot-inner">
     <ul class="foot-list">
@@ -53,7 +61,7 @@
       <li>Not endorsed by the broker.</li>
     </ul>
     <p class="muted">Code: Apache-2.0 · Journal, docs and site text: CC BY 4.0 (excluding third-party material). Page built {{ status.built }}. <a href="{{ root }}record.html#disclaimer">All disclaimers</a>.</p>
-    <p class="muted credit">Interface styles adapted from OpenSourceUI (MIT) · icons from Lucide (ISC) · <a href="{{ repo_url }}/blob/main/THIRD_PARTY_NOTICES.md">third-party notices</a>.</p>
+    <p class="muted credit">Type: Space Grotesk and IBM Plex (SIL Open Font License) · icons from Lucide (ISC) · Interface styles adapted from OpenSourceUI (MIT) · <a href="{{ repo_url }}/blob/main/THIRD_PARTY_NOTICES.md">third-party notices</a>.</p>
   </div>
 </footer>
 </body>

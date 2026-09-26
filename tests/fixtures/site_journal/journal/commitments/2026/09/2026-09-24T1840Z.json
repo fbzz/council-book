@@ -1,10 +1,10 @@
 {
   "algo": "sha256(salt||canonical_json)",
   "code_commit": "",
-  "commitment_sha256": "341104b96c56ac2073cd3d851702847704aa9376d624f4578a0eb0980c87285a",
+  "commitment_sha256": "fd188967505eb16d86beac0fdc24b098d89285b8d147327fd47e2a954ad7918e",
   "cycle_id": "2026-09-24T1840Z",
   "model_digest": "651377bfd3e5e4e7aefe381d2cca7644c0c659d75f821151794b9f7c34d8d534",
-  "policy_sha": "ab86a8c46ee23acff79db9d7147cc0a699b8a6df972956fd336d623bf998bc01",
+  "policy_sha": "79967e183af21a5263188ad3faf5f1f10bae3ea261f108dfc508f671dce30b9d",
   "prompt_manifest_sha": "695a24bdca9dffdd0ce9945db15e723c75787f82295c6699175d67c4a2fac59b",
   "schema_id": "council-book/commitment/v1",
   "sealed_at": "2026-09-24T18:43:00Z"

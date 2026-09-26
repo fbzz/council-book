@@ -1,0 +1,177 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}{{ a.asset.ticker }} · {{ a.asset.name }}{% endblock %}
+{% block toc %}
+{% set x = a.asset %}
+{{ m.toc_item("position", "Position", "neutral") }}
+{{ m.toc_item("weights", "Weight across runs", "neutral") }}
+{{ m.toc_item("trend", "Trend", "neutral") }}
+{{ m.toc_item("said", "What the agents said (" ~ (a.said | sum(attribute="notes", start=[]) | length) ~ ")", "neutral") }}
+{{ m.toc_item("trades", "Trades (" ~ (a.trades | length) ~ ")", "neutral") }}
+{{ m.toc_item("facts", "Latest facts", "neutral") }}
+{% set rest = others | rejectattr("page", "equalto", x.page) | list %}
+{{ m.toc_group("Other lines", "toc-desk") }}
+<li class="toc-lines toc-desk">{% for o in rest %}<a class="toc-line{% if not o.held %} not-held{% endif %}" href="../{{ o.page }}">{{ o.ticker }}</a>{% endfor %}</li>
+<li class="toc-phone"><details class="toc-more"><summary>Other lines ({{ rest | length }})</summary><p class="toc-lines">{% for o in rest %}<a class="toc-line{% if not o.held %} not-held{% endif %}" href="../{{ o.page }}">{{ o.ticker }}</a>{% endfor %}</p></details></li>
+{% endblock %}
+{% block hero %}
+{% set x = a.asset %}
+<header class="hero hero-asset">
+  <p class="eyebrow"><a href="../index.html#holdings">The book</a> / {{ x.ac_words or "Line" }}</p>
+  <div class="asset-hero">
+    <span class="mono mono-lg ac-{{ x.ac }}" aria-hidden="true">{{ x.mono }}</span>
+    <div>
+      <h1><span class="asset-tk">{{ x.ticker }}</span> <span class="asset-nm">{{ x.name }}</span></h1>
+      <p class="asset-tags">{% if x.ac_words %}<span class="chip tag">{{ x.ac_words }}</span>{% endif %}{% if x.session %}<span class="chip tag sess" title="{{ x.session_title }}">{{ x.session }}</span>{% endif %}{% if a.vehicle %}<span class="chip tag" title="How the line is held: real shares or units, or a contract for difference (CFD)">vehicle: {{ a.vehicle }}</span>{% endif %}{% if not a.council_may %}<span class="chip tag" title="The council may not move this line away from the reference">reference only</span>{% endif %}</p>
+    </div>
+  </div>
+</header>
+{% endblock %}
+{% block main %}
+{% set x = a.asset %}
+{% set r = a.row %}
+
+{% call m.section("position", 1, "Position", "neutral") %}
+{% if r %}
+<dl class="ledger ledger-asset">
+  <div class="lg"><dt>Weight{% if book_target %} · target{% endif %}</dt><dd class="lg-v">{{ r.share1 }}</dd><dd class="lg-s">of the portfolio</dd></div>
+  <div class="lg"><dt>Reference</dt><dd class="lg-v">{{ r.ref_share1 }}</dd><dd class="lg-s">what the rules alone would hold</dd></div>
+  <div class="lg"><dt>Position</dt><dd class="lg-v lg-v-sm">{% if r.weight %}<span class="pos pos-{{ r.direction }}">{{ r.position }}</span>{% if r.lev %} <span class="lev">{{ r.lev }}</span>{% endif %}{% if r.settlement %} <span class="chip set-{{ r.settlement | lower }}">{{ r.settlement }}</span>{% endif %}{% else %}not held{% endif %}</dd><dd class="lg-s">{% if r.weight %}{{ "a short: it gains when the price falls" if r.direction == "short" else "long: it gains when the price rises" }}{% else %}no position{% endif %}</dd></div>
+  {% if r.day_raw is not none %}<div class="lg"><dt>1 day</dt><dd class="lg-v">{{ m.move(r.day, r.day_dir) }}</dd><dd class="lg-s">last completed daily move</dd></div>{% endif %}
+  {% if r.pnl_raw is not none %}<div class="lg"><dt>P/L since open</dt><dd class="lg-v">{{ m.move(r.pnl, r.pnl_dir) }}</dd><dd class="lg-s">% of the amount invested</dd></div>{% endif %}
+</dl>
+{% for n in r.notes %}<p class="hnote hnote-asset">{{ n }}</p>{% endfor %}
+{% else %}
+<p class="muted">Not in the current book.</p>
+{% endif %}
+<p class="small muted">{% if a.in_reference %}In the mechanical reference book{% else %}Outside the reference book{% endif %}{% if a.sleeve %} · {{ a.sleeve }} sleeve{% endif %}. {% if a.council_may %}The council may move it away from the reference, inside a range code sets from its trend.{% else %}The council may not move it: it always follows the reference.{% endif %}</p>
+{% endcall %}
+
+{% call m.section("weights", 2, "Weight across runs", "neutral") %}
+{% set ch = a.chart %}
+{% if ch and ch.flat %}
+<p class="big">0% in {{ "the only run" if ch.n == 1 else "all " ~ ch.n ~ " runs" }}: reference, council{% if "held" in ch.present %} and executed book{% endif %}.</p>
+{% elif ch and ch.single %}
+<p class="wc-figs">{% for f in ch.figures %}<span class="wc-fig"><span class="lkey {{ f.css }}" aria-hidden="true"></span>{{ f.label }} <strong class="n">{{ f.value if f.value is not none else "none" }}</strong>{% if f.value is none and f.css == "s-held" %} <span class="muted">({{ "rehearsal: nothing traded" if a.points[0].rehearsal else "not known yet" }})</span>{% endif %}</span>{% endfor %}</p>
+<p class="small muted">One published run so far; the chart appears from the second run.</p>
+{% elif ch %}
+<ul class="legend legend-lines" aria-label="Series">
+  <li><span class="lkey s-ref" aria-hidden="true"></span>Reference</li>
+  <li><span class="lkey s-council" aria-hidden="true"></span>Council</li>
+  <li><span class="lkey s-held" aria-hidden="true"></span>Executed book{% if "held" not in ch.present %} (none yet: rehearsal){% endif %}</li>
+  {% if ch.rehearsals %}<li><span class="lkey-reh" aria-hidden="true"></span>rehearsal run: nothing traded</li>{% endif %}
+</ul>
+<figure class="wchart">
+  <div class="wc-plot">
+    <svg class="wc-svg" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="{{ x.ticker }}: weight in the portfolio after each run, reference, council and executed book (the table below has every value)">
+      {% for c in ch.cols if c.rehearsal %}<rect class="wc-reh" x="{{ c.x }}" y="0" width="{{ c.w }}" height="100"></rect>{% endfor %}
+      {% for t in ch.ticks %}<line class="{{ 'wc-zero' if t.zero else 'wc-grid' }}" x1="0" x2="100" y1="{{ t.y }}" y2="{{ t.y }}"></line>{% endfor %}
+      {% for s in ch.series %}<path class="wc-line {{ s.css }}" d="{{ s.d }}"></path>{% endfor %}
+      {% for c in ch.cols %}<rect class="wc-hit" x="{{ c.x }}" y="0" width="{{ c.w }}" height="100"><title>{{ c.title }}</title></rect>{% endfor %}
+    </svg>
+    {% for d in ch.dots %}<span class="wc-dot {{ d.left }} {{ d.top }}" aria-hidden="true"></span>{% endfor %}
+    {% for c in ch.cols if c.rehearsal %}<span class="wc-reh-l {{ c.left }}" aria-hidden="true">rehearsal</span>{% endfor %}
+    {% for t in ch.ticks %}<span class="wc-y {{ t.top }}" aria-hidden="true">{{ t.label }}</span>{% endfor %}
+    {% for e in ch.ends %}<span class="wc-end {{ e.top }}" aria-hidden="true">{% for c in e.css %}<span class="lkey {{ c }}"></span>{% endfor %}{{ e.text }}</span>{% endfor %}
+    {% for xl in ch.xlabels %}<span class="wc-x wc-x-{{ xl.cls }} {{ xl.left }}" aria-hidden="true">{{ xl.text }}</span>{% endfor %}
+  </div>
+  <figcaption class="small muted">One step per published run ({{ plural(ch.n, "run") }}{% if a.older_points %}, the latest {{ ch.n }}; older runs are on the <a href="../cycles.html">Runs</a> page{% endif %}): each line holds its value until the next run, and a dot marks the executed book at each run. Hover a column for its values. The executed book is empty for a rehearsal or while a run's outcome is unknown.</figcaption>
+</figure>
+{% else %}
+{{ m.empty("No run yet", "The weight after each run appears here once the council has met.") }}
+{% endif %}
+{% if a.points %}
+<details class="more">
+  <summary>Show as table</summary>
+  {{ m.wrap_open("Weight across runs (scrolls sideways)") }}
+  <table class="wide">
+    <caption class="small muted">Newest run first.</caption>
+    <thead><tr><th>Run</th><th class="n">Reference</th><th class="n">Council</th><th class="n">Executed book</th><th>Outcome</th></tr></thead>
+    <tbody>
+    {% for p in a.points | reverse %}<tr><td><a href="{{ p.href }}">{{ p.when }}</a></td><td class="n">{{ p.ref | share1 }}</td><td class="n">{{ p.council | share1 }}</td><td class="n">{{ p.held | share1 if p.held is not none else "—" }}</td><td>{{ m.chip(p.chip) }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+</details>
+{% endif %}
+{% endcall %}
+
+{% call m.section("trend", 3, "Trend", "neutral") %}
+{% if a.trends %}
+<p>{% if a.in_reference %}The reference book holds {{ reference_gloss }}. The council's allowed range around it comes from the same trend.{% else %}Outside the reference book: its reference size is always 0. Its trend only sets the council's allowed range.{% endif %} Oldest run first; runs in the same state are merged.</p>
+<ol class="trendrow">
+{% for t in a.trends %}<li><a class="tr-card" href="{{ t.href }}"><span class="tr-when">{% if t.runs > 1 %}{{ t.runs }} runs · {{ t.first }} → {{ t.last }} UTC{% else %}{{ t.first }} UTC{% endif %}</span><span class="tr-state">{{ m.trend_chip(t.trend) }}<span class="tr-size">size {{ t.level }}{% if a.in_reference %} · {{ t.weight }}{% endif %}</span></span>{% if t.range %}<span class="tr-range">{% if t.fixed %}fixed at {{ t.range.split(" to ")[0] }}{% else %}allowed {{ t.range }}{% endif %}{% if t.range_pct and not t.fixed %} <span class="muted">({{ t.range_pct }} of the portfolio)</span>{% endif %}</span>{% endif %}{% if t.reasons %}<span class="tr-why">{{ t.reasons | cap }}</span>{% endif %}</a>{% if t.cards %}<p class="evs tr-cards">{{ m.chips(t.cards) }}</p>{% endif %}</li>{% endfor %}
+</ol>
+{% else %}
+<p class="muted">No trend recorded yet.</p>
+{% endif %}
+{% endcall %}
+
+{% call m.section("said", 4, "What the agents said about " ~ x.ticker, "neutral") %}
+{% if a.said %}
+<p class="small muted">Every claim, answer, concession, card and decision that names this line or cites one of its facts, newest run first{% if a.said_capped %}, from the last {{ said_cap }} runs{% endif %}. Under each claim, what happened to it. Each opens its place in the run.</p>
+{% for g in a.said %}
+<details class="said-run"{% if loop.first %} open{% endif %}>
+  <summary class="said-when">{{ icon("chevron-right", "chev") }}<span class="said-date">{{ g.when }}</span> {{ m.chip(g.cv.mode_chip) }} {{ m.chip(g.cv.chip) }} <span class="said-n">{{ plural(g.notes | length, "item") }}</span></summary>
+  <p class="said-open small"><a href="{{ g.href }}">Open this run →</a></p>
+  <ul class="said-list">
+  {% for it in g.notes %}
+    <li class="said accent-{{ it.slug }}">
+      <p class="said-who">{{ m.seat(it.slug) }}<a href="{{ it.href }}">{{ it.who }}</a> <span class="said-kind">{{ it.kind }}{% if it.cid %} {{ it.cid }}{% endif %}</span>{% if it.verdict %} {{ m.verdict(it.verdict) }}{% endif %}</p>
+      <p class="said-text">{{ it.text }}</p>
+      {% if it.chips %}<p class="evs">{{ m.chips(it.chips) }}</p>{% endif %}
+      {% if it.fates %}<ul class="fates-inline">{% for f in it.fates %}<li>{{ m.verdict(f.verdict) }} <a href="{{ f.href }}">{{ f.who }}</a>{% if f.dagger %}<sup class="dag" title="{{ how_words.inferred }}">†</sup>{% endif %}: {{ f.text }}</li>{% endfor %}</ul>{% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</details>
+{% endfor %}
+{% else %}
+<p class="muted">No agent has named this line or cited its facts in a published run.</p>
+{% endif %}
+{% endcall %}
+
+{% call m.section("trades", 5, "Trades", "neutral") %}
+{% if a.trades %}
+{{ m.wrap_open("Orders on " ~ x.ticker ~ " (scrolls sideways)") }}
+<table class="wide rt rt-trades">
+  <thead><tr><th>Run</th><th>Order</th><th class="n">Weight</th><th>Vehicle</th><th class="n">Cost</th><th>Outcome</th><th>Why</th></tr></thead>
+  <tbody>
+  {% for t in a.trades %}
+  <tr>
+    <td class="when"><a href="{{ t.href }}">{{ t.when }}</a></td>
+    <td>{{ m.order(t.order) }}</td>
+    <td class="n" data-label="Weight">{{ t.move }}</td>
+    <td data-label="Vehicle">{{ t.vehicle }}</td>
+    <td class="n" data-label="Cost">{{ t.cost }}</td>
+    <td data-label="Outcome">{{ m.chip(t.outcome) }}{% if t.fill %} <span class="small">{% if t.fill.ok %}<span aria-hidden="true">✓ </span>{% else %}<span aria-hidden="true">! </span>{% endif %}{{ t.fill.state }}{% if t.fill.filled != "—" %}, change filled {{ t.fill.filled }}{% endif %}{% if t.fill.slippage != "—" %}, slippage {{ t.fill.slippage }}{% endif %}</span>{% endif %}</td>
+    <td class="small why-cell">{{ t.why }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Weights are the line's share of the portfolio before and after the order; costs in basis points of the portfolio (1 bp = 0.01%). A proposal is sealed before the human decides: “rejected” and “not sent” orders never traded.</p>
+{% else %}
+<p class="muted">No order on this line in a published run.</p>
+{% endif %}
+{% endcall %}
+
+{% call m.section("facts", 6, "Latest facts", "neutral") %}
+{% if a.facts %}
+<p class="small muted">From the fact pack of the run of <a href="{{ a.facts.href }}">{{ a.facts.when }}</a>, each available before that run started. Values are shown where the <a href="{{ repo_url }}/blob/main/docs/data-rights.md">data rights</a> allow it.</p>
+{{ m.wrap_open("Latest facts (scrolls sideways)") }}
+<table class="wide facts-table">
+  <thead><tr><th>Fact</th><th class="n">Value</th><th>Source</th><th>Available</th></tr></thead>
+  <tbody>
+  {% for f in a.facts.rows %}<tr><td>{% if f.href %}<a href="{{ f.href }}" title="{{ f.id }}">{{ f.label }}</a>{% else %}<span title="{{ f.id }}">{{ f.label }}</span>{% endif %}</td><td class="n">{% if f.value %}<strong>{{ f.value }}</strong>{% elif f.withheld %}<span class="muted small">{{ f.withheld }}</span>{% else %}<span class="muted small">id only</span>{% endif %}</td><td class="small">{{ f.source }}</td><td class="small n">{{ f.as_of or "—" }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+{% elif a.ids_only %}
+<p class="muted">This run's format published fact ids only, without a facts table; the agents' citations are listed above.</p>
+{% else %}
+<p class="muted">No fact about this line has been published yet.</p>
+{% endif %}
+{% endcall %}
+{% endblock %}

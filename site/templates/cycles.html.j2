@@ -5,12 +5,14 @@
 {{ m.toc_item("list", "All runs", "proposed") }}
 {{ m.toc_item("read", "How to read a run", "code") }}
 {% endblock %}
-{% block main %}
+{% block hero %}
 <header class="hero">
   <p class="eyebrow">Runs</p>
   <h1>Every council run, newest first</h1>
   <p class="lede">The council meets every four hours. A run is revealed here once its decision is final; its seal was published before any order could be approved.</p>
 </header>
+{% endblock %}
+{% block main %}
 
 {% call m.section("list", 1, "All runs", "proposed") %}
 {% if cycles %}

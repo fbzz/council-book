@@ -6,12 +6,14 @@
 {{ m.toc_item("withdrawn", "Withdrawn claims", "stone") }}
 {{ m.toc_item("disclaimer", "Disclaimers", "code") }}
 {% endblock %}
-{% block main %}
+{% block hero %}
 <header class="hero">
   <p class="eyebrow">Record</p>
   <h1>What went wrong, and what this is not</h1>
   <p class="lede">Failures, fallbacks, withheld runs and withdrawn claims are part of the record.</p>
 </header>
+{% endblock %}
+{% block main %}
 
 {% call m.section("incidents", 1, "Incidents", "halted" if incidents else "stone") %}
 {% if incidents %}

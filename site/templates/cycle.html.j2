@@ -14,6 +14,13 @@
 {{ m.toc_item("seal", "Seal and call log", "neutral") }}
 {% endblock %}
 {% block toc_foot %}{{ m.toc_legend() }}{% endblock %}
+{% block hero %}
+<header class="hero">
+  <p class="eyebrow"><a href="../cycles.html">Runs</a> / <span class="n">{{ c.cycle_id }}</span></p>
+  <h1>Council run · {{ run.when }}</h1>
+  <p class="lede">Every agent in the order it ran: what it saw, what it said, and what happened to it.</p>
+</header>
+{% endblock %}
 {% block main %}
 {% set ns = namespace(n=0) %}
 
@@ -31,7 +38,7 @@
   <p class="h-status">{{ m.mark(a.status) }}</p>
   <a class="to-toc" href="#toc">↑ Contents</a>
 </header>
-{% if a.kind == "LLM" %}{{ m.terminal(a.calls, a.name ~ " — " ~ plural(a.calls | length, "call"), a.meta, a.failure, "Model calls of " ~ a.name) }}{% endif %}
+{% if a.kind == "LLM" %}{{ m.terminal(a.calls, a.name, a.meta, a.failure, "Model calls of " ~ a.name, plural(a.calls | length, "call")) }}{% endif %}
 {{ m.failure(a.failure) }}
 {% endmacro %}
 
@@ -49,7 +56,7 @@
 {% endif %}
 {% if b %}
 {{ subhead("said", "What it said") }}
-<p class="stance">{{ "Wants to" if b.changes else "Stance:" }} <strong>{{ b.stance if not b.changes else b.stance[:1] | lower ~ b.stance[1:] }}</strong></p>
+<p class="stance">{% if b.changes %}Wants to <strong>{{ m.changes_stance(b.stance_parts, "../") }}</strong>{% else %}Stance: <strong>{{ b.stance }}</strong>{% endif %}</p>
 <blockquote class="argument"><p>{{ b.argument }}</p></blockquote>
 {% if b.legacy_cut %}<p class="small muted legacy">Shortened when published: early runs kept only the first 600 characters of each argument; later runs publish it whole.</p>{% endif %}
 {% if b.claims %}
@@ -123,7 +130,7 @@
   <table class="wide">
     <thead><tr><th>Line</th><th>Trend</th><th class="n">1 day</th><th class="n">Size</th><th class="n">Weight</th></tr></thead>
     <tbody>
-    {% for r in b.rows %}<tr><td><strong>{{ r.name }}</strong> <span class="muted small">{{ r.ticker }}</span></td><td>{{ m.trend_chip(r.trend) }}</td><td class="n">{{ m.move(r.day, r.day_dir) }}</td><td class="n">{{ r.level }}</td><td class="n">{{ r.weight }}</td></tr>{% endfor %}
+    {% for r in b.rows %}<tr><td><strong>{{ m.ln(r.line, "../") }}</strong> <span class="muted small">{{ r.ticker }}</span></td><td>{{ m.trend_chip(r.trend) }}</td><td class="n">{{ m.move(r.day, r.day_dir) }}</td><td class="n">{{ r.level }}</td><td class="n">{{ r.weight }}</td></tr>{% endfor %}
     </tbody>
   </table>
   </div>
@@ -144,11 +151,6 @@
 {% endmacro %}
 
 {# ------------------------------------------------------------------ the page #}
-<header class="hero">
-  <p class="eyebrow"><a href="../cycles.html">Runs</a> / <span class="n">{{ c.cycle_id }}</span></p>
-  <h1>Council run · {{ run.when }}</h1>
-  <p class="lede">Every agent in the order it ran: what it saw, what it said, and what happened to it.</p>
-</header>
 {% set t = tr.totals %}
 {% call m.alert("run", "terminal", "Run " ~ c.cycle_id, cv.ran_at | short_when) %}
 <p class="status-row">
@@ -200,7 +202,7 @@
   <tbody>
   {% for r in run.changed_rows %}
   <tr role="row">
-    <td role="cell"><strong>{{ r.name }}</strong>{% if r.verb %} {{ m.direction_chip(r.verb.split(" ")[0]) }}{% endif %}</td>
+    <td role="cell"><strong>{{ m.ln(r.line, "../") }}</strong>{% if r.verb %} {{ m.direction_chip(r.verb.split(" ")[0]) }}{% endif %}</td>
     {% if not cv.rehearsal %}<td role="cell" class="n" data-label="Before">{{ r.base_x | share }}</td>{% endif %}
     <td role="cell" class="n" data-label="Reference">size {{ r.ref_level | level }}<br><span class="muted">{{ r.ref_x | share }}</span></td>
     <td role="cell" class="n" data-label="Council"><strong>size {{ r.council_level | level }}</strong><br><span class="muted">{{ r.council_x | share }}</span></td>
@@ -218,7 +220,7 @@
 <p>Also traded to reach the reference: <strong>{{ run.ref_trades | map(attribute="words") | join(", ") }}</strong>. No agent asked for {{ "this order" if run.ref_trades | length == 1 else "these orders" }}: the line{{ "s were" if run.ref_trades | length != 1 else " was" }} away from {{ "their" if run.ref_trades | length != 1 else "its" }} reference weight (<a href="#a-costs">the plan</a> says why).</p>
 {% endif %}
 {% if run.steady %}
-<p class="muted">{{ run.steady | length }} line{{ "s" if run.steady | length != 1 }} stayed at the reference: {{ run.steady | map(attribute="name") | join(", ") }}.</p>
+<p class="muted">{{ run.steady | length }} line{{ "s" if run.steady | length != 1 }} stayed at the reference: {% for r in run.steady %}{{ m.ln(r.line, "../") }}{% if not loop.last %}, {% endif %}{% endfor %}.</p>
 {% endif %}
 {% if run.general_holds %}<p class="small">Risk engine notes: {% for h in run.general_holds %}<span title="{{ h.raw }}">{{ h.text }}</span>{% if not loop.last %}; {% endif %}{% endfor %}.</p>{% endif %}
 {% endcall %}
@@ -227,9 +229,9 @@
 {% set officers = tr.agents | selectattr("group", "equalto", "Code officers") | list %}
 {% if officers %}
 {% set ns.n = ns.n + 1 %}
-<section class="card agent accent-code" id="officers" aria-labelledby="officers-h">
+<section class="card agent accent-data" id="officers" aria-labelledby="officers-h">
 <header class="ahead">
-  {{ m.avatar("cpu", "code") }}
+  {{ m.avatar("cpu", "data") }}
   <div class="ahead-text">
     <h2 id="officers-h"><span class="num" aria-hidden="true">{{ ns.n }}</span><span class="h-name">Code officers</span> <span class="node-kind kind-code">CODE</span></h2>
     <p class="job">Code that reads the data, sets the reference and flags shocks and events before any model speaks. Each officer's page says what it reads.</p>
@@ -296,7 +298,7 @@
 {{ m.empty("No manager output", "The council did not run or no attempt returned a valid decision; the reference book applies.") }}
 {% endif %}
 {{ subhead("then", "What happened to it") }}
-<p>{% if b.decision %}The used attempt's decision went to the risk engine: <strong>{{ b.decision }}</strong>.{% elif b.reps %}The decision that went to the risk engine: <strong>hold the reference</strong>.{% else %}Every line fell back to the mechanical reference.{% endif %}{% if b.basis and c.basis != "council" %} Basis: {{ b.basis }}.{% endif %}</p>
+<p>{% if b.decision %}The used attempt's decision went to the risk engine: <strong>{{ m.changes_phrase(b.decision_parts, "../") }}</strong>.{% elif b.reps %}The decision that went to the risk engine: <strong>hold the reference</strong>.{% else %}Every line fell back to the mechanical reference.{% endif %}{% if b.basis and c.basis != "council" %} Basis: {{ b.basis }}.{% endif %}</p>
 {% if b.agreement %}
 <ul class="agree">{% for x in b.agreement %}<li><strong>{{ x.name }}</strong>: {{ x.words }}{% if " of " in x.words %} attempts{% else %} of attempts{% endif %} made the same call ({{ x.call }})</li>{% endfor %}</ul>
 {% if b.agreement_rest %}<p class="small muted">The other {{ b.agreement_rest }} lines: every valid attempt made the same call.</p>{% endif %}
@@ -324,7 +326,7 @@
 {{ m.wrap_open("Council and control, where they differ") }}
 <table class="cmp">
   <thead><tr><th>Line</th><th class="n">Council</th><th class="n">Control</th></tr></thead>
-  <tbody>{% for d in b.differs %}<tr><td><strong>{{ d.name }}</strong></td><td class="n">{{ d.council_w }} <span class="muted small">size {{ d.council }}</span></td><td class="n">{{ d.control_w }} <span class="muted small">size {{ d.control }}</span></td></tr>{% endfor %}</tbody>
+  <tbody>{% for d in b.differs %}<tr><td><strong>{{ m.ln(d.line, "../") }}</strong></td><td class="n">{{ d.council_w }} <span class="muted small">size {{ d.council }}</span></td><td class="n">{{ d.control_w }} <span class="muted small">size {{ d.control }}</span></td></tr>{% endfor %}</tbody>
 </table>
 </div>
 {% endif %}
@@ -346,7 +348,7 @@
   <table class="wide">
     <thead><tr><th>Line</th><th>Trend</th><th class="n">Reference</th><th class="n">Allowed sizes</th><th>Why</th></tr></thead>
     <tbody>
-    {% for r in b.bands %}<tr{% if r.clipped %} class="chosen"{% endif %}><td><strong>{{ r.name }}</strong> <span class="muted small">{{ r.ticker }}</span></td><td>{{ m.trend_chip(r.trend) }}</td><td class="n">{{ r.ref }}</td><td class="n">{{ r.range }}</td><td class="small">{{ r.reasons or "—" }}{% if r.qualifying %} · qualifying: {% for q in r.qualifying %}<a href="{{ tr.fx.href(q) }}">{{ id_label(q).label }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</td></tr>{% endfor %}
+    {% for r in b.bands %}<tr{% if r.clipped %} class="chosen"{% endif %}><td><strong>{{ m.ln(r.line, "../") }}</strong> <span class="muted small">{{ r.ticker }}</span></td><td>{{ m.trend_chip(r.trend) }}</td><td class="n">{{ r.ref }}</td><td class="n">{{ r.range }}</td><td class="small">{{ r.reasons or "—" }}{% if r.qualifying %} · qualifying: {% for q in r.qualifying %}<a href="{{ tr.fx.href(q) }}">{{ id_label(q).label }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</td></tr>{% endfor %}
     </tbody>
   </table>
   </div>
@@ -370,7 +372,7 @@
 </table>
 </div>
 {% endif %}
-{% if b.held %}<p>Held back: {% for r in b.held %}<strong>{{ r.name }}</strong> (<span title="{{ r.held_raw | join('; ') }}">{{ r.held | join("; ") }}</span>){% if not loop.last %}, {% endif %}{% endfor %}.</p>{% else %}<p>Nothing held back.</p>{% endif %}
+{% if b.held %}<p>Held back: {% for r in b.held %}<strong>{{ m.ln(r.line, "../") }}</strong> (<span title="{{ r.held_raw | join('; ') }}">{{ r.held | join("; ") }}</span>){% if not loop.last %}, {% endif %}{% endfor %}.</p>{% else %}<p>Nothing held back.</p>{% endif %}
 <dl class="facts facts-plain">
   <div><dt>Invested</dt><dd class="n">{{ run.gross | share }} <span class="muted small">{{ run.gross | x }}</span></dd></div>
   <div><dt>Net</dt><dd class="n">{{ run.net | share }} <span class="muted small">{{ run.net | x }}</span></dd></div>
@@ -410,8 +412,8 @@
   {% for x in b.legs %}{% set leg = x.leg %}
   <tr>
     <td class="n">{{ leg.seq }}</td>
-    <td>{{ leg.kind | replace("_", " ") }} {{ m.direction_chip(leg.direction) }}{% if leg.risk_increasing %} <span class="chip state-stone">adds risk</span>{% endif %}</td>
-    <td><strong>{{ leg.line | line_name }}</strong></td>
+    <td>{{ m.order(x.order) }}{% if leg.risk_increasing %} <span class="chip state-stone">adds risk</span>{% endif %}</td>
+    <td><strong>{{ m.ln(leg.line, "../") }}</strong></td>
     <td class="n" data-label="Weight">{{ leg.weight_before_x | share }} → {{ leg.weight_after_x | share }}</td>
     <td data-label="Vehicle">{{ leg.settlement or "—" }} · {{ leg.leverage }}x</td>
     <td class="n" data-label="Stop">{{ leg.stop_distance_pct | pct1 }}</td>
@@ -460,8 +462,8 @@
   {% for f in ex.fills %}
   <tr>
     <td class="n">{{ f.seq }}</td>
-    <td>{{ f.kind | replace("_", " ") }}{% if f.direction %} {{ m.direction_chip(f.direction) }}{% endif %}{% if f.leverage and f.leverage > 1 %} <span class="lev">{{ f.leverage }}x</span>{% endif %}{% if f.settlement %} <span class="muted small">{{ f.settlement }}</span>{% endif %}</td>
-    <td><strong>{{ f.line | line_name }}</strong></td>
+    <td>{% set o = costs.order_by_seq.get(f.seq) %}{% if o %}{{ m.order(o) }}{% else %}{{ f.kind | replace("_", " ") }}{% if f.direction %} {{ m.direction_chip(f.direction) }}{% endif %}{% endif %}{% if f.leverage and f.leverage > 1 %} <span class="lev">{{ f.leverage }}x</span>{% endif %}{% if f.settlement %} <span class="muted small">{{ f.settlement }}</span>{% endif %}</td>
+    <td><strong>{{ m.ln(f.line, "../") }}</strong></td>
     <td>{% if f.state == "filled" %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>{{ f.state }}</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>{{ f.state | replace("_", " ") }}</span>{% endif %}</td>
     <td class="n" data-label="Target">{{ f.weight_target_x | x }}</td>
     <td class="n" data-label="Filled">{{ f.weight_filled_x | x }}</td>
@@ -495,7 +497,7 @@
   <thead><tr><th>Fact</th><th>Line</th><th class="n">Value</th><th>Source</th><th>Available</th><th>Cited by</th></tr></thead>
   <tbody>
   {% for f in fa.cited %}
-  <tr id="{{ f.anchor }}"><td><span title="{{ f.id }}">{{ f.label }}</span></td><td{% if not f.line %} class="no-line"{% endif %}>{% if f.line %}{{ f.line }} <span class="muted small">{{ f.ticker }}</span>{% else %}—{% endif %}</td><td class="n">{% if f.value %}<strong>{{ f.value }}</strong>{% elif f.withheld %}<span class="muted small">{{ f.withheld }}</span>{% else %}<span class="muted small">id only</span>{% endif %}</td><td class="small">{{ f.source }}</td><td class="small n">{{ f.as_of or "—" }}</td><td class="small">{% for w in f.cited_by %}<a href="{{ w.href }}">{{ w.name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+  <tr id="{{ f.anchor }}"><td><span title="{{ f.id }}">{{ f.label }}</span></td><td{% if not f.line %} class="no-line"{% endif %}>{% if f.line %}{{ m.ln(f.line_id, "../", f.line) }} <span class="muted small">{{ f.ticker }}</span>{% else %}—{% endif %}</td><td class="n">{% if f.value %}<strong>{{ f.value }}</strong>{% elif f.withheld %}<span class="muted small">{{ f.withheld }}</span>{% else %}<span class="muted small">id only</span>{% endif %}</td><td class="small">{{ f.source }}</td><td class="small n">{{ f.as_of or "—" }}</td><td class="small">{% for w in f.cited_by %}<a href="{{ w.href }}">{{ w.name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -510,7 +512,7 @@
   <table class="wide facts-table rt rt-facts">
     <thead><tr><th>Fact</th><th>Line</th><th class="n">Value</th><th>Source</th><th>Available</th></tr></thead>
     <tbody>
-    {% for f in rows %}<tr id="{{ f.anchor }}"><td><span title="{{ f.id }}">{{ f.label }}</span></td><td{% if not f.line %} class="no-line"{% endif %}>{% if f.line %}{{ f.line }}{% else %}—{% endif %}</td><td class="n">{% if f.value %}{{ f.value }}{% elif f.withheld %}<span class="muted small">{{ f.withheld }}</span>{% else %}<span class="muted small">id only</span>{% endif %}</td><td class="small">{{ f.source }}</td><td class="small n">{{ f.as_of or "—" }}</td></tr>{% endfor %}
+    {% for f in rows %}<tr id="{{ f.anchor }}"><td><span title="{{ f.id }}">{{ f.label }}</span></td><td{% if not f.line %} class="no-line"{% endif %}>{% if f.line %}{{ m.ln(f.line_id, "../", f.line) }}{% else %}—{% endif %}</td><td class="n">{% if f.value %}{{ f.value }}{% elif f.withheld %}<span class="muted small">{{ f.withheld }}</span>{% else %}<span class="muted small">id only</span>{% endif %}</td><td class="small">{{ f.source }}</td><td class="small n">{{ f.as_of or "—" }}</td></tr>{% endfor %}
     </tbody>
   </table>
   </div>

@@ -1,34 +1,37 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
 {% block title %}Portfolio{% endblock %}
-{# the holdings strip carries the account state, so the top bar does not repeat it #}
-{% block status_chip %}{% if not holdings or not holdings.strip %}{{ super() }}{% endif %}{% endblock %}
-{% block toc %}
-{{ m.toc_item("holdings", "Holdings", "long") }}
-{{ m.toc_item("latest", "Latest council run", "pm") }}
-{{ m.toc_item("recent", "Recent runs", "proposed") }}
-{{ m.toc_item("performance", "Performance vs controls", "code") }}
-{% endblock %}
+{# the book's header carries the account state, so the top bar does not repeat it #}
+{% block status_chip %}{% endblock %}
+{% block layout %}layout layout-home{% endblock %}
+{% block toc_nav %}{% endblock %}
 {% block main %}
 {% set h = holdings %}
-{% macro kill_tile(st, cls="") %}
-{% set mt = st.meter %}
-<div class="st st-kill{% if cls %} {{ cls }}{% endif %}"><dt>{{ icon("shield-check") }}Kill switch</dt><dd><span class="chip chip-lg state-{{ st.kill.css }}"><span aria-hidden="true">{{ "✓ " if st.kill.label == "NORMAL" else "! " }}</span>{{ st.kill.label | lower }}</span></dd>
-  <dd class="st-sub">fall from peak <strong>{{ mt.value }}</strong>{% if mt.state == "none" %} ({{ mt.sub }}){% endif %} · no new risk at {{ mt.warn_label }} · stop at {{ mt.halt_label }}</dd>
-  <dd class="meter" role="img" aria-label="{{ mt.aria }}; no new risk at {{ mt.warn_label }}, stop at {{ mt.halt_label }}"><span class="meter-fill meter-{{ mt.state }} {{ mt.fill }}"></span><span class="meter-tick {{ mt.warn_at }}"></span></dd>
-</div>
-{% endmacro %}
-<header class="hero hero-compact">
-  <p class="eyebrow">Portfolio</p>
-  <h1>What the council holds</h1>
-  <p class="lede">A council of language models reviews this portfolio every four hours. Code enforces every limit, and a person approves every order.{% if status.last_when %} <span class="lastrun">Last run {{ status.last_when }}{% if status.last_late %} ({{ status.last_late }}){% endif %} · page built {{ status.built_clock }}</span>{% endif %}</p>
+{% set st = h.strip %}
+
+{# ================================================================== THE BOOK #}
+{% set n_seats = roster | sum(attribute="members", start=[]) | length %}
+<section class="book" id="holdings" aria-labelledby="holdings-h">
+<header class="book-head">
+  <div class="book-title">
+    <p class="eyebrow">{% if st %}<span class="chip state-{{ 'executed' if not h.target else 'rehearsal' }}">{{ "LIVE BOOK" if not h.target else "TARGET" }}</span>{% if st.account.label != "LIVE" %} <span class="chip state-{{ st.account.css }}">{{ st.account.label }}</span>{% endif %}{% else %}<span class="chip state-{{ status.css }}">{{ status.label }}</span>{% endif %}{% if status.last_when %}<span class="lastrun">Last run {{ status.last_when }}{% if status.last_late %} ({{ status.last_late }}){% endif %} · page built {{ status.built_clock }}</span>{% endif %}</p>
+    <h1 id="holdings-h">The book</h1>
+    <p class="lede">What the council holds, as shares of the portfolio. Each tile is one line, sized by its weight; open a tile or a row for everything the agents said and did about it.</p>
+  </div>
+  <aside class="teaser" aria-labelledby="teaser-h">
+    <div class="teaser-chamber">{{ m.hemicycle(teaser_seats, "", "hemi-teaser") }}</div>
+    {{ m.seat_row(seats) }}
+    <div class="teaser-text">
+      <h2 class="teaser-h" id="teaser-h">Who decides</h2>
+      <p class="teaser-t">{{ n_seats }} seats: code reads the market and sets a reference; two analysts bring evidence; a bull and a bear argue; the manager may move up to {{ max_deviations }} lines; code checks; a person approves every trade.</p>
+      <p class="teaser-go"><a href="#council">Meet the council ↓</a></p>
+    </div>
+  </aside>
 </header>
 
 {% if latest and latest.rehearsal %}
-{{ m.rehearsal_banner("The table shows the weights the council would hold; nothing has been traded.") }}
+{{ m.rehearsal_banner("The map and the list show the weights the council would hold; nothing has been traded.") }}
 {% endif %}
-
-{% call m.section("holdings", 1, "Holdings", "long") %}
 {% if pending %}
 {% call m.alert("pending", "lock", plural(pending | length, "proposal") ~ " awaiting the operator", pending[0].slot | short_when) %}
 <p>Sealed, revealed after the decision: a proposal's content stays private until the operator approves or rejects it.</p>
@@ -38,31 +41,96 @@
 {% if executing %}
 {% call m.alert("run", "rocket", plural(executing | length, "proposal") ~ " approved, executing") %}<p>Revealed once the execution is final.</p>{% endcall %}
 {% endif %}
-{% set st = h.strip %}
-{% if st %}
-<dl class="strip strip-home{% if h.show_pnl %} with-pnl{% endif %}{% if not st.day_known %} no-day{% endif %}">
-  <div class="st st-acct"><dt>{{ icon("wallet") }}Account</dt><dd><span class="chip chip-lg state-{{ st.account.css }}">{{ st.account.label }}</span></dd><dd class="st-sub">{{ st.account.sub }}</dd></div>
-  <div class="st st-gross"><dt>{{ icon("chart-line") }}Gross{% if h.target %} · target{% endif %}</dt><dd class="st-v">{{ st.gross }}</dd><dd class="st-sub">{{ st.gross_share }} of the portfolio invested</dd></div>
-  <div class="st st-net"><dt>{{ icon("scale") }}Net{% if h.target %} · target{% endif %}</dt><dd class="st-v">{{ st.net }}</dd><dd class="st-sub">{{ "all long" if st.all_long else "long minus short" }}</dd></div>
-  <div class="st st-cash"><dt>{{ icon("circle-dot") }}Cash{% if h.target %} · target{% endif %}</dt><dd class="st-v">{{ st.cash }}</dd><dd class="st-sub">not invested</dd></div>
-  <div class="st st-count"><dt>{{ icon("list-checks") }}Holdings</dt><dd class="st-v">{{ st.held }} <span class="st-of">of {{ st.lines }}</span></dd><dd class="st-sub">lines with a position</dd></div>
-  {% if h.show_pnl %}<div class="st st-pnl"><dt>{{ icon("wallet") }}Open P/L</dt><dd class="st-v">{% if st.pnl_known %}{{ m.move(st.pnl, st.pnl_dir) }}{% else %}—{% endif %}</dd><dd class="st-sub">{% if st.pnl_known %}since open, % of the amount invested{% else %}no P/L published{% endif %}</dd></div>{% endif %}
-  {% if st.day_known %}<div class="st st-day"><dt>{{ icon("activity") }}{{ st.day_label }}</dt><dd class="st-v">{% if st.day_known %}{{ m.move(st.day, st.day_dir) }}{% else %}—{% endif %}</dd><dd class="st-sub">{{ st.day_sub }}</dd></div>{% endif %}
-  {{ kill_tile(st) }}
-</dl>
 
-<p class="basis">{% if h.target %}<span class="chip state-rehearsal">TARGET</span> <strong>{{ h.label }}.</strong><span class="basis-more"> The weights the latest run{% if h.run_id %} (<a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>){% endif %} would hold; no P/L exists until something is traded. Weights are % of the portfolio's value; the tick on each bar marks the mechanical reference.</span>{% else %}<span class="chip state-executed">LIVE BOOK</span> Positions after the run of <a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>.<span class="basis-more"> Lagged until that run is revealed. P/L is the book's own, in % of the amount invested. Weights are % of the portfolio's value; the tick on each bar marks the mechanical reference.</span>{% endif %}</p>
+{% if bmap %}
+<figure class="bmap-fig">
+  {# "Colour by": radio inputs and CSS, no script. The inputs come first so that ":checked ~"
+     reaches the options, the legend and the map. #}
+  {% for md in bmap.modes %}<input class="cb-in" type="radio" name="cb" id="cb-{{ md.key }}" value="{{ md.key }}"{% if md.key == bmap.default %} checked{% endif %}>
+  {% endfor %}
+  <div class="cb-head">
+    <p class="cb-title" id="cb-label">Colour by</p>
+    <div class="cb-opts" role="group" aria-labelledby="cb-label">
+      {% for md in bmap.modes %}<label class="cb-opt" for="cb-{{ md.key }}"><span class="sr">Colour the map by </span>{{ md.label }}</label>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="cbk">
+    {% for mode in ("day", "pnl") if mode == "day" or bmap.has_pnl %}
+    <div class="cbk-mode cbk-{{ mode }}">
+      <p class="cbk-note">{% if mode == "day" %}Colour = each instrument's own market move over its last completed day. For a short, an up move is a loss.{% else %}Colour = each position's own P/L since it opened, in % of the amount invested. A short that gains is teal.{% endif %}</p>
+      <div class="cbk-row">
+        {% if not bmap.empty[mode] %}<ol class="cbk-scale" aria-label="{{ '1-day move, from the biggest fall to the biggest rise' if mode == 'day' else 'P/L since open, from the biggest loss to the biggest gain' }}">
+          {% for b in bmap.legend[mode] %}<li class="cbk-b b{{ mode[0] }}-{{ b.key }}" title="{{ b.text }}"><span class="cbk-sw" aria-hidden="true"></span><span class="sr">{{ b.text }}</span>{% if b.tick %}<span class="cbk-t{% if b.mid %} cbk-t-mid{% endif %}" aria-hidden="true">{{ b.tick }}</span>{% endif %}</li>{% endfor %}
+        </ol>{% endif %}
+        {% if bmap.empty[mode] %}<p class="cbk-empty">{{ "No daily move is published for these lines yet, so every tile is an empty frame." if mode == "day" else "No P/L is published for these lines yet, so every tile is an empty frame." }}</p>
+        {% elif bmap.nodata[mode] %}<span class="cbk-nd"><span class="cbk-sw cbk-sw-nd" aria-hidden="true"></span>{{ "no daily move" if mode == "day" else "no P/L" }}</span>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+    <div class="cbk-mode cbk-class">
+      <p class="cbk-note">Colour = asset class, which the boxes and their names also show.</p>
+      <ul class="cbk-classes">
+        {% for c in bmap.classes %}<li class="cbk-c bc-{{ c.key }}"><span class="cbk-sq" aria-hidden="true"></span>{{ c.label }}</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+  <ul class="bmap" aria-label="Map of the book: one box per asset class, one tile per line held, sized by its share of the portfolio">
+  {% for g in bmap.groups %}
+    <li class="tgrp {{ g.cls }} bc-{{ g.key }}{% if g.head %} has-head{% endif %}{% if g.cash %} tgrp-cash{% endif %}">
+      {% if g.head %}<p class="tgrp-h" title="{{ g.title }}"><span class="tgrp-name">{{ g.label }}</span> <span class="tgrp-w">{{ g.share }}</span></p>{% endif %}
+      <ul class="tgrp-tiles" aria-label="{{ g.title }}">
+      {% for t in g.tiles %}
+        <li class="tm {{ t.cls }}{% if not t.cash %} bd-{{ t.bd }}{% if bmap.has_pnl %} bp-{{ t.bp }}{% endif %}{% endif %}{% if t.dw %} dw{% endif %}{% if t.pw %} pw{% endif %}{% if t.short %} short{% endif %}{% if t.cash %} cash{% endif %}">
+          {% if t.page %}<a class="tm-in" href="{{ t.page }}" title="{{ t.title }}">{% else %}<span class="tm-in" title="{{ t.title }}">{% endif %}
+            <span class="tm-t">{{ t.ticker }}</span>
+            <span class="tm-n">{{ t.name }}</span>
+            <span class="tm-foot">{% if t.short %}<span class="tm-s">short</span>{% endif %}<span class="tm-w">{{ t.weight }}</span>{% if not t.cash %}<span class="tm-d"><span class="tm-dv tm-dv-day"><span class="tm-dk">1d</span>{{ m.move(t.day, t.day_dir) }}</span>{% if bmap.has_pnl %}<span class="tm-dv tm-dv-pnl"><span class="tm-dk">P/L</span>{{ m.move(t.pnl, t.pnl_dir) }}</span>{% endif %}<span class="tm-dv tm-dv-class">{{ t.cls_word }}</span></span>{% endif %}</span>
+            {% if t.moved %}<span class="tm-c">{{ m.seat("pm") }}<span class="tm-c-t">council · {{ t.moved }}</span></span>{% endif %}
+          {% if t.page %}</a>{% else %}</span>{% endif %}
+        </li>
+      {% endfor %}
+      </ul>
+    </li>
+  {% endfor %}
+  </ul>
+  <figcaption class="bmap-key">
+    <span class="key-item">Size = share of the portfolio{% if h.target %} (target){% endif %}; boxes group the lines by asset class</span>
+    {% if bmap.shorts %}<span class="key-item"><span class="key-sw key-short" aria-hidden="true"></span>coral edge, “short” and a minus sign = a short</span>{% endif %}
+    {% if bmap.moved %}<span class="key-item">{{ m.seat("pm") }}the portfolio manager moved it away from the reference</span>{% endif %}
+    {% if bmap.cash %}<span class="key-item"><span class="key-sw ac-cash" aria-hidden="true"></span>cash</span>{% endif %}
+    <span class="key-item key-note">Small tiles show less; every line is in the list below.</span>
+  </figcaption>
+</figure>
+{% elif not st %}
+{% call m.alert("pending", "hourglass", "Nothing held yet") %}<p>No broker account is connected and the council has not run. After the first run, the map shows each line's weight; until then, the lines it will hold are listed below.</p>{% endcall %}
 {% else %}
-{% call m.alert("pending", "hourglass", "Nothing held yet") %}<p>No broker account is connected and the council has not run. After the first run, each line's weight appears here.</p>{% endcall %}
+<p class="hf-none">Nothing is held{% if h.target %} in the target{% endif %}.</p>
+{% endif %}
+
+{% if st %}
+<p class="basis">{% if h.target %}<strong>{{ h.label }}.</strong><span class="basis-more"> The weights the latest run{% if h.run_id %} (<a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>){% endif %} would hold; no P/L exists until something is traded.</span>{% else %}Positions after the run of <a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>.<span class="basis-more"> Lagged until that run is revealed; P/L is the book's own, in % of the amount invested.</span>{% endif %}</p>
+{% set mt = st.meter %}
+<dl class="ledger lg-n{{ 4 + (1 if st.day_known else 0) + (1 if h.show_pnl else 0) }}">
+  <div class="lg lg-inv"><dt>Invested{% if h.target %} · target{% endif %}</dt><dd class="lg-v">{{ st.gross_share }}</dd><dd class="lg-s">gross {{ st.gross }} · net {{ st.net_share }}{% if st.all_long %}, all long{% endif %}</dd></div>
+  <div class="lg lg-cash"><dt>Cash{% if h.target %} · target{% endif %}</dt><dd class="lg-v">{{ st.cash }}</dd><dd class="lg-s">not invested</dd></div>
+  <div class="lg lg-count"><dt>Lines held</dt><dd class="lg-v">{{ st.held }}<span class="lg-of"> of {{ st.lines }}</span></dd><dd class="lg-s">with a position</dd></div>
+  {% if st.day_known %}<div class="lg lg-day"><dt>{{ st.day_label }}</dt><dd class="lg-v">{{ m.move(st.day, st.day_dir) }}</dd><dd class="lg-s">{{ st.day_sub }}</dd></div>{% endif %}
+  {% if h.show_pnl %}<div class="lg lg-pnl"><dt>Open P/L</dt><dd class="lg-v">{% if st.pnl_known %}{{ m.move(st.pnl, st.pnl_dir) }}{% else %}—{% endif %}</dd><dd class="lg-s">{% if st.pnl_known %}since open, % of the amount invested{% else %}no P/L published{% endif %}</dd></div>{% endif %}
+  <div class="lg lg-kill"><dt>Kill switch</dt><dd class="lg-v lg-v-sm"><span class="kill-state kill-{{ st.kill.css }}"><span aria-hidden="true">{{ "✓ " if st.kill.label == "NORMAL" else "! " }}</span>{{ st.kill.label | lower }}</span></dd>
+    <dd class="lg-s">fall from peak <strong>{{ mt.value }}</strong>{% if mt.state == "none" %} ({{ mt.sub }}){% endif %}</dd>
+    <dd class="meter" role="img" aria-label="{{ mt.aria }}; no new risk at {{ mt.warn_label }}, stop at {{ mt.halt_label }}"><span class="meter-fill meter-{{ mt.state }} {{ mt.fill }}"></span><span class="meter-tick {{ mt.warn_at }}"></span></dd>
+    <dd class="lg-s">no new risk at {{ mt.warn_label }} · stop at {{ mt.halt_label }}</dd></div>
+</dl>
 {% endif %}
 
 <div class="hx{% if not h.show_pnl %} no-pnl{% endif %}{% if not h.show_day %} no-day{% endif %}">
   {% for f in h.filters %}<input class="hf-in" type="radio" name="hf" id="hf-{{ f.key }}" value="{{ f.key }}"{% if loop.first %} checked{% endif %}>
   {% endfor %}
   <div class="hx-head">
-    <p class="hx-title" id="hf-label">Filter by asset class</p>
+    <p class="hx-title" id="hf-label">The list · filter by asset class</p>
     <div class="hf-chips" role="group" aria-labelledby="hf-label">
-      {% for f in h.filters %}<label class="hf-chip" for="hf-{{ f.key }}">{% if f.key != "all" %}<span class="ac-dot ac-{{ f.key }}" aria-hidden="true"></span>{% endif %}{{ f.label }} <span class="hf-n">{{ f.total }}</span></label>
+      {% for f in h.filters %}<label class="hf-chip" for="hf-{{ f.key }}">{{ f.label }} <span class="hf-n">{{ f.total }}</span></label>
       {% endfor %}
     </div>
   </div>
@@ -93,98 +161,122 @@
     {% endif %}
   </div>
 </div>
-{% if st %}
-<ul class="legend small">
-  <li><span class="swatch sw-long"></span>long</li>
-  <li><span class="swatch sw-short"></span>short</li>
-  <li><span class="swatch sw-ref"></span>mechanical reference: {{ reference_gloss }}</li>
-  <li>bars run 0–{{ h.scale }} of the portfolio</li>
-</ul>
-<dl class="strip strip-kill-phone">{{ kill_tile(st, "kill-phone") }}</dl>
-{% endif %}
-<p class="small muted">{% if h.show_day %}1 day: the line's last completed daily move, from Tiingo or Binance history. {% endif %}Sessions: 24/7 crypto · 24/5 indices, commodities and currencies · US hours for stocks and US funds · LSE hours for lines held through London-listed funds. Tiles are plain monograms, not logos.</p>
-{% endcall %}
-
-{% call m.section("latest", 2, "Latest council run", "pm") %}
-{% if latest %}
-{% call m.alert("run", "terminal", "Run of " ~ run.when, latest.ran_at | short_when if latest.doc.late_by_min else "") %}
-<p class="status-row">{{ m.chip(latest.mode_chip) }} {{ m.chip(latest.chip) }}{% if tr_latest.failed_calls %} <a class="chip state-warn" href="cycles/{{ latest.doc.cycle_id }}.html#calls">{{ plural(tr_latest.failed_calls, "call") }} failed</a>{% endif %}</p>
-<p>{{ run.headline }}</p>
-{% endcall %}
-{{ m.story(run.summary) }}
-{{ m.flow(run.nodes, "The latest run, step by step", href="cycles/" ~ latest.doc.cycle_id ~ ".html") }}
-{{ m.flow_key(run.nodes, linked=true) }}
-{{ m.control_strip(run.control) }}
-<p><a class="cta" href="cycles/{{ latest.doc.cycle_id }}.html">Open the full run, agent by agent {{ icon("chevron-right") }}</a></p>
-{% else %}
-<p>No run yet. When the council first meets, this diagram fills in with what each step did.</p>
-{{ m.flow(flow_empty, "The steps of a run") }}
-{{ m.flow_key(flow_empty) }}
-<p class="small"><a href="how.html">How it works →</a></p>
-{% endif %}
-{% endcall %}
-
-{% call m.section("recent", 3, "Recent runs", "proposed") %}
-{% if recent %}
-{{ m.wrap_open("Recent runs") }}
-<table class="wide stack runs" role="table">
-  <thead><tr role="row"><th role="columnheader">When</th><th role="columnheader">Mode</th><th role="columnheader">What changed</th><th role="columnheader">Agents</th><th role="columnheader">Decision</th></tr></thead>
-  <tbody>
-  {% for cv, r, tr in recent %}
-  <tr role="row">
-    <td role="cell" class="when"><a href="cycles/{{ cv.doc.cycle_id }}.html">{{ cv.doc.slot | when }}</a></td>
-    <td role="cell" data-label="Mode">{{ m.chip(cv.mode_chip) }}</td>
-    <td role="cell" class="text push" data-label="What changed">{{ r.change_words }}</td>
-    <td role="cell" data-label="Agents">{{ m.agent_strip(tr, "cycles/" ~ cv.doc.cycle_id ~ ".html") }}</td>
-    <td role="cell" data-label="Decision">{{ m.chip(cv.chip) }}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
-<p><a href="cycles.html">All runs →</a> · <a href="agents/index.html">Every agent's record →</a></p>
-{% else %}
-{{ m.empty("No runs yet", "The first run will appear here, with what changed and what was decided.") }}
-{% endif %}
-{% endcall %}
-
-{% call m.section("performance", 4, "Performance vs controls", "code") %}
-{% if chart %}
-<figure class="chart">
-  <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img" aria-label="Index of the book and its controls, base 100 at the start">
-    {% for g in chart.grid %}
-    <line class="{{ 'chart-base' if g.base else 'chart-grid' }}" x1="{{ chart.x0 }}" x2="{{ chart.x1 }}" y1="{{ g.y }}" y2="{{ g.y }}"></line>
-    <text class="chart-tick" x="{{ chart.x0 - 6 }}" y="{{ g.y }}" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>
-    {% endfor %}
-    {% for s in chart.series %}
-    <polyline class="series series-{{ s.css }}" points="{{ s.points }}"><title>{{ s.label }}: {{ "%.1f" | format(s.last) }}</title></polyline>
-    <text class="series-end" x="{{ s.end_x }}" y="{{ s.label_y }}" dominant-baseline="middle">{{ s.short }} {{ "%.1f" | format(s.last) }}</text>
-    {% endfor %}
-  </svg>
-  <figcaption class="small">Index, base 100 at the start ({{ chart.first }} to {{ chart.last }}). The brighter horizontal line is 100.</figcaption>
-</figure>
-<ul class="legend">
-{% for s in chart.series %}<li><span class="swatch sw-line sw-{{ s.css }}"></span>{{ s.label }} <span class="n">{{ "%.1f" | format(s.last) }}</span></li>{% endfor %}
-</ul>
-<details class="more">
-  <summary>Show as table</summary>
-  {{ m.wrap_open("Performance by day (scrolls sideways)") }}
-  <table class="wide">
-    <thead><tr><th>Day</th>{% for key, label, css, short, what in controls %}<th class="n">{{ label }}</th>{% endfor %}<th class="n">Fall from peak</th></tr></thead>
-    <tbody>
-    {% for p in points %}
-    <tr><td class="n">{{ p.as_of | day }}</td>{% for key, label, css, short, what in controls %}<td class="n">{% set v = p[key] %}{{ "%.1f" | format(v) if v is not none else "—" }}</td>{% endfor %}<td class="n">{{ p.drawdown_pct | pct }}</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
+<details class="more read-list">
+  <summary>How to read the list</summary>
+  {% if st %}
+  <ul class="legend small">
+    <li><span class="swatch sw-long"></span>long</li>
+    {% if bmap and bmap.shorts %}<li><span class="swatch sw-short"></span>short</li>{% endif %}
+    <li><span class="swatch sw-ref"></span>tick = the mechanical reference: {{ reference_gloss }}</li>
+    <li>bars run 0–{{ h.scale }} of the portfolio</li>
+  </ul>
+  {% endif %}
+  <p class="small muted">{% if h.show_day %}1 day: the line's last completed daily move, from Tiingo or Binance history. {% endif %}Sessions: 24/7 crypto · 24/5 indices, commodities and currencies · US hours for stocks and US funds · LSE hours for lines held through London-listed funds. Tiles are plain monograms, not logos.</p>
 </details>
-<dl class="defs">
-  {% for key, label, css, short, what in controls %}<dt><span class="swatch sw-line sw-{{ css }}"></span>{{ label }}</dt><dd>{{ what }}</dd>{% endfor %}
-</dl>
-<p class="small muted">Descriptive only. Differences over months are mostly noise; see <a href="how.html#never">what this can never prove</a>.</p>
-{% else %}
-{{ m.empty("No performance data yet", "The index starts with the first executed run. Rehearsal runs never count: nothing was traded.") }}
-{% endif %}
-{% endcall %}
+</section>
+
+{# ================================================================== THE COUNCIL #}
+<section class="council" id="council" aria-labelledby="council-h">
+<div class="council-head">
+  <p class="eyebrow council-eyebrow">Who decides</p>
+  <h2 id="council-h">The council</h2>
+  <p class="council-lede">Every four hours, {{ n_seats }} seats take turns on the book. Code reads the market and sets a <strong>reference book</strong>: what the rules alone would hold. Two language-model analysts turn news and macro data into evidence. A <strong>bull</strong> and a <strong>bear</strong> argue, claim by claim. The <strong>portfolio manager</strong> may move at most {{ max_deviations }} lines away from the reference, inside ranges code sets. Code then audits the decision, checks every risk limit and prices the orders, and <strong>a person approves every trade</strong>.</p>
+  <p class="council-key small"><span class="node-kind kind-code">CODE</span> fixed rules · <span class="node-kind kind-llm">LLM</span> a language model · <span class="node-kind kind-human">HUMAN</span> a person. Each seat keeps its number and colour on every page.{% if latest %} “Latest” is what it said or did in the <a href="cycles/{{ latest.doc.cycle_id }}.html">run of {{ latest.doc.slot | short_when }}</a>.{% endif %}</p>
+</div>
+<ol class="phases">
+{% for ph in roster %}
+  <li class="phase" id="phase-{{ ph.key }}">
+    <div class="phase-head"><span class="phase-n" aria-hidden="true">{{ ph.n }}</span><div><h3 class="phase-title">{{ ph.title }}</h3><p class="phase-what">{{ ph.what }}</p></div></div>
+    <ul class="cast">
+    {% for a in ph.members %}
+      <li class="agent-card accent-{{ a.slug }}">
+        <a class="ac-link" href="{{ a.page }}">
+          <span class="ac-n" aria-hidden="true">{{ "%02d" | format(a.seat) }}</span>
+          <span class="ac-body">
+            <span class="ac-top"><span class="ac-name"><span class="sr">Seat {{ a.seat }}: </span>{{ a.name }}</span><span class="ac-kind">{{ icon(a.icon, "ac-icon") }}<span class="node-kind kind-{{ a.kind | lower }}">{{ a.kind }}</span></span></span>
+            <span class="ac-latest"><span class="ac-label">Latest</span><span class="ac-verdict">{{ a.verdict }}</span></span>
+            <span class="ac-job">{{ a.short }}</span>
+            {% if a.mark %}<span class="ac-mark">{{ m.mark(a.mark) }}</span>{% endif %}
+          </span>
+        </a>
+      </li>
+    {% endfor %}
+    </ul>
+  </li>
+{% endfor %}
+</ol>
+</section>
+
+{# ================================================================== LOWER: runs and performance #}
+<div class="lower">
+<section class="low-card" id="latest" aria-labelledby="latest-h">
+  <h2 id="latest-h" class="low-h">Latest run</h2>
+  {% if latest %}
+  <p class="status-row">{{ m.chip(latest.mode_chip) }} {{ m.chip(latest.chip) }}{% if tr_latest.failed_calls %} <a class="chip state-warn" href="cycles/{{ latest.doc.cycle_id }}.html#calls">{{ plural(tr_latest.failed_calls, "call") }} failed</a>{% endif %}</p>
+  <p class="low-lead">{{ run.headline }}</p>
+  {{ m.chain(run.chain, "cycles/" ~ latest.doc.cycle_id ~ ".html", "") }}
+  <p><a class="cta" href="cycles/{{ latest.doc.cycle_id }}.html">Open the full run, agent by agent {{ icon("chevron-right") }}</a></p>
+  {% else %}
+  <p>No run yet. When the council first meets, its full transcript appears here, agent by agent.</p>
+  <p class="small"><a href="how.html">How it works →</a></p>
+  {% endif %}
+</section>
+
+<section class="low-card" id="recent" aria-labelledby="recent-h">
+  <h2 id="recent-h" class="low-h">Recent runs</h2>
+  {% if recent %}
+  <ol class="runlist">
+  {% for cv, r, tr in recent %}
+    <li><a class="rl-when" href="cycles/{{ cv.doc.cycle_id }}.html">{{ cv.doc.slot | when }}</a> <span class="rl-chips">{{ m.chip(cv.mode_chip) }} {{ m.chip(cv.chip) }}</span><span class="rl-what" data-label="What changed">{{ r.change_words }}</span>{{ m.agent_strip(tr, "cycles/" ~ cv.doc.cycle_id ~ ".html") }}</li>
+  {% endfor %}
+  </ol>
+  <p class="small"><a href="cycles.html">All runs →</a> · <a href="agents/index.html">Every agent's record →</a></p>
+  {% else %}
+  {{ m.empty("No runs yet", "The first run will appear here, with what changed and what was decided.") }}
+  {% endif %}
+</section>
+
+<section class="low-card low-wide" id="performance" aria-labelledby="performance-h">
+  <h2 id="performance-h" class="low-h">Performance vs controls</h2>
+  {% if chart %}
+  <figure class="chart">
+    {% for ch, cls in ((chart, "chart-wide"), (chart_narrow, "chart-narrow")) %}
+    <svg class="{{ cls }}" viewBox="0 0 {{ ch.width }} {{ ch.height }}" role="img" aria-label="Index of the book and its controls, base 100 at the start">
+      {% for g in ch.grid %}
+      <line class="{{ 'chart-base' if g.base else 'chart-grid' }}" x1="{{ ch.x0 }}" x2="{{ ch.x1 }}" y1="{{ g.y }}" y2="{{ g.y }}"></line>
+      <text class="chart-tick" x="{{ ch.x0 - 6 }}" y="{{ g.y }}" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>
+      {% endfor %}
+      {% for s in ch.series %}
+      <polyline class="series series-{{ s.css }}" points="{{ s.points }}"><title>{{ s.label }}: {{ "%.1f" | format(s.last) }}</title></polyline>
+      {% if ch.labels %}<text class="series-end" x="{{ s.end_x }}" y="{{ s.label_y }}" dominant-baseline="middle">{{ s.short }} {{ "%.1f" | format(s.last) }}</text>{% endif %}
+      {% endfor %}
+    </svg>
+    {% endfor %}
+    <figcaption class="small">Index, base 100 at the start ({{ chart.first }} to {{ chart.last }}). The brighter horizontal line is 100.</figcaption>
+  </figure>
+  <ul class="legend">
+  {% for s in chart.series %}<li><span class="swatch sw-line sw-{{ s.css }}"></span>{{ s.label }} <span class="n">{{ "%.1f" | format(s.last) }}</span></li>{% endfor %}
+  </ul>
+  <details class="more">
+    <summary>Show as table</summary>
+    {{ m.wrap_open("Performance by day (scrolls sideways)") }}
+    <table class="wide">
+      <thead><tr><th>Day</th>{% for key, label, css, short, what in controls %}<th class="n">{{ label }}</th>{% endfor %}<th class="n">Fall from peak</th></tr></thead>
+      <tbody>
+      {% for p in points %}
+      <tr><td class="n">{{ p.as_of | day }}</td>{% for key, label, css, short, what in controls %}<td class="n">{% set v = p[key] %}{{ "%.1f" | format(v) if v is not none else "—" }}</td>{% endfor %}<td class="n">{{ p.drawdown_pct | pct }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
+  <dl class="defs">
+    {% for key, label, css, short, what in controls %}<dt><span class="swatch sw-line sw-{{ css }}"></span>{{ label }}</dt><dd>{{ what }}</dd>{% endfor %}
+  </dl>
+  <p class="small muted">Descriptive only. Differences over months are mostly noise; see <a href="how.html#never">what this can never prove</a>.</p>
+  {% else %}
+  {{ m.empty("No performance data yet", "The index starts with the first executed run. Rehearsal runs never count: nothing was traded.") }}
+  {% endif %}
+</section>
+</div>
 {% endblock %}
