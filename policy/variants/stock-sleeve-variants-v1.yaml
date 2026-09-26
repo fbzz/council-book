@@ -1,0 +1,216 @@
+# PRE-REGISTERED before any result (tag stock-sleeve-spec, pushed to origin before the run). Stock-sleeve
+# study: the full text is docs/stock-sleeve-spec.md; this file holds every number
+# scripts/stock_sleeve_study.py reads. Editing this file, the spec, the study script or a rule module
+# (RULE_MODULES in the script: src/council/stocks/pit.py, src/council/stocks/score.py,
+# src/council/stocks/sectors.py and src/council/reference/sleeve.py, the code live trading runs) after
+# the tag voids the study. The script refuses to run on real data when any of them, or the code, policy
+# and lock files the numbers depend on (FROZEN_DEPENDENCIES in the script), differ from the tagged
+# versions; when HEAD is not the tagged commit or any tracked file differs from its tagged blob; when
+# the tag is not on origin; when the `council` package is imported from another checkout (the run
+# executes from a clean worktree at the tag); when the input bundle differs from `frozen_inputs` (whose
+# code_sha256 covers the study script and the rule modules); when COUNCIL_STATE_DIR is set; or when a
+# real run holds results/LOCK or has already reached its gate (gate.json or result.json).
+#
+# SELECTION RULE (frozen): among the four SELECTABLE cells (SC and SQ x N in {8, 10}; GC is a reported
+#   control), stand-alone sleeve, no overlay, base costs, full window: the highest net Sharpe; Sharpes
+#   within 0.05 of the best tie, broken by the lower total cost drag (variable + fixed, % of the sleeve a year).
+# OVERLAY RULE (frozen): an option qualifies when the re-based whole book with the selected cell stays
+#   shallower than -25% in sample at base costs AND at doubled costs AND in each proxy stress window;
+#   among qualifying options the highest CAGR; CAGRs within 0.25 pp tie, broken by the higher Sharpe,
+#   then by the fewest legs. If none qualifies, the shallowest worst drawdown is reported and B1 fails.
+# ADOPTION GATE (frozen): G1, G2, G3, B1 and B2 must all pass. Otherwise nothing changes in policy/: the
+#   numbers and the options are reported and the user decides.
+version: 1
+study: stock-sleeve
+spec_doc: docs/stock-sleeve-spec.md
+tag: stock-sleeve-spec
+remote: origin                            # `run` checks that the tag is on this remote and unchanged
+
+data:
+  lab_root_env: COUNCIL_LAB_ROOT          # the private lab working copy; default ~/Desktop/trading
+  membership:                             # index_constitution 1.0.0 (MIT code, data from Wikipedia)
+    sp500: spikes/001-timesfm-finance/.venv/lib/python3.11/site-packages/index_constitution/_data/history/sp500.pkl
+    nasdaq100: spikes/001-timesfm-finance/.venv/lib/python3.11/site-packages/index_constitution/_data/history/nasdaq100.pkl
+  membership_events: spikes/001-timesfm-finance/.venv/lib/python3.11/site-packages/index_constitution/_data/event/us.pkl  # ticker changes
+  identity:                               # finetune data contract (CIK-keyed identities)
+    symbol_intervals: finetune/data/processed/contract/symbol_intervals.parquet
+    issuer_intervals: finetune/data/processed/contract/issuer_intervals.parquet   # incl. predecessor CIKs
+    securities: finetune/data/processed/contract/securities.parquet
+    issuers: finetune/data/processed/contract/issuers.parquet   # SEC SIC code per issuer
+  prices: finetune/data/processed/contract/bars_daily.parquet   # Alpaca SIP daily OHLC; adj_close = adjustment=all
+  companyfacts: finetune/data/raw/sec/bulk/companyfacts.zip     # SEC XBRL bulk (public domain)
+  ff12_definition: finetune/data/raw/french/Siccodes12.zip      # Ken French library; the table is embedded in src/council/stocks/sectors.py and checked against it
+  ai_sensitivity:                         # hindsight list, sensitivity only (never selection or gate)
+    universe: stock-runner-research/config/universe.yaml        # 108 tickers listed (the lab's evaluation used 104)
+    companies: stock-runner-research/data/processed/edgar_companies.parquet
+    prices: stock-runner-research/data/processed/prices.parquet
+  core: tiingo_binance                    # line signal ETFs (Tiingo) and BTC/ETH (Binance), as the reference study
+  survivorship: {sp500: RSP, nasdaq100: QQQE}   # equal-weight ETFs for the panel-bias diagnostic (Tiingo)
+
+frozen_inputs:                          # written by `freeze` just before the tag; `run` refuses on any mismatch
+  inputs_sha256: ffb809c4b2025d695cf24422319baa22576d83d5e98145ae9bf93953e56be74f
+  code_sha256:
+    scripts/stock_sleeve_study.py: 0d8767a1a303d97150c8470c2a5e7f12d7458d9ce5ba467e40ca61e5f48a1ced
+    src/council/reference/sleeve.py: 7ad4479b60e025aa30b6e7d50ae4c639728e6f8c7cd44cbd56be2012c6098fd0
+    src/council/stocks/pit.py: 793a369e3465b4859703007a8312f3a1f3b20eb0bd33cea2f48a9874aa17227e
+    src/council/stocks/score.py: 906e0a58bfabf7a4a06553d7bb0617f5dca5d5100fbb77cd6ed3f642c79c3081
+    src/council/stocks/sectors.py: 78ee4280274bbaebdf36e41d6a9212930cea79bbf913750ef251601697c60dd5
+  sources:
+    ai_companies: 64655153ad15791de7a03807419e7011bf063d646fad189a97ed99e4fd217db7
+    ai_prices: 113d6b176385aec2142e0138f5250d90e7044c2f43887aa9efe923ca2cce928b
+    ai_universe: 7920bc3856c0f07644f90d68342ee23872fc1a9f140166f0c4bda3fbca2b6662
+    companyfacts: 1c6ab59f38e405631d0fd223fa2cde11281352e2d0775901a5d2766bbd9f0560
+    ff12_definition: d801141acf039f2e06e6d4d9ba2b3992e9747a1d82fabd53ef21da4a3af79fff
+    issuer_intervals: 8ddb8aee1d56e80fcb4c88f76dbe05f6d079d9ebd81e95331205135dfb48a8b9
+    issuers: 2b7fae402b1d3c2090d287a8c56ade694314d74d91027f751adaed3494cdfe71
+    membership_events: f065b237612ffee86eaf6530d3cc3d0908e2280f9882b6887b979cd382f1e90b
+    nasdaq100: ee376e04b4a2741702ab9c840f91e7023028fba2534b4d60f7130c4fc787c7b5
+    prices: 0ab23192cdb4bd652b7f8e0185c0a4bf831d01c629c240c0d98c1731d4aa8a76
+    securities: 07d11c4b57581aff24514c3375cb89b1d5cfb579460f859d8fd6784a741023d4
+    sp500: 0b30e973939fbe9caa496ec9ec6205ead6cf72e7a160b9010a103eb620406adf
+    symbol_intervals: 98b31414f10c1893f61ebd1834f5e626b15b2cca568563c3ef2a569d3264e05c
+
+window:
+  first_decision_anchor: "2016-05-20"     # the first rebalance date is the first session on or after it
+  end: last_stock_session                 # the last session of the stock price panel
+  core_warmup_days: 800
+  split: "2023-05-01"                     # sub-periods: before, and from this date
+
+rebalance:
+  anchors: ["03-20", "05-20", "08-20", "11-20"]   # first trading session on or after each anchor = D
+  filings_visible: filed_before_D                 # available_at < D (the SEC filed date has no time)
+  decision: close_D                               # executed at the close of the next session (one-day lag)
+
+universe:
+  indexes: [sp500, nasdaq100]             # point-in-time: opt_in <= D < opt_out
+  security_types: [common]                # no ETF, no REIT security type
+  exclude_adr: true
+  max_bar_age_days: 7                     # a bar at most 7 calendar days before (or on) D
+  min_listing_days: 290                   # first bar at least 290 calendar days before D (or on the panel's first session)
+  dedupe: cik                             # one security per CIK; the higher 63-session median dollar volume wins
+  dedupe_volume_sessions: 63
+  sector: ff12_from_sic                   # SEC SIC (current) -> Fama-French 12
+  exclude_sectors: [Money]
+  taxonomy: us-gaap                       # companyfacts taxonomy with the most mapped concepts
+  domestic_forms: ["10-Q", "10-K", "10-Q/A", "10-K/A", "10-QT", "10-KT"]   # form of the latest quarter's filing
+  fundamentals_over: cik_chain            # every CIK the security had up to D (reorganisations), first report per period
+  require_all_features: true              # no median fill
+  max_filing_age_days: 120                # D - available_at of the latest visible quarter
+  min_quarter_revenue_usd: 50000000       # each of the four compared quarters (L, P, Y, PY)
+  plausibility: {gross_profit_within_revenue: true, max_abs_operating_margin: 1.0}   # on all four quarters
+
+rule:
+  features: [revenue_growth_yoy, revenue_growth_acceleration, gross_margin_change_yoy, operating_margin_change_yoy]
+  score: rank_average                     # equal-weight mean of per-feature percentile ranks (pct, method average)
+  data_layer: comparable_year_ago         # data-layer changes (a), (b) and (c); the verbatim lab layer is a sensitivity
+  peer_group: ff12                        # within-sector ranks use FF12 sectors
+  min_peer_group: 5                       # sectors with fewer eligible names are ranked together in one pooled group
+
+variants:
+  SC: {score: sector, constraint: cap, cap: 3, selectable: true}     # within-sector score, best first, at most 3 names per FF12 sector
+  SQ: {score: sector, constraint: quota, cap: 3, selectable: true}   # within-sector score, sector quotas proportional to eligible counts (largest remainder, each <= 3)
+  GC: {score: global, constraint: cap, cap: 3, selectable: false}    # REPORTED CONTROL: whole-universe score (the user fixed within-sector ranking)
+n_names: [8, 10]
+hold_buffer_multiple: 2                   # a held name stays while it ranks inside the top 2N (quota variant: top 2 x quota of its sector)
+
+sleeve:
+  share_of_nav: 0.50
+  deadband: {level: 0.25, min_nav_share: 0.02}   # = policy/risk.yaml R11, on book NAV
+  budget: trim_held_above_target                 # a rebalance never borrows: held names above target are trimmed first
+
+overlay:
+  signal: SPY                             # the SPX line's signal, V3 trend parameters from policy/reference.yaml
+  options:
+    none:      {up: 1.0, mixed: 1.0,  down: 1.0}
+    down_only: {up: 1.0, mixed: 1.0,  down: 0.25}
+    reference: {up: 1.0, mixed: 0.75, down: 0.25}
+
+costs:
+  stock_spread_floor_bps: 10              # per side, on the traded amount (no stock class in policy/costs.yaml yet)
+  slippage_bps: 10                        # per side, = policy/costs.yaml slippage_buffer_bps
+  slippage_scope: every_leg               # stocks, core lines, the index sleeve, the current reference and the controls
+  fixed_fee_per_leg: sealed               # fixed_commission_usd.real / funded real NAV, charged per traded leg
+  private_params_file: private-params.json      # in <state dir>/backtests/stock-sleeve/
+  private_params_sha256: 3dac776f027cbbc2638249a4df7fe2a15b2b7ae2ea625f103ad9f99e7b8f33f2
+  sensitivity_multiplier: 2.0             # both the variable cost and the fixed fee
+  core_commission: sealed                 # the same fixed fee per real ETF leg in every whole book
+
+baselines:
+  ew_universe: {rebalance: each_D, fixed_fee: false}   # the eligible pool, equal weight; not investable at this size
+  index_sleeve: {lines: [NDX, SPX], weights: base_weight}   # B2 counterfactual: QQQ and SPY in the lines' base-weight ratio
+  random:
+    draws: 1000
+    seed: 20260925
+    common_random_numbers: true           # one random order of the eligible set per (draw, D), shared by every cell
+    matched: [eligible_set, n_names, sector_constraint, kept_count_per_rebalance, costs]
+
+selection:
+  candidates: selectable                  # SC-8, SC-10, SQ-8, SQ-10
+  metric: net_sharpe
+  tie_sharpe: 0.05
+  tie_break: lower_total_cost_drag
+
+gate:
+  G1_pool: {vs: ew_universe, metrics: [cagr, sharpe], variable_costs: [base, x2], fixed_fee: none}   # sleeve >= pool, both metrics, both cost levels
+  G2_random: {metric: sharpe, min_percentile: 0.95, null_model: crn_max_percentile_over_selectable}  # adjusted percentile >= 95%
+  G3_regimes: {metric: sharpe, vs: ew_universe, periods: [before_split, from_split], fixed_fee: none}  # sleeve > pool in each
+  B1_book: {max_drawdown_shallower_than: -0.25, costs: [base, x2], stress: true}                   # the overlay rule qualified an option
+  B2_index_sleeve: {vs: index_sleeve_book, min_sharpe_diff: 0.0, max_drawdown_worse_by_at_most: 0.02}  # same book, same overlay, index sleeve
+
+reported:                                 # never gating
+  G4_index: {metric: sharpe, vs: [QQQ, SPY]}   # the stand-alone sleeve (net) against QQQ and SPY buy and hold
+
+stress:
+  history_start: "1998-01-02"             # Tiingo history for the stress windows
+  windows:
+    dotcom: ["2000-01-03", "2003-12-31"]
+    gfc: ["2007-01-03", "2009-12-31"]
+    y2015_16: ["2015-01-02", "2016-12-30"]
+  sleeve_proxy: beta_scaled_equal_weight_index
+  proxy: {equal_weight: RSP, before: SPY}   # RSP from its first bar (2003), SPY before; x the sleeve's full-window beta on it
+
+whole_book:
+  core_share: 0.45                        # in-reference base weights x 0.45 / 0.95 and reference_gross_max 0.45
+  sleeve_share: 0.50
+  compare_with: current_reference         # policy/reference.yaml (V3), unchanged, 0.95 gross
+  warn_at: 0.80                           # policy/risk.yaml killswitch
+  halt_at: 0.75
+
+stops:                                    # the stock-stop sensitivity (R4 has no stock floor yet)
+  min_distance: 0.15
+  sigma_multiple: 3.0                     # x daily sigma x sqrt(horizon)
+  horizon_days: 5
+  max_distance: 0.35
+  sigma_sessions: 63                      # trailing daily-return window at the entry close
+  reentry_sessions: 3                     # policy/risk.yaml R4d default cool-off
+execution_lag_sessions: 5                 # the execution-lag sensitivity (the headline executes the next session)
+
+sensitivities:                            # reported, never used for selection or the gate; `run` runs exactly these
+  - costs_x2                              # variable costs and the fixed fee doubled
+  - no_hold_buffer                        # buffer = N
+  - lab_resolver                          # the verbatim lab data layer (no changes (a), (b), (c), no plausibility guards)
+  - ai_list                               # headline universe + the lab's 108 AI-adjacent tickers (hindsight list)
+  - overlay_standalone                    # the chosen overlay on the stand-alone sleeve
+  - zero_fixed_fee                        # with its own random null
+  - nav_x5                                # five times the sealed funding, with its own random null
+  - stock_stops                           # the stop rule above
+  - execution_lag                         # decisions executed execution_lag_sessions after D
+  - index_sleeve_spy_only                 # the B2 counterfactual with SPY only
+
+diagnostics:                              # reported only
+  - gc_overlap                            # share of SC picks that GC also picks, per N
+  - concentration                         # top contributor's share; Sharpe with its slot as cash, against the null's
+  - fee_arithmetic                        # legs per year x fee per leg / sleeve capital, against the measured drag
+  - fee_feasibility                       # share of selected name-quarters priced above one name's real amount
+  - survivorship                          # equal weight of the mapped members vs RSP / QQQE
+  - r8_realised_vol                       # share of days with 63-day realised vol above policy/risk.yaml R8
+
+power:                                    # `power`: the gate on synthetic worlds with a planted edge (spec section 14)
+  alphas: [0.0, 0.02, 0.04, 0.06]         # a year, added to the top-ranked names until the next decision
+  top_share: 0.10                         # top 10% of the eligible set by the sector score
+  replications: 24
+  draws: 100
+  seed: 20260926
+  names: 240                              # members; the sector mix of the eligible set on 2026-08-20
+  end: "2026-09-04"
+  fallback_nav_fee_units: 10000           # used only when the sealed parameters are absent (tests)
