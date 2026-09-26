@@ -237,7 +237,9 @@ def cost_facts_from_quotes(quotes: Mapping[str, object], *, slot: datetime) -> l
 
     Every fact is available at the slot. Missing or non-finite values are skipped; a key that is
     not a line name raises. The source says what set the price when the quote knows it:
-    "costs:floor" (a policy floor) or "costs:whatif" (the broker what-if), else "costs"."""
+    "costs:floor" only for a pure policy quote (floored and no broker what-if at all: its carry
+    and spread are then the public floors), "costs:whatif" when a broker what-if took part (a
+    floored spread can still carry the broker's overnight cost), else "costs"."""
     at = to_utc(slot).to_pydatetime()
     facts: list[Fact] = []
     for line in sorted(quotes, key=str):
@@ -247,7 +249,8 @@ def cost_facts_from_quotes(quotes: Mapping[str, object], *, slot: datetime) -> l
         if quote is None:
             continue
         floor = _quote_attr(quote, "floor_applied")
-        source = "costs" if floor is None else ("costs:floor" if floor else "costs:whatif")
+        pure_policy = bool(floor) and _quote_attr(quote, "what_if_bps") is None
+        source = "costs" if floor is None else ("costs:floor" if pure_policy else "costs:whatif")
         for field, unit, digits in _COST_FIELDS:
             value = _finite(_quote_attr(quote, field))
             if value is not None:

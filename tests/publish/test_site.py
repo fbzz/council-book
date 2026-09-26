@@ -25,12 +25,14 @@ from tests.publish.conftest import CANARIES, CYCLE_ID, SLOT
 
 SITE_BUILD = REPO_ROOT / "site" / "build.py"
 NOW = SLOT + timedelta(hours=3, minutes=5)
-PAGES = {"index.html", "cycles.html", "how.html", "rules.html", "record.html"}
+PAGES = {"index.html", "cycles.html", "how.html", "rules.html", "record.html", "agents/index.html"}
+AGENT_SLUGS = ("data", "reference", "vol", "event", "news", "macro", "bull", "bear", "pm", "control", "audit",
+               "risk", "costs")
 REDIRECTS = {"council.html": "how.html", "book.html": "index.html", "failures.html": "record.html"}
-# The CSP must not change: the only script is the hashed STALE badge, and styles come from files.
+# The CSP must not change: no script at all, and styles come from files.
 EXPECTED_CSP = (
     "default-src 'none'; style-src 'self'; img-src 'self' data:; "
-    "script-src 'sha256-djW30W9PGcW/Zms0WyQIL8hyqeA2fk538pnwRKebljE='; base-uri 'none'; form-action 'none'"
+    "script-src 'none'; base-uri 'none'; form-action 'none'"
 )
 LINE_NAMES = ("Nasdaq-100", "Semiconductors", "S&amp;P 500", "Gold", "Bitcoin", "Ether", "Crude oil",
               "Euro / US dollar", "Pound / US dollar")
@@ -108,7 +110,7 @@ def _build_empty(site, tmp_path) -> tuple[Path, dict[str, str]]:
 # ------------------------------------------------------------------------------ empty journal
 def test_builds_with_zero_cycles(site, tmp_path):
     out, pages = _build_empty(site, tmp_path)
-    assert set(pages) == PAGES | set(REDIRECTS)
+    assert set(pages) == PAGES | set(REDIRECTS) | {f"agents/{slug}.html" for slug in AGENT_SLUGS}
     assert "AWAITING ACCOUNT" in pages["index.html"]
     assert "No runs yet" in pages["cycles.html"] and "No runs yet" in pages["index.html"]
     assert "Nothing held yet" in pages["index.html"] and "No performance data yet" in pages["index.html"]
@@ -123,18 +125,22 @@ def test_empty_home_shows_the_pipeline_waiting(site, tmp_path):
     home = pages["index.html"]
     assert home.count('<li class="node ') == 9
     assert home.count("not run yet") == 9
-    assert '<li class="hrow">' not in home                      # nothing held, no holdings rows
-    assert "REHEARSAL" not in home and 'class="banner"' not in home
+    # nothing held: the broker-list skeleton, one flat row per line of the policy, and no numbers
+    rows = re.findall(r'<tr class="hr ([^"]*)"', home)
+    assert len(rows) == len(LINE_NAMES) and all(r.endswith(" flat") for r in rows)
+    assert "Nothing held yet" in home and "Not held (" not in home and 'class="strip' not in home
+    assert 'data-label="P/L since open"' not in home and 'class="wbar"' not in home
+    assert "REHEARSAL" not in home and 'class="alert alert-rehearsal"' not in home
     for name in LINE_NAMES:
         assert name in home, name                                # the lines it will hold
 
 
-def test_every_page_has_a_strict_csp_and_one_hashed_script(site, tmp_path):
+def test_every_page_has_a_strict_csp_and_no_script(site, tmp_path):
     out, pages = _build_empty(site, tmp_path)
     for name, html in pages.items():
         assert 'http-equiv="Content-Security-Policy"' in html, name
-        assert "default-src 'none'" in html and site.script_hash() in html
-        assert html.count("<script") == (0 if name in REDIRECTS else 1), name
+        assert "default-src 'none'" in html and "script-src 'none'" in html, name
+        assert "<script" not in html.lower() and " on" + "click=" not in html.lower(), name
         assert "fonts.googleapis" not in html and "http://" not in html
     for name in ("style.css", "geometry.css"):
         css = (out / "static" / name).read_text()
@@ -269,13 +275,13 @@ def test_page_layout_is_phone_safe():
     assert "@media (max-width: 880px)" in css and "@media (max-width: 640px)" in css
     assert "overflow-wrap: anywhere" not in css          # it collapses table columns to one letter
     assert "table.wide { min-width" in css
-    assert ".pages { flex-wrap: wrap; gap: 2px 14px; }" in css      # the nav wraps: every page stays visible
+    assert ".pages { display: flex; flex-wrap: wrap;" in css         # the nav wraps: every page stays visible
     assert "table.stack tr { display: grid;" in css                   # run tables stack into blocks on phones
     assert "scroll-padding-top" in css                                # the sticky bar never covers a jump target
 
 
-def test_hidden_badge_stays_hidden():
-    """.chip sets display, which would otherwise override the hidden attribute on STALE."""
+def test_hidden_elements_stay_hidden():
+    """.chip and other components set display, which would otherwise override the hidden attribute."""
     css = (REPO_ROOT / "site" / "static" / "style.css").read_text()
     assert "[hidden] { display: none !important; }" in css
 
@@ -286,13 +292,14 @@ def test_lines_are_shown_in_universe_order(site, tmp_path, record, pack, policy)
     site.build(journal_dir, PROMPTS_DIR, POLICY_DIR, out, now=NOW)
     pages = _pages(out)
     run = pages[f"cycles/{CYCLE_ID}.html"]
-    table = run[run.index('class="wide all-lines"'):]
+    table = run[run.index('id="a-reference"'):run.index('id="a-vol"')]
     positions = [table.index(f'<span class="muted small">{s}</span>') for s in policy.universe.symbols()]
     assert positions == sorted(positions)
+    # the holdings list reads like a broker's: held lines by weight (largest first), then "Not held"
     home = pages["index.html"]
-    rows = home[home.index('id="holdings"'):home.index('id="latest"')]
-    positions = [rows.index(f"<strong>{name}</strong>") for name in LINE_NAMES]
-    assert positions == sorted(positions)
+    held = home[home.index('<table class="htable">'):home.index('class="notheld')]
+    weights = [float(w.replace("−", "-").rstrip("%")) for w in re.findall(r'<span class="wv">([^<]+)</span>', held)]
+    assert weights and [abs(w) for w in weights] == sorted((abs(w) for w in weights), reverse=True)
 
 
 def test_cli_entry_point(site, tmp_path):
@@ -302,9 +309,9 @@ def test_cli_entry_point(site, tmp_path):
     shutil.rmtree(tmp_path / "o")
 
 
-def test_stale_badge_threshold_is_five_hours(site):
-    assert "Date.now()-t>5*36e5" in site.STALE_SCRIPT          # 5 x 3,600,000 ms
-    assert site.script_hash().startswith("sha256-")
+def test_no_stale_badge_script_remains(site):
+    """Site v3 has no script at all: the last run's time is written out in words instead."""
+    assert not hasattr(site, "STALE_SCRIPT") and "script-src 'none'" in site.CSP
 
 
 def test_revealed_cycle_file_is_the_exact_sealed_bytes(tmp_path, record, pack, policy):
@@ -324,7 +331,7 @@ def test_cycle_sealed_pending_shows_the_final_outcome_from_ops_and_execution(sit
     assert "SEAL VERIFIED" in cycle_page and "EXECUTED" in cycle_page
     assert "sealed while the decision was pending" in cycle_page and "execution record" in cycle_page
     assert "Reason given: Agree with the cut" in cycle_page
-    assert "1 Oct 2026, 14:40 UTC" in cycle_page and "<h3>Execution</h3>" in cycle_page
+    assert "1 Oct 2026, 14:40 UTC" in cycle_page and '<h3 id="a-execution">Execution</h3>' in cycle_page
     assert "approved · executed" in cycle_page                           # the Human node of the diagram
     assert f"journal/executions/2026/10/{CYCLE_ID}.json" in cycle_page
     assert (out / "journal" / "executions" / "2026" / "10" / f"{CYCLE_ID}.json").exists()
@@ -342,7 +349,7 @@ def test_final_outcome_from_the_ops_row_without_an_execution(site, tmp_path, rec
     page = _pages(out)[f"cycles/{CYCLE_ID}.html"]
     assert "REJECTED" in page and "operations log" in page and "Too soon after the stop" in page
     assert "rejected: Too soon after the stop" in page                  # the Human node of the diagram
-    assert "<h3>Execution</h3>" not in page
+    assert ">Execution</h3>" not in page
 
 
 def test_cycle_page_renders_agreement_control_and_fingerprint(site, tmp_path, record, pack, policy):
@@ -353,10 +360,10 @@ def test_cycle_page_renders_agreement_control_and_fingerprint(site, tmp_path, re
     page = pages[f"cycles/{CYCLE_ID}.html"]
     doc = public_cycle(record, pack, lines=policy.universe)
     assert "made the same call" in page and "67% of attempts" in page and "USED · MOST TYPICAL" in page
-    assert "Compare every line with the control" in page and ">Single agent size</th>" in page
+    control = page[page.index('id="a-control"'):page.index('id="a-audit"')]
+    assert "How it differs from the council" in control and "<th class=\"n\">Control</th>" in control
     glance = page[page.index('id="glance"'):page.index('id="changed"')]
-    assert "One agent, no analysts or debate:" in glance
-    assert page.count('class="control-strip') == 1                     # shown once, not twice
+    assert "one agent, no analysts or debate:" in glance
     assert "differs from the council on Semiconductors" in page
     assert "Material facts" in page and doc.material_fingerprint[:12] in page
     assert "10-year Treasury yield · 20-day change, 30 Sep: −12.5 bps" in page
@@ -373,6 +380,7 @@ def test_status_names_a_sealed_but_unrevealed_last_cycle(site, tmp_path, record)
     site.build(root / "journal", PROMPTS_DIR, POLICY_DIR, out, now=NOW)
     index = _pages(out)["index.html"]
     assert "PROPOSED" in index and "The run of 1 Oct 2026, 14:40 UTC is sealed" in index
+    assert "1 proposal awaiting the operator" in index and "revealed after the decision" in index
     assert "No runs yet" in _pages(out)["cycles.html"]
 
 
@@ -388,31 +396,36 @@ def rehearsal_site(site, tmp_path, record, pack, policy) -> tuple[Path, dict[str
 def test_home_with_a_rehearsal_cycle_says_so(rehearsal_site):
     out, pages = rehearsal_site
     home = pages["index.html"]
-    assert "Rehearsal — no broker account is connected yet." in home
-    assert "These are the weights the council would hold; nothing has been traded." in home
-    assert "REHEARSAL" in home and "Invested · target" in home
+    assert "Rehearsal — no broker account is connected yet" in home
+    assert "The table shows the weights the council would hold; nothing has been traded." in home
+    assert "REHEARSAL" in home and "Gross · target" in home
+    assert "Target book — no account connected, nothing traded" in home
     assert "Last run 1 Oct 2026, 14:52 UTC (12 min after its 14:40 UTC slot) · page built 17:45 UTC" in home
-    assert " h ago" not in home and 'data-last-cycle="2026-10-01T14:52:00Z"' in home
-    assert "starts at go-live" in home                                   # no drawdown in rehearsal
+    assert " h ago" not in home and "data-last-cycle" not in home
+    assert "tracked from go-live" in home                                # no drawdown in rehearsal
     assert "REHEARSAL" in pages["cycles.html"]
     run = pages[f"cycles/{CYCLE_ID}.html"]
-    assert "REHEARSAL" in run and "Rehearsal — no broker account is connected yet." in run
+    assert "REHEARSAL" in run and "Rehearsal — no broker account is connected yet" in run
     assert leakscan.scan_paths([out], canaries=CANARIES) == []
 
 
 def test_home_holdings_show_every_line(rehearsal_site):
     out, pages = rehearsal_site
     home = pages["index.html"]
-    rows = re.findall(r'<li class="hrow">(.*?)</li>', home, re.S)
+    rows = re.findall(r'<tr class="hr [^"]*"[^>]*>(.*?)</tr>', home, re.S)
     assert len(rows) == 9
     for name in LINE_NAMES:
-        assert any(f"<strong>{name}</strong>" in r for r in rows), name
-    assert all('class="dbar"' in r for r in rows)
-    assert "Council cut: 15% → 7.5% of the portfolio (size 1.00 → 0.50)" in home   # percent first, size in brackets
-    assert "<strong>Size</strong> is how much of a line's full allocation is held" in home
-    assert "Show as table" in home
+        assert any(f'<p class="asset-name">{name}' in r for r in rows), name
+    # a target book has no P/L column (nothing is traded); a bar only where there is a weight or a reference
+    assert all('data-label="P/L since open"' not in r for r in rows)
+    day = ['data-label="1 day"' in r for r in rows]
+    assert all(day) or not any(day)                                     # the 1-day column is all or nothing
+    assert all('class="wbar"' in r for r in rows if 'class="wv">0.0%' not in r or '<span class="wref ' in r)
+    assert "P/L since open" not in home[home.index('class="hx'):home.index('id="latest"')]
+    assert "Council cut: 15% → 7.5%" in home                              # percent of the portfolio
+    assert "Assets (" in home and "Not held (" in home
     geometry = (out / "static" / "geometry.css").read_text()
-    for cls in set(re.findall(r"\bg[wl]-\d+\b", home)):
+    for cls in set(re.findall(r"\bg[wlp]-\d+\b", home)):
         assert f".{cls} " in geometry, cls                               # every width class is defined
 
 
@@ -430,7 +443,7 @@ def test_home_diagram_has_nine_nodes_and_a_plain_summary(rehearsal_site):
             "portfolio, and both valid portfolio-manager attempts chose to cut Semiconductors from 15% to 7.5% "
             "of the portfolio.") in latest
     assert "Semiconductors 15% → 7.5%" in latest                           # the manager step, in percent
-    assert "One agent, no analysts or debate:" in latest
+    assert "one agent, no analysts or debate:" in latest
     assert "differs from the council on Semiconductors" in latest
     assert f'href="cycles/{CYCLE_ID}.html"' in latest and "Open the full run" in latest
 
@@ -442,11 +455,11 @@ def test_run_page_uses_human_evidence_labels(rehearsal_site):
     for label, raw in (("Semiconductors · volatility vs its 1-year norm", "V:SEMIS:vol_ratio"),
                        ("Nasdaq-100 · vs 200-day average", "F:NDX:dist_sma200_pct"),
                        ("volatility card 1", "K:vol:1")):
-        assert f'title="{raw}">{label}</span>' in run, label
-    assert re.search(r'title="N:1a2b3c4d[^"]*">news item</span>', run)
+        assert re.search(rf'title="{re.escape(raw)}[^"]*">{re.escape(label)}', run), label
+    assert re.search(r'title="N:1a2b3c4d[^"]*">news item<', run)
     assert ">V:SEMIS:vol_ratio<" not in run                               # raw ids only in titles
     assert "What changed" in run and "7 lines stayed at the reference" in run and "change too small to trade" in run
-    assert "Read the claim<" in run and "Read the 1 claims" not in run      # short arguments: claims only
+    assert "1 claim (the bear must answer each)" in run and "1 claims" not in run
 
 
 def test_summary_is_deterministic(site, tmp_path, record, pack, policy):
@@ -477,16 +490,17 @@ def test_evidence_labels(site, policy):
     assert label(IdRef(kind="market", id="F:XYZ:new_field")) == "XYZ · new field"     # unknown: still readable
 
 
-def test_diverging_bar_geometry(site):
+def test_weight_bar_and_ring_geometry(site):
     geo = site.Geometry()
-    long = site.diverging_bar(0.2, 0.3, 0.4, geo)
-    assert long["side"] == "long" and long["w"] == "gw-2500" and long["ref"] == "gl-8750"
-    short = site.diverging_bar(-0.1, None, 0.4, geo)
-    assert short["side"] == "short" and short["w"] == "gw-1250" and short["label"] == "−10%"
-    near = site.diverging_bar(0.03, 0.09, 0.4, geo)                   # tick just past the tip: label stays at the tip
-    assert near["at"] == "gl-5375" and near["ref"] == "gl-6125"
+    long = site.weight_bar(0.2, 0.3, 0.4, geo)
+    assert long["side"] == "long" and long["w"] == "gw-5000" and long["ref"] == "gl-7500"
+    short = site.weight_bar(-0.1, None, 0.4, geo)                     # a short is drawn by its size, in orange
+    assert short["side"] == "short" and short["w"] == "gw-2500" and short["ref"] is None
+    assert site.weight_bar(0.0, 0.0, 0.4, geo)["side"] == "zero"      # no tick for a zero reference
     assert site.nice_scale(0.35) == 0.4 and site.fmt_share(0.134) == "13.4%" and site.fmt_share(0.0) == "0%"
-    assert ".gw-2500 { width: 25.00%; }" in geo.css()
+    assert geo.ring(72.6) == "gp-73" and geo.ring(None) == "gp-0" and geo.ring(140) == "gp-100"
+    css = geo.css()
+    assert ".gw-5000 { width: 50.00%; }" in css and ".gp-73 { --p: 73%; }" in css
 
 
 # ------------------------------------------------------------------------------ the redesign, in words
@@ -508,14 +522,16 @@ def _run(site, doc):
 def test_home_leads_with_one_sentence_and_the_summary(rehearsal_site):
     _, pages = rehearsal_site
     home = pages["index.html"]
-    assert ("Latest run (1 Oct, 14:40 UTC): the council cut Semiconductors from 15% to 7.5% of the portfolio; "
-            'the other 8 lines follow the rules. <a href="#latest">See the run ↓</a>') in home
-    assert home.index('class="banner"') < home.index('class="headline"') < home.index('class="tiles"')
     latest = home[home.index('id="latest"'):home.index('id="recent"')]
-    assert latest.index('class="story"') < latest.index('class="flow"')      # the words before the diagram
+    assert ("Latest run (1 Oct, 14:40 UTC): the council cut Semiconductors from 15% to 7.5% of the portfolio; "
+            "the other 8 lines follow the rules.") in latest
+    # the holdings come first: the rehearsal banner, then the summary tiles and the table, then the run
+    assert home.index('class="alert alert-rehearsal"') < home.index('class="strip strip-home') < home.index('class="htable"')
+    assert home.index('class="htable"') < home.index('id="latest"')
+    assert latest.index('class="story"') < latest.index('class="flow')       # the words before the diagram
     run = pages[f"cycles/{CYCLE_ID}.html"]
     glance = run[run.index('id="glance"'):run.index('id="changed"')]
-    assert glance.index('class="story"') < glance.index('class="flow"')
+    assert glance.index('class="story"') < glance.index('class="flow')
 
 
 def test_rehearsal_speaks_with_one_voice(rehearsal_site):
@@ -542,7 +558,7 @@ def test_empty_and_live_footers(site, tmp_path, record, pack, policy):
     assert "Real money is at risk; the author holds the positions shown." in live["index.html"]
     assert "<strong>Real money is at risk.</strong>" in live["record.html"]
     # live: the council's change carries the decision's fate
-    assert "Council cut: 15% → 7.5% of the portfolio (size 1.00 → 0.50), executed" in live["index.html"]
+    assert "Council cut: 15% → 7.5%, executed" in live["index.html"]
 
 
 def test_rehearsal_decision_counts_the_orders_a_live_run_needs(site, record, pack, policy):
@@ -585,9 +601,10 @@ def test_internal_codes_read_as_words(site, tmp_path, record, pack, policy):
 def test_debate_reads_in_words(site, rehearsal_site):
     _, pages = rehearsal_site
     run = pages[f"cycles/{CYCLE_ID}.html"]
-    debate = run[run.index('id="debate"'):run.index('id="pm"')]
-    assert "<h3>Cut Semiconductors 15% → 7.5%</h3>" in debate and "<h3>Keep the reference</h3>" in debate
-    assert "disputes 1: <q>Nasdaq is 6.2% above its 200-day average</q>" in debate
+    debate = run[run.index('id="a-bull"'):run.index('id="a-pm"')]
+    assert "Stance: <strong>Keep the reference</strong>" in debate
+    assert "Wants to <strong>cut Semiconductors 15% → 7.5%</strong>" in debate
+    assert "contests</span>" in debate and "Nasdaq is 6.2% above its 200-day average" in debate
     defs = site.shorthand(["NDX dd52 -0.9% and vol 0.99x median; DGS10 +47bps, T10Y2Y -21bps"], _lines(site))
     terms = {d["term"]: d["meaning"] for d in defs}
     assert terms["dd52"] == "drop from 1-year high" and terms["DGS10"] == "10-year Treasury yield"
@@ -598,29 +615,31 @@ def test_debate_reads_in_words(site, rehearsal_site):
 def test_manager_attempts_collapse_when_they_agree(rehearsal_site):
     _, pages = rehearsal_site
     run = pages[f"cycles/{CYCLE_ID}.html"]
-    pm = run[run.index('id="pm"'):run.index('id="cards"')]
+    pm = run[run.index('id="a-pm"'):run.index('id="a-control"')]
     assert "Both valid attempts made the same call: cut Semiconductors from 15% to 7.5% (size 1.00 → 0.50)." in pm
-    assert pm.count('<article class="rep') == 3 and "Show the other 2 attempts" in pm
-    assert "Why, and the evidence" in pm and "Valid attempts: <span class=\"n\">2</span> of 3" in pm
+    assert pm.count('<article class="rep') == 3 and "USED · MOST TYPICAL" in pm
+    assert "Valid attempts: <span class=\"n\">2</span> of 3" in pm
 
 
 def test_invested_is_one_number_on_both_pages(rehearsal_site):
     _, pages = rehearsal_site
-    tile = re.search(r'Invested · target</p>\s*<p class="tile-value">([^<]+)</p>', pages["index.html"]).group(1)
+    tile = re.search(r'<dd class="st-sub">([^<]+?) of the portfolio invested</dd>', pages["index.html"]).group(1)
     fact = re.search(r'<dt>Invested</dt><dd class="n">([^<]+?) <span', pages[f"cycles/{CYCLE_ID}.html"]).group(1)
     assert tile == fact
 
 
-def test_holdings_axis_is_one_sided_for_a_long_only_book(site, rehearsal_site):
-    _, pages = rehearsal_site
-    assert '<div class="holdings one-sided">' in pages["index.html"]
-    geo = site.Geometry()
-    bar = site.diverging_bar(0.2, 0.3, 0.4, geo, short_scale=0.0)
-    assert (bar["zero"], bar["start"], bar["w"], bar["ref"], bar["at"]) == ("gl-0", "gl-0", "gw-5000", "gl-7500", "gl-5000")
-    assert [t["label"] for t in site.axis_ticks(0.4, 0.0, geo)] == ["0", "10%", "20%", "30%", "40%"]
-    short = site.diverging_bar(-0.05, None, 0.4, geo, short_scale=0.1)       # zero at 20% of the track
-    assert (short["zero"], short["start"], short["w"]) == ("gl-2000", "gr-8000", "gw-1000")
-    assert site.diverging_bar(0.0, 0.0, 0.4, geo)["ref"] is None             # no tick on the zero line
+def test_holdings_are_filtered_by_asset_class_without_script(rehearsal_site):
+    out, pages = rehearsal_site
+    home = pages["index.html"]
+    assert '<input class="hf-in" type="radio" name="hf" id="hf-all" value="all" checked>' in home
+    keys = re.findall(r'type="radio" name="hf" id="hf-([a-z]+)"', home)
+    assert keys[0] == "all" and len(keys) >= 3
+    css = (out / "static" / "style.css").read_text()
+    for key in keys[1:]:
+        assert f'<label class="hf-chip" for="hf-{key}">' in home, key
+        assert f"#hf-{key}:checked ~ .hx-body .hr:not(.g-{key})" in css, key      # the filter really hides rows
+        assert f"#hf-{key}:checked ~ .hx-body .cnt-{key}" in css, key
+        assert f'class="hr g-{key}' in home, key
 
 
 def test_phone_tables_stack_and_scroll_regions_are_focusable(rehearsal_site):
@@ -637,9 +656,9 @@ def test_phone_tables_stack_and_scroll_regions_are_focusable(rehearsal_site):
 def test_accessibility_and_plain_words(rehearsal_site):
     _, pages = rehearsal_site
     home = pages["index.html"]
-    assert '<ol class="flow" role="list"' in home and '<ul class="hrows" role="list">' in home
+    assert '<ol class="flow linked" role="list"' in home and '<table class="htable">' in home
     assert '<span class="num" aria-hidden="true">1</span>' in home
-    assert 'aria-label="Fall from peak: not tracked until go-live"' in home
+    assert 'aria-label="Fall from peak: not tracked until go-live; no new risk at −20%, stop at −25%"' in home
     assert "What each step does" in home and "Bull</strong> makes the case for a set of positions" in home
     gloss = "scaled by its trend (up = full, mixed = ¾, down = ¼) and trimmed when the line is unusually volatile"
     assert gloss in home and gloss in pages["how.html"]

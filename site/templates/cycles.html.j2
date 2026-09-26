@@ -16,14 +16,14 @@
 {% if cycles %}
 {{ m.wrap_open("All runs") }}
 <table class="wide stack runs" role="table">
-  <thead><tr role="row"><th role="columnheader">When</th><th role="columnheader">Mode</th><th role="columnheader">What changed</th><th role="columnheader">Decision</th><th role="columnheader" class="n">Agreement</th><th role="columnheader">Control</th><th role="columnheader">Seal</th></tr></thead>
+  <thead><tr role="row"><th role="columnheader">When</th><th role="columnheader">What changed</th><th role="columnheader">Agents</th><th role="columnheader">Decision</th><th role="columnheader" class="n">Agreement</th><th role="columnheader">Control</th><th role="columnheader">Seal</th></tr></thead>
   <tbody>
-  {% for cv, r in cycles %}
+  {% for cv, r, tr in cycles %}
   {% set c = cv.doc %}
   <tr role="row">
-    <td role="cell" class="when"><a href="cycles/{{ c.cycle_id }}.html">{{ c.slot | when }}</a>{% if c.late_by_min %}<br><span class="muted small">ran {{ c.late_by_min | late }} late</span>{% endif %}</td>
-    <td role="cell" data-label="Mode">{{ m.chip(cv.mode_chip) }}</td>
+    <td role="cell" class="when"><a href="cycles/{{ c.cycle_id }}.html">{{ c.slot | when }}</a><br>{{ m.chip(cv.mode_chip) }}{% if c.late_by_min %} <span class="muted small">ran {{ c.late_by_min | late }} late</span>{% endif %}</td>
     <td role="cell" class="text push" data-label="What changed">{{ r.change_words }}</td>
+    <td role="cell" data-label="Agents">{{ m.agent_strip(tr, "cycles/" ~ c.cycle_id ~ ".html") }}</td>
     <td role="cell" data-label="Decision">{{ m.chip(cv.chip) }}{% if cv.human_outcome not in ("none", "pending", "no_action") %}<br><span class="muted small">{{ cv.human_outcome | replace("_", " ") }}</span>{% endif %}</td>
     <td role="cell" class="n" data-label="Agreement">{% if cv.min_agreement_pct is not none %}<span title="{{ cv.min_agreement_pct | pct }} of valid attempts">{{ agreement_words(cv.min_agreement_pct, c.pm.valid_replicates) }}</span>{% else %}—{% endif %}</td>
     <td role="cell" data-label="Control">{% if cv.control_agrees is none %}—{% elif cv.control_agrees %}same{% else %}<strong>differs</strong>{% endif %}</td>
@@ -33,7 +33,7 @@
   </tbody>
 </table>
 </div>
-<p class="small muted">Agreement: of the valid portfolio-manager attempts, how many made the same call as the one used, on the line where they agreed least. Control: whether one agent without analysts or debate landed on the same book.</p>
+<p class="small muted">Agents: each language-model agent of the run with its status (✓ ok, ✗ unreadable reply or error, ◷ timeout, ! partly failed, – not run); each opens that agent's part of the run. Agreement: of the valid portfolio-manager attempts, how many made the same call as the one used, on the line where they agreed least. Control: whether one agent without analysts or debate landed on the same book.</p>
 {% else %}
 {{ m.empty("No runs yet", "No run has been published. The first one will appear here.") }}
 {% endif %}
@@ -41,13 +41,12 @@
 
 {% call m.section("read", 2, "How to read a run", "code") %}
 <ol class="steps">
-  <li><strong>The run at a glance</strong> — three sentences on what happened, a diagram of the nine steps, and the single-agent control.</li>
+  <li><strong>At a glance</strong> — three sentences on what happened, and a diagram of the nine steps; each step opens its agent.</li>
   <li><strong>What changed</strong> — only the lines where the council or the risk engine moved away from the mechanical reference, and why.</li>
-  <li><strong>The debate</strong> — the bull's case, the bear's answer claim by claim, and the bull's reply. Short first; the full text is one click away.</li>
-  <li><strong>The portfolio manager</strong> — three separate attempts, the one used, and how many agreed.</li>
-  <li><strong>Risk checks</strong> — how many rules passed; only failures and held lines are shown up front.</li>
-  <li><strong>Costs and orders</strong> — every order as a share of the portfolio, with its cost.</li>
+  <li><strong>The agents, in the order they ran</strong> — the code officers (data, reference, volatility, events), the news and macro analysts, the bull's opening, the bear's answer, the bull's rebuttal, the manager's three attempts, the single-agent control, the auditor, the risk engine and the cost desk. Each shows its status, time and tokens, its prompt, what it saw, what it said (the full argument, every claim with its evidence), and what happened to it.</li>
   <li><strong>Decision</strong> — approved, rejected or expired, and what was filled. The run is sealed before the decision, so the outcome is published separately.</li>
+  <li><strong>Facts the council saw</strong> — every fact of the pack with its value where the data rights allow it; each evidence chip links here.</li>
+  <li><strong>Seal and call log</strong> — the commitment and every model call in order, with what each failure means.</li>
 </ol>
 {% endcall %}
 {% endblock %}

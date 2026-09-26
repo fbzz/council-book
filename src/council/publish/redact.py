@@ -17,6 +17,14 @@ Rules:
   published as a short hash only.
 - The execution record (`public_execution`) carries weights (x NAV), slippage and cost in bp,
   and leg states: never amounts, units, prices or ids.
+- Model text is published whole up to its public cap; a text that must be cut (a cleaner
+  placeholder pushed it over) is cut at a sentence end, else a word end, and marked "…".
+- The facts table lists every fact of the pack the agents saw, with a value only where
+  docs/data-rights.md allows it (`_facts`); call errors are published as fixed codes only
+  (`error_kind`), never the private error text.
+- The book (`public_book`) may describe each line (name, asset class, session from the public
+  policy; settlement, leverage and P/L % since open from the open positions; the 1-day market
+  move from the pack): percentages and words only.
 """
 
 from __future__ import annotations
@@ -33,11 +41,11 @@ from council.data import fred
 from council.models.cards import EvidenceCard
 from council.models.cycle import CycleRecord, PMReplicate
 from council.models.debate import AdvocateCase, BearCase
-from council.models.facts import Fact, FactPack
+from council.models.facts import Fact, FactPack, MarketState
 from council.models.plan import Leg, Plan
 from council.models.risk import RiskDecision
 from council.policy import LineSpec, Universe, default_policy
-from council.publish import leakscan
+from council.publish import labels, leakscan
 from council.publish.public_models import (
     CallStatus,
     CycleStatus,
@@ -60,8 +68,11 @@ from council.publish.public_models import (
     PublicDeviation,
     PublicDismissal,
     PublicExecution,
+    PublicFact,
     PublicFill,
     PublicLeg,
+    PublicMacro,
+    PublicMacroDriver,
     PublicOpsRow,
     PublicPlan,
     PublicPM,
@@ -70,6 +81,7 @@ from council.publish.public_models import (
     PublicReferenceLine,
     PublicRisk,
     PublicStatus,
+    Settlement,
     StatusState,
 )
 
@@ -92,6 +104,38 @@ _LONG_NUMBER = re.compile(r"(?<![\w.])(?<!\b[NSMECFVK]:)\d{7,}(?!\w)")
 _UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 # Positions on symbols outside the universe are keyed UNMAPPED_<instrument id>; the id is private.
 _UNMAPPED = re.compile(r"(?i)UNMAPPED_[0-9A-Za-z]+")
+# A bare price level a model may paraphrase from broker data ("Brent at 78.40" is too short to
+# tell from a percentage, but "gold near 2,650.40", "NDX near 21,450" or "1098.4" are levels):
+# a number with thousands separators, 3+ integer digits with decimals, or 4+ digits, unless a
+# unit the record allows follows it. Years (19xx / 20xx), index names (S&P 500, Nasdaq-100) and
+# identifiers (F:NDX:..., bear:c2) are left alone.
+_LEVEL = re.compile(
+    r"(?<![\w.:%,/#@-])"
+    r"(?!(?:19|20)\d{2}(?![\d,.]))"
+    r"(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{3,}\.\d+|\d{4,})"
+    r"(?![\w%])(?!\.\d)"
+    r"(?![\s-]?(?:x\b|×|bps?\b|basis\b|σ|sigma\b|days?\b|h\b|hours?\b|min\b|minutes?\b|s\b|"
+    r"seconds?\b|chars?\b|characters\b|tokens?\b|lines?\b|calls?\b|runs?\b|percent\b|pct\b|"
+    r"per ?cent\b|%))"
+)
+
+
+def _clip(text: str, max_len: int) -> str:
+    """Cut an over-long text at its last sentence end (else word end) inside the cap, marked "…".
+    A cut never lands mid-word unless a single word fills most of the cap."""
+    if len(text) <= max_len:
+        return text
+    if max_len < 2:
+        return text[:max_len]
+    window = text[: max_len - 1]
+    floor = int(max_len * 0.6)
+    sentence = max(window[:-1].rfind(p) for p in (". ", "! ", "? ")) if len(window) > 1 else -1
+    if sentence >= floor and sentence + 3 <= max_len:
+        return window[: sentence + 1] + " …"
+    space = window.rfind(" ")
+    if space >= floor:
+        return window[:space].rstrip(",;:—- ") + "…"
+    return window.rstrip() + "…"
 
 
 def clean_text(value: str | None, max_len: int = 200) -> str:
@@ -108,10 +152,9 @@ def clean_text(value: str | None, max_len: int = 200) -> str:
     text = _UNMAPPED.sub("UNMAPPED", text)
     text = _MONEY.sub("[amount removed]", text)
     text = _LONG_NUMBER.sub("[number removed]", text)
+    text = _LEVEL.sub("[level removed]", text)
     text = " ".join(text.split())
-    if len(text) > max_len:
-        text = text[: max_len - 1].rstrip() + "…"
-    return text
+    return _clip(text, max_len)
 
 
 class _Text:
@@ -188,6 +231,7 @@ class LineMap:
         else:
             specs = list(lines)
         self.order = [s.symbol for s in specs]
+        self.specs: dict[str, LineSpec] = {s.symbol: s for s in specs}
         self._map: dict[str, str] = {s.symbol: s.symbol for s in specs}
         for spec in specs:
             for vehicle in (*spec.vehicles.long, *spec.vehicles.short):
@@ -278,8 +322,45 @@ class _Evidence:
         return out[:limit]
 
 
+# ------------------------------------------------------------------------------ market moves
+# Histories whose derived percentages the record may show (docs/data-rights.md); broker candles
+# are shown only as coarse states and volatility ratios.
+_OPEN_HISTORY = frozenset({"tiingo", "binance"})
+_PCT_BOUND = 1000.0
+
+
+def _history_source(value: str | None) -> str:
+    return (value or "").split(":", 1)[0].strip().lower()
+
+
+def day_change_pct(state: MarketState | None) -> float | None:
+    """The last completed daily return in percent, derived from the state's own numbers
+    (ret1d_sigma x sigma_daily is the daily log return). None without them, or when the history
+    is not Tiingo / Binance (broker candles are not republished)."""
+    if state is None or _history_source(state.history_source) not in _OPEN_HISTORY:
+        return None
+    z, sigma = state.ret1d_sigma, state.sigma_daily
+    if z is None or sigma is None or not (math.isfinite(z) and math.isfinite(sigma)) or sigma <= 0:
+        return None
+    pct = round(math.expm1(z * sigma) * 100.0, PCT_DP) + 0.0
+    return pct if abs(pct) <= _PCT_BOUND else None
+
+
+def day_changes(pack: FactPack | None, lm: LineMap) -> dict[str, float]:
+    """{line: day_change_pct} for every line of the pack that has one."""
+    if pack is None:
+        return {}
+    out: dict[str, float] = {}
+    for sym, state in pack.states.items():
+        line = lm.lookup(sym)
+        value = day_change_pct(state)
+        if line is not None and value is not None:
+            out[line] = value
+    return out
+
+
 # ------------------------------------------------------------------------------ builders
-def _reference(rec: CycleRecord, lm: LineMap) -> dict[str, PublicReferenceLine]:
+def _reference(rec: CycleRecord, lm: LineMap, day: Mapping[str, float]) -> dict[str, PublicReferenceLine]:
     if rec.reference is None:
         return {}
     out: dict[str, PublicReferenceLine] = {}
@@ -289,6 +370,7 @@ def _reference(rec: CycleRecord, lm: LineMap) -> dict[str, PublicReferenceLine]:
             continue
         out[line] = PublicReferenceLine(
             trend=entry.trend, level_ref=_level(entry.level_ref), weight_ref_x=_x(entry.weight_ref),
+            day_change_pct=day.get(line),
         )
     return out
 
@@ -301,9 +383,9 @@ def _card(card: EvidenceCard, lm: LineMap, text: _Text, ev: _Evidence) -> Public
         card_type=card.card_type,
         scope=scope[:6],
         direction=card.direction,
-        claim=text(card.claim, 200),
+        claim=text(card.claim, 220),
         horizon_days=card.horizon_days,
-        falsifier=text(card.falsifier, 160),
+        falsifier=text(card.falsifier, 180),
         qualifying=card.qualifying,
         corroborated_by=[c for c in card.corroborated_by if re.match(r"^K:[a-z_]+:\d+$", c)][:8],
         evidence=ev.refs(card.evidence_ids, 8),
@@ -317,19 +399,19 @@ def _advocate(case: AdvocateCase | None, lm: LineMap, text: _Text, ev: _Evidence
     if isinstance(case, BearCase):
         rebuttals = [
             PublicRebuttal(
-                claim_id=clean_text(r.claim_id, 16), verdict=r.verdict, text=text(r.text, 240),
+                claim_id=clean_text(r.claim_id, 16), verdict=r.verdict, text=text(r.text, 270),
                 evidence=ev.refs(r.evidence_ids, 4),
             )
             for r in case.rebuttals
         ]
     return PublicAdvocate(
-        argument=text(case.argument, 600),
+        argument=text(case.argument, 1600),
         proposal_levels=lm.first_by_line(case.proposal),
         claims=[
-            PublicClaim(claim_id=c.claim_id, text=text(c.text, 300), evidence=ev.refs(c.evidence_ids, 6))
+            PublicClaim(claim_id=c.claim_id, text=text(c.text, 330), evidence=ev.refs(c.evidence_ids, 6))
             for c in case.claims
         ],
-        concessions=[text(c, 160) for c in case.concessions][:4],
+        concessions=[text(c, 300) for c in case.concessions][:4],
         strongest_opposing=ev.ref(case.strongest_opposing_fact_id),
         rebuttals=rebuttals[:6],
     )
@@ -353,7 +435,7 @@ def _replicate(
                 continue
             deviations.append(PublicDeviation(
                 line=line, level=_level(dev.level), direction=dev.direction,
-                reason=text(dev.reason, 160), evidence=ev.refs(dev.evidence_ids, 6),
+                reason=text(dev.reason, 180), evidence=ev.refs(dev.evidence_ids, 6),
             ))
     return PublicPMReplicate(
         replicate=rep.replicate,
@@ -362,17 +444,17 @@ def _replicate(
         deviations=deviations[:3],
         decisive_fact=(
             PublicDecisiveFact(
-                text=text(decision.decisive_fact.text, 200),
+                text=text(decision.decisive_fact.text, 220),
                 evidence=ev.ref(decision.decisive_fact.evidence_id),
             )
             if decision is not None else None
         ),
         sided_with=decision.sided_with if decision is not None else None,
         dismissed=(
-            [PublicDismissal(claim_id=clean_text(d.claim_id, 16), why=text(d.why, 160)) for d in decision.dismissed][:6]
+            [PublicDismissal(claim_id=clean_text(d.claim_id, 16), why=text(d.why, 180)) for d in decision.dismissed][:6]
             if decision is not None else []
         ),
-        no_change_reason=text(decision.no_change_reason, 200) if decision is not None else "",
+        no_change_reason=text(decision.no_change_reason, 220) if decision is not None else "",
         violations=[_code(v) for v in rep.audit_violations],
         reverted=[_code(v) for v in rep.reverted],
     )
@@ -410,6 +492,148 @@ def _single_agent(rec: CycleRecord, ref_levels, lm, text, ev) -> PublicPM | None
         return None
     return _pm_block(rec.single_agent, None, ref_levels, lm, text, ev,
                      levels=rec.single_agent_levels, agreement={})
+
+
+_CARD_ID = re.compile(r"^K:[a-z_]+:\d+$")
+_SLEEVE = re.compile(r"^[a-z][a-z_]{0,15}$")
+
+
+def _macro(rec: CycleRecord, text: _Text, ev: _Evidence) -> PublicMacro | None:
+    """The macro analyst's typed output (None when it did not run or its reply was unusable)."""
+    out = rec.macro
+    if out is None:
+        return None
+    return PublicMacro(
+        regime=out.regime,
+        drivers=[PublicMacroDriver(text=text(d.text, 220), evidence=ev.refs(d.evidence_ids, 6))
+                 for d in out.drivers][:4],
+        sleeve_tilts={k: v for k, v in sorted(out.sleeve_tilts.items()) if _SLEEVE.match(k)},
+        cards=[c.card_id for c in rec.cards if c.role == "macro" and _CARD_ID.match(c.card_id)][:8],
+    )
+
+
+# ------------------------------------------------------------------------------ facts table
+# Rounding by unit (digits); the record's units: pct 0.01, ratio / x 0.001, bps 0.1.
+_FACT_DIGITS = {"pct": 2, "sigma": 2, "ratio": 3, "x": 3, "bps": 1, "bps_day": 2, "hours": 1, "days": 1}
+_FACT_UNITS = frozenset({*_FACT_DIGITS, "state"})
+_STATE_WORD = re.compile(r"^[a-z][a-z_]{0,15}$")
+# Broker-candle facts the record may show: coarse states and volatility ratios only.
+_BROKER_OK = frozenset({"F:trend", "F:market_open", "V:vol_ratio", "V:ewma5_60"})
+_FACT_GROUP = {"market": 0, "vol": 0, "cost": 0, "fundamental": 0, "macro": 1, "event": 2, "news": 3,
+               "filing": 4}
+
+
+def _fact_source(fact: Fact) -> str:
+    src = (fact.source or "").strip().lower()
+    head = _history_source(src)
+    if head in ("tiingo", "binance", "clock", "fred"):
+        return head
+    if head == "etoro":
+        return "broker"
+    if src == "costs:floor":
+        return "policy"
+    if src.startswith("costs"):
+        return "broker"            # a broker what-if (or an unlabelled quote): costs in NAV bp only
+    return "unknown"
+
+
+def _fact_value(fact: Fact) -> bool | float | str | None:
+    """The fact's value in its public form (rounded; states as short words), else None."""
+    v = fact.value
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int | float):
+        f = float(v)
+        if not math.isfinite(f) or abs(f) > 1_000_000:
+            return None
+        return round(f, _FACT_DIGITS.get(fact.unit, 3)) + 0.0
+    if isinstance(v, str) and fact.unit == "state" and _STATE_WORD.match(v):
+        return v
+    return None
+
+
+def _withheld(fact: Fact, source: str) -> str | None:
+    """Why the value may not be published, or None when it may (docs/data-rights.md)."""
+    prefix, _, rest = fact.id.partition(":")
+    if fact.kind == "fundamental":
+        return "not_publishable"   # not yet covered by docs/data-rights.md: fail closed
+    if not fact.publishable and prefix != "M":
+        return "not_publishable"   # the pack's own "never publish" bit always wins (FRED: below)
+    if prefix == "M":
+        macro = _MACRO.match(fact.id)
+        series = macro.group(1) if macro else ""
+        if _fred_publishable(series, fact):
+            return None
+        return "licensed_series" if series in fred.READ_ONLY else "not_publishable"
+    if source in ("tiingo", "binance", "clock", "policy"):
+        return None
+    if source == "broker":
+        field = rest.rsplit(":", 1)[-1]
+        return None if f"{prefix}:{field}" in _BROKER_OK else "broker_data"
+    return "unknown_source"
+
+
+def _facts(pack: FactPack | None, lm: LineMap) -> tuple[list[PublicFact], int]:
+    """The evidence table: one entry per fact, event, news item and filing sentence of the pack.
+    Returns (entries, count dropped: a symbol that is not a line, or an id or kind the table
+    does not know)."""
+    if pack is None:
+        return [], 0
+    rows: list[tuple[tuple[int, int, int, str], PublicFact]] = []
+    dropped = 0
+
+    def order(kind: str, line: str | None, eid: str) -> tuple[int, int, int, str]:
+        pos = lm.order.index(line) if line in lm.order else len(lm.order)
+        return (_FACT_GROUP.get(kind, 5), pos, "FVC".find(eid[:1]) % 4, eid)
+
+    for fact in pack.facts:
+        line = None
+        if fact.symbol is not None:
+            line = lm.lookup(fact.symbol)
+            if line is None:
+                dropped += 1
+                continue
+        kind = fact.kind if fact.kind in _FACT_GROUP else None
+        if kind is None or not (_ID_OK.match(fact.id) or _MACRO.match(fact.id)):
+            dropped += 1
+            continue
+        source = _fact_source(fact)
+        withheld = _withheld(fact, source)
+        value = _fact_value(fact) if withheld is None else None
+        rows.append((order(kind, line, fact.id), PublicFact(
+            id=fact.id, kind=kind, label=labels.fact_label(fact.id), line=line, value=value,
+            unit=fact.unit if fact.unit in _FACT_UNITS else None,
+            as_of=_as_datetime(fact.available_at), source=source, withheld=withheld,
+        )))
+    for event in pack.events:
+        lines = {lm.lookup(s) for s in event.symbols}
+        if not _ID_OK.match(event.id) or None in lines:
+            dropped += 1
+            continue
+        line = next(iter(lines)) if len(lines) == 1 else None
+        source = "calendar" if event.source.startswith(("policy_calendar", "fred_release")) else "broker_feed"
+        rows.append((order("event", line, event.id), PublicFact(
+            id=event.id, kind="event", label=labels.fact_label(event.id), line=line, source=source,
+        )))
+    for item in pack.news:
+        mapped = {m for m in (lm.lookup(s) for s in item.symbols) if m is not None}
+        line = next(iter(mapped)) if len(mapped) == 1 else None
+        rows.append((order("news", line, item.id), PublicFact(
+            id=item.id, kind="news", label=labels.NEWS_LABEL, line=line, source="broker_feed",
+        )))
+    for filing in pack.filings:
+        line = lm.lookup(filing.symbol)
+        for sentence in filing.sentences:
+            if not _ID_OK.match(sentence.id):
+                dropped += 1
+                continue
+            rows.append((order("filing", line, sentence.id), PublicFact(
+                id=sentence.id, kind="filing", label=labels.FILING_LABEL, line=line, source="filing",
+            )))
+    unique: dict[str, tuple[tuple[int, int, int, str], PublicFact]] = {}
+    for key, row in rows:
+        unique.setdefault(row.id, (key, row))
+    return [row for _, row in sorted(unique.values(), key=lambda kr: kr[0])], dropped
 
 
 def _check_value(v: float | str | None) -> float | str | None:
@@ -550,22 +774,57 @@ def short_fingerprint(value: str | None) -> str:
 
 
 _CALL_STATUSES = set(get_args(CallStatus))
+_HTTP = re.compile(r"^http (\d{3})\b")
+_SKIP_REASONS = frozenset({"call_budget", "council_unavailable"})
+
+
+def error_kind(status: str, error: str | None) -> str | None:
+    """A fixed code for why a call did not simply succeed, read from the gateway's error text
+    (see `council.llm.gateway`). The text itself is never published; unknown texts map to the
+    status's generic code. None for a clean call."""
+    e = " ".join((error or "").split()).lower()
+    if status in ("ok", "cached"):
+        return "corrected" if status == "ok" and e.startswith("corrected") else None
+    if status == "timeout":
+        return "timeout"
+    if status == "skipped":
+        return e if e in _SKIP_REASONS else "skipped"
+    if status == "parse_fail":
+        if " | correction " in e:
+            return "correction_failed"
+        final = e.rsplit("| after correction:", 1)[-1]
+        return "not_json" if "not a json object" in final else "schema"
+    if status == "transport":
+        http = _HTTP.match(e)
+        if http:
+            code = int(http.group(1))
+            return "http_429" if code == 429 else "http_5xx" if code >= 500 else "http_4xx"
+        if e.startswith("server error"):
+            return "server_error"
+        if e.startswith(("non-json", "unexpected response")):
+            return "bad_response"
+        if e.startswith("unexpected"):
+            return "internal_error"
+        return "connection"
+    return "invalid"
 
 
 def _calls(rec: CycleRecord) -> list[PublicCall]:
-    return [
-        PublicCall(
+    out = []
+    for c in rec.calls:
+        status = c.status if c.status in _CALL_STATUSES else "invalid"
+        out.append(PublicCall(
             role=_role(c.role),
             replicate=max(0, min(c.replicate, 16)),
-            status=c.status if c.status in _CALL_STATUSES else "invalid",
+            status=status,
             latency_ms=max(0, c.latency_ms),
             tokens_in=max(0, c.tokens_in),
             tokens_out=max(0, c.tokens_out),
             prompt_id=clean_text(c.prompt_id, 64),
             prompt_sha=_sha(c.prompt_sha),
-        )
-        for c in rec.calls
-    ]
+            error_kind=error_kind(status, c.error),
+        ))
+    return out
 
 
 _KILL = set(get_args(KillState))
@@ -600,6 +859,7 @@ def public_cycle(
         flags.append("kill_state_unrecognised")
         kill = "NORMAL"
     single_agent = _single_agent(rec, ref_levels, lm, text, ev)
+    facts, facts_dropped = _facts(pack, lm)
     fields: dict[str, Any] = {
         "cycle_id": rec.cycle_id,
         "slot": rec.slot,
@@ -614,8 +874,9 @@ def public_cycle(
         "think": rec.think,
         "why_we_met": [_code(w) for w in rec.why_we_met],
         "kill_state": kill,
-        "reference": _reference(rec, lm),
+        "reference": _reference(rec, lm, day_changes(pack, lm)),
         "cards": [_card(c, lm, text, ev) for c in rec.cards],
+        "macro": _macro(rec, text, ev),
         "debate": PublicDebate(
             bull=_advocate(rec.debate.bull_open, lm, text, ev),
             bear=_advocate(rec.debate.bear, lm, text, ev),
@@ -640,12 +901,15 @@ def public_cycle(
         "plan": _plan(rec.plan, lm),
         "decision": _decision(rec),
         "calls": _calls(rec),
+        "facts": facts,
     }
     # Counters are complete only after every field above was built.
     if lm.unmapped:
         flags.append(f"unmapped_symbols_dropped:{lm.unmapped}")
     if ev.dropped:
         flags.append(f"evidence_ids_dropped:{ev.dropped}")
+    if facts_dropped:
+        flags.append(f"facts_dropped:{facts_dropped}")
     if text.withheld:
         flags.append(f"licensed_overlap_withheld:{text.withheld}")
     if pack is None:
@@ -682,6 +946,51 @@ def public_ops_row(rec: CycleRecord) -> PublicOpsRow:
     )
 
 
+class PositionLike(Protocol):
+    """The fields read from `council.models.broker.Position` (duck-typed). Amounts and rates are
+    only numerators and denominators of a percentage; they are never published."""
+
+    symbol: str
+    is_buy: bool
+    leverage: int
+    open_rate: float
+    close_rate: float | None
+    amount: float
+    settlement: str
+
+
+_SETTLEMENTS = frozenset(get_args(Settlement))
+
+
+def _position_views(positions: Iterable[PositionLike], lm: LineMap) -> dict[str, dict[str, Any]]:
+    """Per line: the largest open position's settlement and leverage, and the P/L % since open
+    (price return x leverage, weighted by invested amount). Unknown symbols are skipped."""
+    groups: dict[str, list[PositionLike]] = {}
+    for p in positions:
+        line = lm.lookup(str(p.symbol))
+        if line is not None:
+            groups.setdefault(line, []).append(p)
+    out: dict[str, dict[str, Any]] = {}
+    for line, group in groups.items():
+        largest = max(group, key=lambda p: _pos(p.amount) or 0.0)
+        lev = largest.leverage if isinstance(largest.leverage, int) and 1 <= largest.leverage <= 10 else None
+        num = den = 0.0
+        for p in group:
+            amount, opened, now = _pos(p.amount), _pos(p.open_rate), _pos(p.close_rate)
+            if amount is None or opened is None or now is None:
+                continue
+            leverage = p.leverage if isinstance(p.leverage, int) and p.leverage >= 1 else 1
+            num += amount * leverage * (now / opened - 1.0) * (1.0 if p.is_buy else -1.0)
+            den += amount
+        pnl = _within(round(num / den * 100.0, PCT_DP) + 0.0, _PCT_BOUND) if den > 0 else None
+        out[line] = {
+            "settlement": largest.settlement if largest.settlement in _SETTLEMENTS else None,
+            "leverage": lev,
+            "pnl_since_open_pct": pnl,
+        }
+    return out
+
+
 def public_book(
     cycle_id: str,
     weights: Mapping[str, float],
@@ -690,20 +999,37 @@ def public_book(
     reference_weights: Mapping[str, float] | None = None,
     levels: Mapping[str, float] | None = None,
     kill_state: str = "NORMAL",
+    positions: Iterable[PositionLike] | None = None,
+    pack: FactPack | None = None,
 ) -> PublicBook:
-    """The book by exposure line from signed weights (fractions of NAV, i.e. x)."""
+    """The book by exposure line from signed weights (fractions of NAV, i.e. x).
+
+    Each line also carries its public description (name, asset class, session), and, when given,
+    `positions` (the broker snapshot's open positions: settlement, leverage, P/L % since open) and
+    `pack` (the 1-day market move of lines with Tiingo / Binance history)."""
     lm = LineMap(lines)
     w = lm.sum_by_line(weights)
     ref = lm.sum_by_line(reference_weights or {})
     lv = lm.first_by_line(levels or {})
+    held = _position_views(positions or (), lm)
+    day = day_changes(pack, lm)
     book_lines = {}
-    for line in lm.ordered({**w, **ref}):
+    for line in lm.ordered({**w, **ref, **held}):
         weight = w.get(line, 0.0)
+        spec = lm.specs.get(line)
+        view = held.get(line, {})
         book_lines[line] = PublicBookLine(
             direction="long" if weight > 0 else "short" if weight < 0 else "flat",
             weight_x=weight,
             level=lv.get(line),
             reference_weight_x=ref.get(line),
+            name=clean_text(spec.name, 48) or None if spec is not None else None,
+            asset_class=spec.asset_class if spec is not None else None,
+            session=spec.session if spec is not None else None,
+            settlement=view.get("settlement"),
+            leverage=view.get("leverage"),
+            pnl_since_open_pct=view.get("pnl_since_open_pct"),
+            day_change_pct=day.get(line),
         )
     gross = _x(sum(abs(v) for v in w.values()))
     net = _x(sum(w.values()))

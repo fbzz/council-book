@@ -34,7 +34,7 @@ A mechanical <strong>reference book</strong> is the default position and the ben
 </ul>
 {{ m.flow(flow_empty, "The steps of every run", states=false) }}
 {{ m.flow_key(flow_empty) }}
-<p class="small">The <a href="index.html#latest">Portfolio page</a> shows this diagram filled in for the latest run.</p>
+<p class="small">The <a href="index.html#latest">Portfolio page</a> shows this diagram filled in for the latest run, and the <a href="agents/index.html">Agents page</a> shows each agent's record.</p>
 {% endcall %}
 
 {% call m.section("stop", 3, "What can code stop?", "risk") %}
@@ -71,7 +71,7 @@ A mechanical <strong>reference book</strong> is the default position and the ben
   <tbody>
   {% for r in roster.llm %}
   <tr{% if not r.enabled %} class="disabled"{% endif %}>
-    <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
+    <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{% if r.page %}<a href="{{ r.page }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</strong><br><span class="muted small">{{ r.what }}</span></td>
     <td><span class="chip kind-llm">LLM</span></td>
     <td><span class="chip auth-{{ r.authority | lower }}">{{ r.authority }}</span></td>
     <td class="n">{{ r.replicates }}{% if r.cadence != "every run" %}<br><span class="muted small">{{ r.cadence }}</span>{% endif %}</td>

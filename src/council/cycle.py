@@ -341,16 +341,18 @@ async def _council(ctx: CycleContext, rec: CycleRecord, *, pack, ref, bands, ban
         levels, _ = enforce_authority(dict(ref_levels), bands)
         return "code_only", levels, {}
     remaining = max(30.0, ctx.budget_s - (time.monotonic() - started) - 120.0)
+    call_log: list = []     # filled stage by stage, so a council timeout keeps the calls that ran
     try:
         result = await asyncio.wait_for(
             run_council(gw=ctx.gateway, reg=ctx.registry, pack=pack, ref=ref, bands=bands,
                         current_levels=current_levels, cost_hints=cost_hints(quotes),
                         lines=list(policy.universe.lines), policy=policy, enforce=enforce_authority,
                         now=pack.slot, run_single_agent=ctx.run_single_agent, run_macro=run_macro,
-                        **_council_extras(code_cards, bands_fn)),
+                        **_council_extras(code_cards, bands_fn, call_log)),
             timeout=remaining)
     except TimeoutError:
         rec.flags.append("council_timeout")
+        rec.calls = list(call_log)
         levels, _ = enforce_authority(dict(ref_levels), bands)
         return "council_unavailable", levels, {}
     rec.cards = list(result.cards)
@@ -374,7 +376,7 @@ async def _council(ctx: CycleContext, rec: CycleRecord, *, pack, ref, bands, ban
     return result.basis, dict(result.aggregate.levels), raw
 
 
-def _council_extras(code_cards, bands_fn) -> dict[str, Any]:
+def _council_extras(code_cards, bands_fn, call_log: list | None = None) -> dict[str, Any]:
     """Pass the new run_council parameters only when the installed council supports them."""
     import inspect
 
@@ -386,6 +388,8 @@ def _council_extras(code_cards, bands_fn) -> dict[str, Any]:
         out["code_cards"] = list(code_cards)
     if "bands_fn" in params:
         out["bands_fn"] = bands_fn
+    if "call_log" in params and call_log is not None:
+        out["call_log"] = call_log
     return out
 
 
@@ -518,7 +522,7 @@ def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: 
         ref_w = rec.reference.weights() if rec.reference else None
         files.update(journal.book_files(redact.public_book(
             rec.cycle_id, rec.risk.base_w or snapshot.signed_w, lines=lines, reference_weights=ref_w,
-            kill_state=rec.kill_state)))
+            kill_state=rec.kill_state, positions=snapshot.positions, pack=pack)))
     try:
         result = ctx.publisher.publish(files, f"cycle {rec.cycle_id}: {rec.decision_state}")
     except Exception as exc:

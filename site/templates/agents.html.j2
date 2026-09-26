@@ -1,0 +1,66 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% block title %}Agents{% endblock %}
+{% block toc %}
+{% set ns = namespace(group="") %}
+{% for a in agents %}
+{% if a.spec.group != ns.group %}{% set ns.group = a.spec.group %}{{ m.toc_group(a.spec.group) }}{% endif %}
+{{ m.toc_item("ag-" ~ a.slug, a.name, a.accent, a.stats.worst) }}
+{% endfor %}
+{{ m.toc_group("People") }}
+{{ m.toc_item("ag-human", "Human operator", "human") }}
+{% endblock %}
+{% block toc_foot %}<p class="toc-legend">The mark is the worst status over the published runs.</p>{{ m.toc_legend() }}{% endblock %}
+{% block main %}
+<header class="hero">
+  <p class="eyebrow">Agents</p>
+  <h1>Every agent, and how it has behaved</h1>
+  <p class="lede">The council is a chain of agents: code officers that build the facts, language-model analysts and advocates that argue, a manager that decides within limits, and code that checks everything. Each row shows one agent's job and its record over {{ plural(cycles_count, "published run") }}; its page has every output it gave.</p>
+</header>
+
+{% set llm = agents | selectattr("kind", "equalto", "LLM") | list %}
+{% set calls = llm | sum(attribute="stats.calls") %}
+{% set ok = llm | sum(attribute="stats.ok") %}
+{% set okp = (100.0 * ok / calls) if calls else none %}
+<dl class="strip strip-agents">
+  <div class="st"><dt>{{ icon("users") }}Agents</dt><dd class="st-v">{{ agents | length + 1 }}</dd><dd class="st-sub">{{ llm | length }} language models · {{ agents | length - llm | length }} code · 1 person</dd></div>
+  <div class="st"><dt>{{ icon("cpu") }}Model</dt><dd class="st-v st-v-sm st-model"><code>{{ model or "—" }}</code></dd><dd class="st-sub">every language-model agent · thinking {{ "on" if think else "off" }}</dd></div>
+  <div class="st st-ring"><dt>{{ icon("circle-check") }}Usable replies</dt><dd>{{ m.pring(okp, ring_css(okp), (ok ~ " of " ~ calls ~ " calls usable") if calls else "no calls yet") }}</dd><dd class="st-v st-v-sm">{{ ok }} <span class="st-of">of {{ calls | count }} calls</span></dd></div>
+  <div class="st"><dt>{{ icon("circle-x") }}Failed calls</dt><dd class="st-v">{{ calls - ok }}</dd><dd class="st-sub">over {{ plural(cycles_count, "run") }}; each is listed on its agent's row</dd></div>
+</dl>
+
+{% set ns = namespace(group="", n=0) %}
+{% for a in agents %}
+{% if a.spec.group != ns.group %}
+{% if ns.group %}</tbody></table></div></section>{% endif %}
+{% set ns.group = a.spec.group %}{% set ns.n = ns.n + 1 %}
+<section class="card accent-{{ a.accent }}" aria-labelledby="grp-{{ ns.n }}">
+<h2 id="grp-{{ ns.n }}"><span class="num" aria-hidden="true">{{ ns.n }}</span>{{ a.spec.group }}</h2>
+{{ m.wrap_open(a.spec.group) }}
+<table class="team stack">
+  <thead><tr><th scope="col">Agent</th><th scope="col" class="n">Calls</th><th scope="col">Usable</th><th scope="col">Failures</th><th scope="col" class="n">Median time</th><th scope="col">Last seen</th></tr></thead>
+  <tbody>
+{% endif %}
+{% set s = a.stats %}
+  <tr id="ag-{{ a.slug }}" class="k-{{ a.kind | lower }}">
+    <td class="text"><div class="member">{{ m.avatar(a.icon, a.accent) }}<div class="member-text"><p class="member-name"><a href="{{ a.slug }}.html">{{ a.name }}</a> <span class="node-kind kind-{{ a.kind | lower }}">{{ a.kind }}</span></p><p class="member-sub">{{ a.job }}</p>
+      {% if s.got is defined %}<p class="member-rec">The manager did what it asked in {{ s.got }} (named it as its side in {{ s.named }}) · claims set aside by the used attempt: {{ s.dismissed }}</p>{% endif %}
+      {% if s.valid is defined %}<p class="member-rec">Valid attempts {{ s.valid }} · a change in {{ s.changed }} runs</p>{% endif %}
+      {% if s.differs is defined %}<p class="member-rec">Differs from the council in {{ s.differs }} runs</p>{% endif %}
+    </div></div></td>
+    <td class="n" data-label="Calls">{% if a.kind == "LLM" %}{{ s.calls }}{% else %}<span class="muted" title="Runs">{{ plural(s.runs, "run") }}</span>{% endif %}</td>
+    <td class="llm-only" data-label="Usable">{% if a.kind == "LLM" and s.calls %}<span class="okcell">{{ m.pring(s.ok_num, s.ok_css, s.ok_pct ~ " of calls usable", none, "sm") }}<span class="n">{{ s.ok_pct }}</span></span>{% if s.corrected %}<br><span class="muted small">{{ s.corrected }} corrected</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td class="llm-only fails" data-label="Failures">{% if a.kind == "LLM" %}{% if s.failed %}<span class="fail-words">{{ s.fail_words | join(", ") }}</span><span class="fail-links">{% for f in s.failed %}<a class="as tg-{{ f.css }}" href="{{ f.href }}" title="{{ f.what }}">{{ icon(status_icon(f.css)) }}{{ f.when }}{% if f.attempt %} · #{{ f.attempt }}{% endif %}</a>{% endfor %}</span>{% else %}<span class="muted">none</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td class="n llm-only" data-label="Median time">{{ s.latency if a.kind == "LLM" else "—" }}</td>
+    <td data-label="Last seen">{% if s.last %}<a class="when-link" href="../cycles/{{ s.last.cv.doc.cycle_id }}.html">{{ s.last.cv.doc.slot | short_when }}</a><br>{{ m.mark(s.last.status) }}{% else %}<span class="muted">not yet</span>{% endif %}</td>
+  </tr>
+{% endfor %}
+{% if ns.group %}</tbody></table></div></section>{% endif %}
+
+{% set ns.n = ns.n + 1 %}
+<section class="card accent-human" aria-labelledby="grp-human">
+<h2 id="grp-human"><span class="num" aria-hidden="true">{{ ns.n }}</span>People</h2>
+<div class="member member-solo" id="ag-human">{{ m.avatar("user", "human") }}<div class="member-text"><p class="member-name">Human operator <span class="node-kind kind-human">HUMAN</span></p><p class="member-sub">Approves or rejects every order in a separate operator terminal. Nothing trades without this step; each run's decision is on its page.</p></div></div>
+</section>
+<p class="small muted">Usable counts a call whose reply could be used, including one fixed by its single correction turn. Each failure links to its place in the run. The error text itself is never published, only a fixed code. "Did what it asked" compares the call the used manager attempt made with the advocate's final proposal (keeping the reference counts); "named" is the side the manager wrote down.</p>
+{% endblock %}

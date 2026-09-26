@@ -5,17 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="{{ csp }}">
 <meta name="referrer" content="no-referrer">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0a">
 <meta name="description" content="An LLM agent council proposes trades every four hours; code enforces the risk limits and a human approves every order. The public record.">
 <title>{% block title %}council-book{% endblock %} · council-book</title>
 <link rel="stylesheet" href="{{ root }}static/style.css">
 <link rel="stylesheet" href="{{ root }}static/geometry.css">
 </head>
-<body class="page-{{ page }}" data-last-cycle="{{ status.last_cycle_at }}">
+<body class="page-{{ page }}">
 <a class="skip" href="#main">Skip to content</a>
 <header class="top">
   <div class="top-inner">
-    <a class="brand" href="{{ root }}index.html"><span class="brand-mark" aria-hidden="true"></span>council-book</a>
+    <a class="brand" href="{{ root }}index.html"><span class="brand-mark" aria-hidden="true">cb</span><span class="brand-name">council-book</span></a>
     <nav class="pages" aria-label="Pages">
     {% for p in nav %}
       <a href="{{ root }}{{ p.href }}"{% if p.key == page %} aria-current="page"{% endif %}>{{ p.label }}</a>
@@ -23,16 +24,16 @@
     </nav>
     <div class="status-chips">
       {% block status_chip %}<span class="chip state-{{ status.css }}" title="Project status">{{ status.label }}</span>{% endblock %}
-      {% block stale %}<span id="stale" class="chip state-warn" hidden title="The last run is more than 5 hours old">! STALE</span>{% endblock %}
     </div>
   </div>
 </header>
 <div class="layout">
-  <nav class="toc" aria-label="On this page">
+  <nav class="toc" id="toc" aria-label="On this page">
     <p class="toc-title">On this page</p>
     <ol>
     {% block toc %}{% endblock %}
     </ol>
+    {% block toc_foot %}{% endblock %}
   </nav>
   <main id="main">
   {% block main %}{% endblock %}
@@ -52,8 +53,8 @@
       <li>Not endorsed by the broker.</li>
     </ul>
     <p class="muted">Code: Apache-2.0 · Journal, docs and site text: CC BY 4.0 (excluding third-party material). Page built {{ status.built }}. <a href="{{ root }}record.html#disclaimer">All disclaimers</a>.</p>
+    <p class="muted credit">Interface styles adapted from OpenSourceUI (MIT) · icons from Lucide (ISC) · <a href="{{ repo_url }}/blob/main/THIRD_PARTY_NOTICES.md">third-party notices</a>.</p>
   </div>
 </footer>
-<script>{{ stale_script }}</script>
 </body>
 </html>

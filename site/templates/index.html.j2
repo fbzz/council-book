@@ -1,153 +1,121 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
 {% block title %}Portfolio{% endblock %}
-{# the hero below carries the mode and the STALE badge, so the top bar does not repeat them #}
-{% block status_chip %}{% endblock %}
-{% block stale %}{% endblock %}
+{# the holdings strip carries the account state, so the top bar does not repeat it #}
+{% block status_chip %}{% if not holdings or not holdings.strip %}{{ super() }}{% endif %}{% endblock %}
 {% block toc %}
-{{ m.toc_item("holdings", "Holdings by line", "long") }}
+{{ m.toc_item("holdings", "Holdings", "long") }}
 {{ m.toc_item("latest", "Latest council run", "pm") }}
 {{ m.toc_item("recent", "Recent runs", "proposed") }}
 {{ m.toc_item("performance", "Performance vs controls", "code") }}
 {% endblock %}
 {% block main %}
-{% set target = portfolio and portfolio.basis == "target" %}
-<header class="hero">
+{% set h = holdings %}
+{% macro kill_tile(st, cls="") %}
+{% set mt = st.meter %}
+<div class="st st-kill{% if cls %} {{ cls }}{% endif %}"><dt>{{ icon("shield-check") }}Kill switch</dt><dd><span class="chip chip-lg state-{{ st.kill.css }}"><span aria-hidden="true">{{ "✓ " if st.kill.label == "NORMAL" else "! " }}</span>{{ st.kill.label | lower }}</span></dd>
+  <dd class="st-sub">fall from peak <strong>{{ mt.value }}</strong>{% if mt.state == "none" %} ({{ mt.sub }}){% endif %} · no new risk at {{ mt.warn_label }} · stop at {{ mt.halt_label }}</dd>
+  <dd class="meter" role="img" aria-label="{{ mt.aria }}; no new risk at {{ mt.warn_label }}, stop at {{ mt.halt_label }}"><span class="meter-fill meter-{{ mt.state }} {{ mt.fill }}"></span><span class="meter-tick {{ mt.warn_at }}"></span></dd>
+</div>
+{% endmacro %}
+<header class="hero hero-compact">
   <p class="eyebrow">Portfolio</p>
   <h1>What the council holds</h1>
-  <p class="lede">A council of language models reviews a small multi-asset portfolio every four hours. Code enforces every limit, and a person approves every order.</p>
-  <div class="status-row">
-    <span class="chip chip-lg state-{{ status.mode_chip.css }}" title="Mode">{{ status.mode_chip.label }}</span>
-    {% set k = kill_chip(status.kill) %}
-    <span class="chip chip-lg state-{{ k.css }}" title="Kill switch: {{ kill_phrase }}"><span aria-hidden="true">{{ "✓ " if status.kill == "NORMAL" else "! " }}</span>kill switch: {{ k.label | lower }}</span>
-    {% if status.last_when %}<span class="lastrun">Last run {{ status.last_when }}{% if status.last_late %} ({{ status.last_late }}){% endif %} · page built {{ status.built_clock }}</span>{% endif %}
-    <span id="stale" class="chip chip-lg state-warn" hidden title="The last run is more than 5 hours old">! STALE</span>
-  </div>
+  <p class="lede">A council of language models reviews this portfolio every four hours. Code enforces every limit, and a person approves every order.{% if status.last_when %} <span class="lastrun">Last run {{ status.last_when }}{% if status.last_late %} ({{ status.last_late }}){% endif %} · page built {{ status.built_clock }}</span>{% endif %}</p>
 </header>
 
 {% if latest and latest.rehearsal %}
-{{ m.rehearsal_banner("These are the weights the council would hold; nothing has been traded.") }}
-{% endif %}
-{% if run %}
-<p class="headline">{{ run.headline }} <a href="#latest">See the run ↓</a></p>
-{% endif %}
-{% if status.last_cycle_id and not status.last_cycle_revealed and status.last_decision %}
-<p class="note-line">The run of {{ status.last_slot_when }} is sealed: {{ m.chip(status.last_decision) }}. It is revealed here once its decision is final.</p>
+{{ m.rehearsal_banner("The table shows the weights the council would hold; nothing has been traded.") }}
 {% endif %}
 
-{% if portfolio %}
-{% set t = portfolio.tiles %}
-<div class="tiles">
-  <div class="tile">
-    <p class="tile-label">Invested{% if target %} · target{% endif %}</p>
-    <p class="tile-value">{{ t.invested }}</p>
-    <p class="tile-sub">{{ "all long, no shorts" if t.all_long else "all positions, long and short" }}</p>
-  </div>
-  {% if t.all_long %}
-  <div class="tile">
-    <p class="tile-label">Lines held{% if target %} · target{% endif %}</p>
-    <p class="tile-value">{{ t.held }} <span class="tile-of">of {{ t.n_lines }}</span></p>
-    <p class="tile-sub">lines with a position</p>
-  </div>
-  {% else %}
-  <div class="tile">
-    <p class="tile-label">Net exposure{% if target %} · target{% endif %}</p>
-    <p class="tile-value">{{ t.net }}</p>
-    <p class="tile-sub">long minus short</p>
-  </div>
-  {% endif %}
-  <div class="tile">
-    <p class="tile-label">Cash{% if target %} · target{% endif %}</p>
-    <p class="tile-value">{{ t.cash }}</p>
-    <p class="tile-sub">not invested</p>
-  </div>
-  {% set mt = t.meter %}
-  <div class="tile">
-    <p class="tile-label">Fall from peak vs the {{ mt.halt_label }} stop</p>
-    <p class="tile-value">{{ mt.value }}{% if mt.state == "none" %} <span class="tile-of">{{ mt.sub }}</span>{% endif %}{% if mt.word %} <span class="mark mark-{{ 'ok' if mt.state == 'ok' else 'fallback' if mt.state == 'warn' else 'failed' }} tile-mark"><span aria-hidden="true">{{ "✓" if mt.state == "ok" else "!" }}</span> {{ mt.word }}</span>{% endif %}</p>
-    <div class="meter" role="img" aria-label="{{ mt.aria }}">
-      <span class="meter-fill meter-{{ mt.state }} {{ mt.fill }}"></span>
-      <span class="meter-tick {{ mt.warn_at }}"></span>
-    </div>
-    <p class="meter-scale" aria-hidden="true"><span>0</span><span>{{ mt.halt_label }}</span></p>
-    <p class="tile-sub">Tick {{ mt.warn_label }}: no new risk · {{ mt.halt_label }}: stop{% if mt.state != "none" %} · {{ mt.sub }}{% endif %}</p>
-  </div>
-</div>
-<p class="tiles-note small muted">
-{% if portfolio.basis == "target" %}Target weights from the rehearsal run of {{ portfolio.when }}. Percent of the portfolio: 35% means 0.35x the portfolio's value.
-{% elif portfolio.basis == "book" %}Positions after the run of {{ portfolio.when }}. Percent of the portfolio's value.
-{% else %}Positions at the start of the latest run ({{ portfolio.when }}). Percent of the portfolio's value.{% endif %}
-</p>
+{% call m.section("holdings", 1, "Holdings", "long") %}
+{% if pending %}
+{% call m.alert("pending", "lock", plural(pending | length, "proposal") ~ " awaiting the operator", pending[0].slot | short_when) %}
+<p>Sealed, revealed after the decision: a proposal's content stays private until the operator approves or rejects it.</p>
+<p>{% for s in pending %}The run of {{ s.slot | when }} is sealed {{ m.chip(s.chip) }}{% if s.sealed %} · <a href="journal/commitments/{{ s.cycle_id[0:4] }}/{{ s.cycle_id[5:7] }}/{{ s.cycle_id }}.json" title="The commitment published before any approval">its seal</a>{% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}</p>
+{% endcall %}
 {% endif %}
+{% if executing %}
+{% call m.alert("run", "rocket", plural(executing | length, "proposal") ~ " approved, executing") %}<p>Revealed once the execution is final.</p>{% endcall %}
+{% endif %}
+{% set st = h.strip %}
+{% if st %}
+<dl class="strip strip-home{% if h.show_pnl %} with-pnl{% endif %}{% if not st.day_known %} no-day{% endif %}">
+  <div class="st st-acct"><dt>{{ icon("wallet") }}Account</dt><dd><span class="chip chip-lg state-{{ st.account.css }}">{{ st.account.label }}</span></dd><dd class="st-sub">{{ st.account.sub }}</dd></div>
+  <div class="st st-gross"><dt>{{ icon("chart-line") }}Gross{% if h.target %} · target{% endif %}</dt><dd class="st-v">{{ st.gross }}</dd><dd class="st-sub">{{ st.gross_share }} of the portfolio invested</dd></div>
+  <div class="st st-net"><dt>{{ icon("scale") }}Net{% if h.target %} · target{% endif %}</dt><dd class="st-v">{{ st.net }}</dd><dd class="st-sub">{{ "all long" if st.all_long else "long minus short" }}</dd></div>
+  <div class="st st-cash"><dt>{{ icon("circle-dot") }}Cash{% if h.target %} · target{% endif %}</dt><dd class="st-v">{{ st.cash }}</dd><dd class="st-sub">not invested</dd></div>
+  <div class="st st-count"><dt>{{ icon("list-checks") }}Holdings</dt><dd class="st-v">{{ st.held }} <span class="st-of">of {{ st.lines }}</span></dd><dd class="st-sub">lines with a position</dd></div>
+  {% if h.show_pnl %}<div class="st st-pnl"><dt>{{ icon("wallet") }}Open P/L</dt><dd class="st-v">{% if st.pnl_known %}{{ m.move(st.pnl, st.pnl_dir) }}{% else %}—{% endif %}</dd><dd class="st-sub">{% if st.pnl_known %}since open, % of the amount invested{% else %}no P/L published{% endif %}</dd></div>{% endif %}
+  {% if st.day_known %}<div class="st st-day"><dt>{{ icon("activity") }}{{ st.day_label }}</dt><dd class="st-v">{% if st.day_known %}{{ m.move(st.day, st.day_dir) }}{% else %}—{% endif %}</dd><dd class="st-sub">{{ st.day_sub }}</dd></div>{% endif %}
+  {{ kill_tile(st) }}
+</dl>
 
-{% call m.section("holdings", 1, "Holdings by line", "long") %}
-{% if portfolio %}
-<p>The portfolio is split into {{ portfolio.rows | length }} <strong>lines</strong>, each a market it can hold, such as the Nasdaq-100 or gold. Each bar is a line's weight{% if target %} in the target the council would hold{% endif %}, as a share of the portfolio. The thin tick marks the <strong>mechanical reference</strong>: {{ reference_gloss }}.</p>
-<p class="small"><strong>Size</strong> is how much of a line's full allocation is held: 1.00 is the full amount the rules give it, 0.25 a quarter.</p>
-<div class="holdings{% if portfolio.one_sided %} one-sided{% endif %}">
-  <div class="hrow axis-row" aria-hidden="true">
-    <div class="hname muted small">Line and trend</div>
-    <div class="hbar"><div class="axis">{% for a in portfolio.axis %}<span class="tick {{ a.cls }} {{ a.at }}">{{ a.label }}</span>{% endfor %}</div></div>
-  </div>
-  {% for g in portfolio.groups %}
-  <h3 class="hgroup">{{ g.label }} <span class="muted">· {{ g.share }}{% if target %} target{% endif %}</span></h3>
-  {% if g.note %}<p class="hgnote">{{ g.note }}</p>{% endif %}
-  <ul class="hrows" role="list">
-  {% for r in g.rows %}
-    <li class="hrow">
-      <div class="hname"><strong>{{ r.name }}</strong> {{ m.trend_chip(r.trend) }}{% if r.marker %} <span class="hmark">{{ r.marker }}</span>{% endif %}</div>
-      <div class="hbar">{{ m.dbar(r.bar, r.title) }}</div>
-      {% for n in r.notes %}<p class="hnote">{{ n }}</p>{% endfor %}
-    </li>
-  {% endfor %}
-  </ul>
-  {% endfor %}
-</div>
-<ul class="legend small">
-  <li><span class="swatch sw-long"></span>long{% if portfolio.one_sided %} (this book holds no shorts){% endif %}</li>
-  {% if portfolio.has_short %}<li><span class="swatch sw-short"></span>short</li>{% endif %}
-  <li><span class="swatch sw-ref"></span>mechanical reference</li>
-  <li class="muted">Trend: the line's price trend, which sets the reference.</li>
-</ul>
-<details class="more">
-  <summary>Show as table</summary>
-  {{ m.wrap_open("Holdings by line (scrolls sideways)") }}
-  <table class="wide">
-    <thead><tr><th>Line</th><th>Trend</th><th class="n">Reference size</th><th class="n">Council size</th><th class="n">Weight</th><th class="n">Share</th><th class="n">Reference weight</th></tr></thead>
-    <tbody>
-    {% for r in portfolio.rows %}
-    <tr>
-      <td><strong>{{ r.name }}</strong> <span class="muted small">{{ r.line }}</span></td>
-      <td>{{ r.trend or "—" }}</td>
-      <td class="n">{{ r.ref_level | level }}</td>
-      <td class="n">{{ r.council_level | level }}</td>
-      <td class="n">{{ r.weight | x }}</td>
-      <td class="n">{{ r.share }}</td>
-      <td class="n">{{ r.ref | x }} ({{ r.ref_share }})</td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  <p class="small muted">Size: how much of the line's full allocation is held (1.00 = full). Weight: a multiple of the portfolio's value (x); 0.35x is 35%.</p>
-</details>
+<p class="basis">{% if h.target %}<span class="chip state-rehearsal">TARGET</span> <strong>{{ h.label }}.</strong><span class="basis-more"> The weights the latest run{% if h.run_id %} (<a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>){% endif %} would hold; no P/L exists until something is traded. Weights are % of the portfolio's value; the tick on each bar marks the mechanical reference.</span>{% else %}<span class="chip state-executed">LIVE BOOK</span> Positions after the run of <a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>.<span class="basis-more"> Lagged until that run is revealed. P/L is the book's own, in % of the amount invested. Weights are % of the portfolio's value; the tick on each bar marks the mechanical reference.</span>{% endif %}</p>
 {% else %}
-{{ m.empty("Nothing held yet", "No broker account is connected and the council has not run. After the first run, each line's weight appears here.") }}
-<p class="small muted">The lines it will hold: {% for l in lines %}<span class="chip line-chip">{{ l.name }}</span>{% endfor %}</p>
+{% call m.alert("pending", "hourglass", "Nothing held yet") %}<p>No broker account is connected and the council has not run. After the first run, each line's weight appears here.</p>{% endcall %}
 {% endif %}
+
+<div class="hx{% if not h.show_pnl %} no-pnl{% endif %}{% if not h.show_day %} no-day{% endif %}">
+  {% for f in h.filters %}<input class="hf-in" type="radio" name="hf" id="hf-{{ f.key }}" value="{{ f.key }}"{% if loop.first %} checked{% endif %}>
+  {% endfor %}
+  <div class="hx-head">
+    <p class="hx-title" id="hf-label">Filter by asset class</p>
+    <div class="hf-chips" role="group" aria-labelledby="hf-label">
+      {% for f in h.filters %}<label class="hf-chip" for="hf-{{ f.key }}">{% if f.key != "all" %}<span class="ac-dot ac-{{ f.key }}" aria-hidden="true"></span>{% endif %}{{ f.label }} <span class="hf-n">{{ f.total }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="hx-body">
+    <table class="htable">
+      {{ m.hcolgroup(h.show_day, h.show_pnl) }}
+      {{ m.hhead(h) }}
+      <tbody>
+      {% for r in h.held %}{{ m.hrow(r, h.show_day, h.show_pnl) }}{% endfor %}
+      {% if h.basis == "skeleton" %}{% for r in h.flat %}{{ m.hrow(r, h.show_day, h.show_pnl) }}{% endfor %}{% endif %}
+      </tbody>
+    </table>
+    {% if not h.held and h.basis != "skeleton" %}<p class="hf-none">Nothing is held{% if h.target %} in the target{% endif %}.</p>{% endif %}
+    {% if h.basis != "skeleton" %}
+    {% for f in h.empty_held %}{% if f.key != "all" %}<p class="hf-empty only-{{ f.key }}">No {{ f.phrase }} held.</p>{% endif %}{% endfor %}
+    {% if h.flat %}
+    <details class="notheld{% for k in h.empty_flat %} none-{{ k }}{% endfor %}">
+      <summary>{{ icon("chevron-right", "chev") }}<span>Not held ({{ m.hcount(h.filters, "flat") }})</span></summary>
+      <table class="htable">
+        {{ m.hcolgroup(h.show_day, h.show_pnl) }}
+        {{ m.hhead(h, sr=true) }}
+        <tbody>
+        {% for r in h.flat %}{{ m.hrow(r, h.show_day, h.show_pnl) }}{% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% if st %}
+<ul class="legend small">
+  <li><span class="swatch sw-long"></span>long</li>
+  <li><span class="swatch sw-short"></span>short</li>
+  <li><span class="swatch sw-ref"></span>mechanical reference: {{ reference_gloss }}</li>
+  <li>bars run 0–{{ h.scale }} of the portfolio</li>
+</ul>
+<dl class="strip strip-kill-phone">{{ kill_tile(st, "kill-phone") }}</dl>
+{% endif %}
+<p class="small muted">{% if h.show_day %}1 day: the line's last completed daily move, from Tiingo or Binance history. {% endif %}Sessions: 24/7 crypto · 24/5 indices, commodities and currencies · US hours for stocks and US funds · LSE hours for lines held through London-listed funds. Tiles are plain monograms, not logos.</p>
 {% endcall %}
 
 {% call m.section("latest", 2, "Latest council run", "pm") %}
 {% if latest %}
-<div class="run-head">
-  <p class="run-when">{{ run.when }}</p>
-  {{ m.chip(latest.mode_chip) }} {{ m.chip(latest.chip) }}
-</div>
+{% call m.alert("run", "terminal", "Run of " ~ run.when, latest.ran_at | short_when if latest.doc.late_by_min else "") %}
+<p class="status-row">{{ m.chip(latest.mode_chip) }} {{ m.chip(latest.chip) }}{% if tr_latest.failed_calls %} <a class="chip state-warn" href="cycles/{{ latest.doc.cycle_id }}.html#calls">{{ plural(tr_latest.failed_calls, "call") }} failed</a>{% endif %}</p>
+<p>{{ run.headline }}</p>
+{% endcall %}
 {{ m.story(run.summary) }}
-{{ m.flow(run.nodes, "The latest run, step by step") }}
-{{ m.flow_key(run.nodes) }}
+{{ m.flow(run.nodes, "The latest run, step by step", href="cycles/" ~ latest.doc.cycle_id ~ ".html") }}
+{{ m.flow_key(run.nodes, linked=true) }}
 {{ m.control_strip(run.control) }}
-<p><a class="cta" href="cycles/{{ latest.doc.cycle_id }}.html">Open the full run →</a></p>
+<p><a class="cta" href="cycles/{{ latest.doc.cycle_id }}.html">Open the full run, agent by agent {{ icon("chevron-right") }}</a></p>
 {% else %}
 <p>No run yet. When the council first meets, this diagram fills in with what each step did.</p>
 {{ m.flow(flow_empty, "The steps of a run") }}
@@ -160,20 +128,21 @@
 {% if recent %}
 {{ m.wrap_open("Recent runs") }}
 <table class="wide stack runs" role="table">
-  <thead><tr role="row"><th role="columnheader">When</th><th role="columnheader">Mode</th><th role="columnheader">What changed</th><th role="columnheader">Decision</th></tr></thead>
+  <thead><tr role="row"><th role="columnheader">When</th><th role="columnheader">Mode</th><th role="columnheader">What changed</th><th role="columnheader">Agents</th><th role="columnheader">Decision</th></tr></thead>
   <tbody>
-  {% for cv, r in recent %}
+  {% for cv, r, tr in recent %}
   <tr role="row">
     <td role="cell" class="when"><a href="cycles/{{ cv.doc.cycle_id }}.html">{{ cv.doc.slot | when }}</a></td>
     <td role="cell" data-label="Mode">{{ m.chip(cv.mode_chip) }}</td>
     <td role="cell" class="text push" data-label="What changed">{{ r.change_words }}</td>
+    <td role="cell" data-label="Agents">{{ m.agent_strip(tr, "cycles/" ~ cv.doc.cycle_id ~ ".html") }}</td>
     <td role="cell" data-label="Decision">{{ m.chip(cv.chip) }}</td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
-<p><a href="cycles.html">All runs →</a></p>
+<p><a href="cycles.html">All runs →</a> · <a href="agents/index.html">Every agent's record →</a></p>
 {% else %}
 {{ m.empty("No runs yet", "The first run will appear here, with what changed and what was decided.") }}
 {% endif %}
@@ -192,7 +161,7 @@
     <text class="series-end" x="{{ s.end_x }}" y="{{ s.label_y }}" dominant-baseline="middle">{{ s.short }} {{ "%.1f" | format(s.last) }}</text>
     {% endfor %}
   </svg>
-  <figcaption class="small">Index, base 100 at the start ({{ chart.first }} to {{ chart.last }}). The darker line is 100.</figcaption>
+  <figcaption class="small">Index, base 100 at the start ({{ chart.first }} to {{ chart.last }}). The brighter horizontal line is 100.</figcaption>
 </figure>
 <ul class="legend">
 {% for s in chart.series %}<li><span class="swatch sw-line sw-{{ s.css }}"></span>{{ s.label }} <span class="n">{{ "%.1f" | format(s.last) }}</span></li>{% endfor %}

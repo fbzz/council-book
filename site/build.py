@@ -2,29 +2,32 @@
 
 Usage: uv run python site/build.py [--journal journal] [--prompts prompts] [--policy policy] [--out _site]
 
-Pages: Portfolio (index.html: holdings + a diagram of the latest run) · Runs (cycles.html and one
-page per run under cycles/) · How it works (how.html) · Rules (rules.html) · Record (record.html).
+Pages: Portfolio (index.html: a broker-style holdings list, then a diagram of the latest run) ·
+Runs (cycles.html and one page per run under cycles/: a per-agent transcript in execution order) ·
+Agents (agents/index.html and one page per agent under agents/: its job, prompt and history) ·
+How it works (how.html) · Rules (rules.html) · Record (record.html).
 The old names (council.html, book.html, failures.html) are tiny redirect pages.
 
 Rules:
 - Jinja2 autoescape is ON and undefined variables fail the build; model text is never rendered as
-  HTML or markdown. The only script is a constant inline "stale" badge, allowed by its CSP hash.
+  HTML or markdown. There is no JavaScript at all: the holdings filter is radio inputs and CSS.
 - A strict Content-Security-Policy meta tag on every page; no external fonts, scripts or trackers.
   The CSP forbids inline style attributes, so data-driven widths (bars, meters) are classes defined
   in a stylesheet generated at build time (static/geometry.css).
+- Links between pages are relative, so the site also works from file://.
 - Every sentence that describes a run is built here from the JSON with fixed templates; no model
   text is paraphrased or summarised by a model.
 - The site must build with zero cycles (status AWAITING ACCOUNT) and every output file must pass
   the leak scan, otherwise the build fails and nothing is deployed.
 - A cycle file is the exact sealed document, sealed BEFORE the human decision. The final outcome
   shown for a cycle comes from its execution file, else its ops row, else the sealed document.
+- Everything is generic over the set of lines: the policy's lines plus any line the book or a run
+  describes (single stocks use the plain ticker as the line id, "." written "_").
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
 import json
 import re
 import shutil
@@ -37,22 +40,38 @@ from typing import Any
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
-from markupsafe import Markup
+from markupsafe import Markup, escape
 
 from council import invariants
 from council.publish import commit_reveal, leakscan
 from council.publish.journal import parse_incident
+from council.publish.labels import (
+    CARD_ROLES,
+    COST_FIELDS,
+    EVENT_KINDS,
+    FRED_MEASURES,
+    FRED_SERIES,
+    MARKET_FIELDS,
+    VOL_FIELDS,
+)
 from council.publish.public_models import (
+    PublicAdvocate,
     PublicBook,
+    PublicCall,
+    PublicCard,
     PublicCommitment,
     PublicCycleV1,
     PublicExecution,
+    PublicFact,
     PublicIncident,
     PublicOpsRow,
     PublicPerformancePoint,
+    PublicPM,
+    PublicPMReplicate,
     PublicReveal,
     PublicStatus,
 )
+from council.publish.redact import _clip
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -61,25 +80,17 @@ STATIC = HERE / "static"
 DATA = HERE / "data"
 EPS = 1e-9
 
-# The only script on the site: show the STALE badge when the last cycle is more than 5 h old.
-STALE_SCRIPT = (
-    "(function(){var b=document.body,t=Date.parse(b.getAttribute('data-last-cycle')||'');"
-    "if(!isNaN(t)&&Date.now()-t>5*36e5){var s=document.getElementById('stale');if(s){s.hidden=false;}}})();"
-)
-
-
-def script_hash(script: str = STALE_SCRIPT) -> str:
-    return "sha256-" + base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
-
-
+# No script at all: the CSP forbids every script, inline or not.
 CSP = (
     "default-src 'none'; style-src 'self'; img-src 'self' data:; "
-    f"script-src '{script_hash()}'; base-uri 'none'; form-action 'none'"
+    "script-src 'none'; base-uri 'none'; form-action 'none'"
 )
+REPO_URL = "https://github.com/fbzz/council-book"
 
 NAV = (
     {"key": "portfolio", "href": "index.html", "label": "Portfolio"},
     {"key": "runs", "href": "cycles.html", "label": "Runs"},
+    {"key": "agents", "href": "agents/index.html", "label": "Agents"},
     {"key": "how", "href": "how.html", "label": "How it works"},
     {"key": "rules", "href": "rules.html", "label": "Rules"},
     {"key": "record", "href": "record.html", "label": "Record"},
@@ -156,7 +167,7 @@ CODE_ROLES = (
 )
 LLM_ROLES = {
     "news": ("News analyst", "Writes evidence cards from broker news items. Their text is never republished.", "ADVISES", "analyst"),
-    "macro": ("Macro analyst", "Describes the macro regime and its drivers. Context only.", "CONTEXT", "teal"),
+    "macro": ("Macro analyst", "Describes the macro regime and its drivers. Context only.", "CONTEXT", "macro"),
     "filings": ("Filings analyst", "Reads company filings (arrives with single stocks).", "ADVISES", "analyst"),
     "sector": ("Sector analyst", "Ranks names inside a peer group (arrives with single stocks).", "CONTEXT", "teal"),
     "bull": ("Bull advocate", "Opens the debate, then answers the bear's rebuttal.", "ADVISES", "bull"),
@@ -164,6 +175,8 @@ LLM_ROLES = {
     "pm": ("Portfolio manager", "Proposes at most three changes to the reference, inside ranges that code enforces. Three independent attempts; the most typical one (the medoid) is used.", "DECIDES", "pm"),
     "single_agent_control": ("Single-agent control", "One agent, the same facts, no analysts and no debate. Published as a control; it never trades.", "CONTEXT", "stone"),
 }
+ROSTER_AGENT = {"news": "news", "macro": "macro", "bull": "bull", "bear": "bear", "pm": "pm",
+                "single_agent_control": "control"}
 PROMPT_ROLE_ALIASES = {"bull_open": "bull", "bull_rebuttal": "bull", "single_agent": "single_agent_control"}
 
 RULE_TITLES = {
@@ -206,25 +219,9 @@ CONTROL_SERIES = (
     ("c4_btc", "Buy-and-hold BTC", "c4b", "BTC", "Bitcoin, bought once and held."),
 )
 
-# Evidence ids -> plain labels. The raw id always stays in the title attribute for auditors.
-MARKET_FIELDS = {
-    "trend": "trend", "dist_sma50": "vs 50-day average", "dist_sma200": "vs 200-day average",
-    "dist_sma200_pct": "vs 200-day average", "dist_sma50_pct": "vs 50-day average",
-    "mom10d": "10-day change", "mom63d": "3-month change", "dd52": "drop from 1-year high",
-    "ret1d_sigma": "last day's move vs normal", "data_age_h": "age of the data", "market_open": "market open or closed",
-}
-VOL_FIELDS = {"sigma_ann": "yearly volatility", "vol_ratio": "volatility vs its 1-year norm",
-              "ewma5_60": "volatility shock"}
-COST_FIELDS = {"per_side_bps": "cost per side", "bps_side": "cost per side", "carry_bps_day": "overnight cost"}
-FRED_SERIES = {
-    "DGS10": "10-year Treasury yield", "DGS2": "2-year Treasury yield", "T10Y2Y": "10y–2y yield curve",
-    "DFF": "Fed funds rate", "DTWEXBGS": "broad US dollar index", "VIXCLS": "VIX",
-}
-FRED_MEASURES = {"chg20": "20-day change"}
-EVENT_KINDS = {"fomc": "FOMC", "cpi": "US inflation (CPI)", "nfp": "US jobs report", "pce": "US inflation (PCE)",
-               "earnings": "earnings"}
-CARD_ROLES = {"vol": "volatility card", "news": "news card", "macro": "macro card", "event": "event card",
-              "filings": "filing card", "sector": "sector card"}
+# Evidence ids -> plain labels (MARKET_FIELDS, VOL_FIELDS, COST_FIELDS, FRED_SERIES, FRED_MEASURES,
+# EVENT_KINDS, CARD_ROLES) live in council.publish.labels, shared with the facts table of the
+# public record. The raw id always stays in the title attribute for auditors.
 CHECK_NAMES = {
     "gross": "Total exposure", "net": "Net exposure", "short_gross": "Total short", "kill_switch": "Kill switch",
     "catastrophe_stop": "Loss if every stop hits", "reentry_cooloff": "Cool-off after a stop",
@@ -249,7 +246,7 @@ HOLD_WORDS = (
     (re.compile(r"^scaled to fit aggregate limits.*$"), "scaled down to fit the book's limits"),
     (re.compile(r"^deadband$"), "change too small to trade"),
 )
-HOLD_LINE = re.compile(r"^([A-Z0-9]{2,12}): (.+)$")
+HOLD_LINE = re.compile(r"^([A-Z0-9](?:[A-Z0-9_]{0,10}[A-Z0-9])?): (.+)$")   # public line ids (BRK_B, V)
 STATUS_WORDS = {
     "on_time": "ran on time", "late": "ran late", "missed": "ran after its slot had passed (a catch-up)",
     "skipped_overlap": "skipped (overlap)",
@@ -261,7 +258,8 @@ MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", 
 SPELLED = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
 # Internal codes -> plain words. The raw code only ever appears in a title attribute.
 AUDIT_WORDS = {
-    "parse_fail": "the answer could not be read", "over_max_deviations": "more changes than allowed",
+    "parse_fail": "the answer could not be read", "no_decision": "no usable answer",
+    "over_max_deviations": "more changes than allowed",
     "unknown_line": "a line that does not exist", "not_admitted": "a line without fresh data",
     "reference_only": "a line the council may not change", "duplicate": "the same line twice",
     "unknown_evidence": "cited evidence that is not in the fact pack",
@@ -364,6 +362,16 @@ def fmt_share(v: float | None) -> str:
     return ("−" if p < 0 else "") + text + "%"
 
 
+def fmt_share1(v: float | None) -> str:
+    """A weight with one fixed decimal, so a right-aligned column lines up: 0.35 -> "35.0%"."""
+    if v is None:
+        return "—"
+    p = round(v * 100, 1)
+    if abs(p) < 0.05:
+        return "0.0%"
+    return ("−" if p < 0 else "") + f"{abs(p):.1f}%"
+
+
 def fmt_when(ts: datetime | None) -> str:
     """25 Sep 2026, 10:40 UTC"""
     if ts is None:
@@ -382,6 +390,56 @@ def fmt_day(value: date | datetime | str | None, year: bool = True) -> str:
     return f"{d.day} {MONTHS[d.month - 1]}" + (f" {d.year}" if year else "")
 
 
+def fmt_signed(v: float | None, digits: int = 2) -> str:
+    """A signed percent: 1.95 -> "+1.95%", -2.61 -> "−2.61%", 0 -> "0.00%"."""
+    if v is None:
+        return "—"
+    r = round(v, digits)
+    if abs(r) < 10 ** -digits / 2:
+        return f"{0:.{digits}f}%"
+    return ("+" if r > 0 else "−") + f"{abs(r):.{digits}f}%"
+
+
+def move_dir(v: float | None, digits: int = 2) -> str:
+    """"up", "down" or "flat" for a signed percent at the shown precision; "none" when unknown."""
+    if v is None:
+        return "none"
+    r = round(v, digits)
+    return "up" if r > 0 else "down" if r < 0 else "flat"
+
+
+def fmt_int(n: int | None) -> str:
+    """5610 -> "5,610" (a count, never an amount)."""
+    return "—" if n is None else f"{n:,d}"
+
+
+def fmt_secs(ms: int | None) -> str:
+    """3005 -> "3.0 s", 91012 -> "1 min 31 s"."""
+    if ms is None:
+        return "—"
+    s = ms / 1000.0
+    if s < 60:
+        return f"{s:.1f} s"
+    m, rest = divmod(int(round(s)), 60)
+    return f"{m} min" + (f" {rest} s" if rest else "")
+
+
+def trim_number(v: float, digits: int) -> str:
+    """A number with at most `digits` decimals and no trailing zeros; minus as "−"."""
+    text = f"{abs(v):.{digits}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return ("−" if v < 0 and text not in ("0", "") else "") + (text or "0")
+
+
+def median(values: list[float]) -> float | None:
+    vals = sorted(values)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
 def chip(mapping: dict, key: Any, title: str = "") -> dict[str, str]:
     label, css = mapping.get(key, (str(key).upper(), "awaiting"))
     return {"label": label, "css": css, "title": title}
@@ -396,6 +454,12 @@ def join_words(items: list[str]) -> str:
     if len(items) <= 1:
         return "".join(items)
     return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def clip(text: str, limit: int) -> str:
+    """A short excerpt that ends at a sentence or word boundary, marked "…" (the publisher's own
+    cut, council.publish.redact._clip)."""
+    return _clip(" ".join(text.split()), limit)
 
 
 def excerpt(text: str, limit: int = 280) -> tuple[str, bool]:
@@ -494,6 +558,7 @@ class JournalView:
     incidents: list[PublicIncident] = field(default_factory=list)
     ops: list[PublicOpsRow] = field(default_factory=list)
     copies: dict[str, Path] = field(default_factory=dict)   # site path -> journal source file
+    commitments: dict[str, PublicCommitment] = field(default_factory=dict)   # every sealed run, revealed or not
 
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:
@@ -542,6 +607,11 @@ def load_journal(journal_dir: Path) -> JournalView:
                 commit_reveal.verify(raw, cv.reveal.salt, cv.commitment.commitment_sha256)
         view.cycles.append(cv)
     view.cycles.sort(key=lambda c: c.doc.slot, reverse=True)
+    commitments_dir = journal_dir / "commitments"
+    for file in sorted(commitments_dir.rglob("*.json")) if commitments_dir.exists() else []:
+        commitment = PublicCommitment.model_validate_json(file.read_text())
+        view.commitments[commitment.cycle_id] = commitment
+        view.copies[f"journal/{file.relative_to(journal_dir).as_posix()}"] = file
     book_file = journal_dir / "book" / "latest.json"
     if book_file.exists():
         view.book = PublicBook.model_validate_json(book_file.read_text())
@@ -604,6 +674,7 @@ def load_roster(prompts_dir: Path, policy_dir: Path) -> dict[str, Any]:
             "cadence": CADENCE_WORDS.get(str(cfg.get("cadence", "every_cycle")),
                                          str(cfg.get("cadence", "every_cycle")).replace("_", " ")),
             "prompts": manifest.get(role, []),
+            "page": f"agents/{ROSTER_AGENT[role]}.html" if role in ROSTER_AGENT else "",
         })
     code = [{"name": n, "what": w, "accent": a} for n, w, a in CODE_ROLES]
     return {
@@ -771,10 +842,32 @@ class LineInfo:
     sleeve: str
     in_reference: bool
     council: bool                   # may the council deviate from the reference on this line?
+    asset_class: str | None = None
+    session: str | None = None
+
+
+def policy_session(raw: dict[str, Any]) -> str | None:
+    """The trading session of a policy line's preferred long vehicle (as `LineSpec.session`):
+    London-listed '.L' vehicles on London hours, crypto 24/7, index / commodity / FX 24/5, the
+    rest (stocks, US ETF CFDs) on US hours."""
+    ac = raw.get("asset_class")
+    if ac is None:
+        return None
+    if ac == "crypto":
+        return "crypto"
+    longs = ((raw.get("vehicles") or {}).get("long") or [])
+    first = str(longs[0].get("symbol", "")) if longs and isinstance(longs[0], dict) else str(raw.get("symbol", ""))
+    if first.endswith(".L"):
+        return "lse"
+    if ac in ("index", "commodity", "fx"):
+        return "fx24x5"
+    return "us"
 
 
 class Lines:
-    """The universe's lines, in policy order, with their plain names."""
+    """The lines, in policy order, with their plain names, asset classes and sessions. Lines the
+    policy does not list (single stocks added later) are described by the book when it knows
+    them, else by their ticker; they sort after the policy's lines."""
 
     def __init__(self, universe: dict[str, Any]):
         self.info: dict[str, LineInfo] = {}
@@ -784,15 +877,49 @@ class Lines:
                 symbol=sym, name=str(raw.get("name") or sym), sleeve=str(raw.get("sleeve") or "core"),
                 in_reference=bool(raw.get("in_reference", True)),
                 council=bool(raw.get("council_deviations", True)),
+                asset_class=raw.get("asset_class"), session=policy_session(raw),
             )
         self.order = {sym: i for i, sym in enumerate(self.info)}
 
+    def describe(self, book: PublicBook | None) -> None:
+        """Add the book's own description of each line (name, asset class, session): it names
+        lines the policy does not list and fills what the policy leaves out."""
+        if book is None:
+            return
+        for sym, b in book.lines.items():
+            known = self.info.get(sym)
+            if known is None:
+                ac = b.asset_class
+                self.info[sym] = LineInfo(
+                    symbol=sym, name=b.name or ticker(sym), sleeve="stock" if ac == "stock" else "other",
+                    in_reference=True, council=True, asset_class=ac, session=b.session,
+                )
+            elif known.asset_class is None or known.session is None:
+                self.info[sym] = LineInfo(
+                    symbol=sym, name=known.name, sleeve=known.sleeve, in_reference=known.in_reference,
+                    council=known.council, asset_class=known.asset_class or b.asset_class,
+                    session=known.session or b.session,
+                )
+
     def name(self, sym: str) -> str:
         info = self.info.get(sym)
-        return info.name if info else sym
+        return info.name if info else ticker(sym)
+
+    def asset_class(self, sym: str) -> str | None:
+        info = self.info.get(sym)
+        return info.asset_class if info else None
+
+    def session(self, sym: str) -> str | None:
+        info = self.info.get(sym)
+        return info.session if info else None
 
     def sort(self, keys: Any) -> list[str]:
         return sorted(set(keys), key=lambda k: (self.order.get(k, len(self.order)), k))
+
+
+def ticker(sym: str) -> str:
+    """A line id as a ticker: single stocks write "." as "_" in their id (BRK_B -> BRK.B)."""
+    return sym.replace("_", ".")
 
 
 # ------------------------------------------------------------------------------ geometry
@@ -811,9 +938,51 @@ class Geometry:
         self.rules[name] = f".{name} {{ {prop}: {n / 100:.2f}%; }}"
         return name
 
+    def ring(self, pct: float | None) -> str:
+        """A progress ring's fill (a conic-gradient reads --p), in whole percent."""
+        n = 0 if pct is None else round(max(0.0, min(100.0, float(pct))))
+        name = f"gp-{n}"
+        self.rules[name] = f".{name} {{ --p: {n}%; }}"
+        return name
+
     def css(self) -> str:
-        head = "/* Generated by site/build.py: bar widths and tick positions (the CSP forbids inline styles). */\n"
+        head = ("/* Generated by site/build.py: bar widths, tick positions and ring fills "
+                "(the CSP forbids inline styles). */\n")
         return head + "\n".join(self.rules[k] for k in sorted(self.rules, key=lambda k: (k[:2], int(k[3:])))) + "\n"
+
+
+# ------------------------------------------------------------------------------ icons
+ICON_FILE = DATA / "icons.json"
+# A status's css class -> its icon (the word is always shown next to it).
+STATUS_ICONS = {"ok": "circle-check", "failed": "circle-x", "timeout": "clock-3", "fallback": "circle-alert",
+                "idle": "circle-minus", "waiting": "hourglass"}
+# Each agent's avatar icon; the bull's rebuttal has its own.
+AGENT_ICONS = {"data": "database", "reference": "scale", "vol": "activity", "event": "calendar",
+               "news": "newspaper", "macro": "globe", "bull": "trending-up", "bear": "trending-down",
+               "pm": "briefcase", "control": "git-compare-arrows", "audit": "file-check", "risk": "shield-check",
+               "costs": "calculator", "human": "user", "rebuttal": "message-square-quote"}
+
+
+def load_icons(path: Path = ICON_FILE) -> dict[str, list[list[Any]]]:
+    if not path.exists():
+        return {}
+    return dict(json.loads(path.read_text()).get("icons", {}))
+
+
+def icon_svg(icons: dict[str, list[list[Any]]], name: str, cls: str = "") -> Markup:
+    """An inline, decorative SVG icon (Lucide geometry, ISC): 24x24, 2px round stroke in the
+    current text colour. Presentation attributes only; never a style attribute."""
+    parts = []
+    for tag, attrs in icons.get(name, []):
+        if not re.fullmatch(r"[a-z]+", str(tag)):
+            continue
+        body = " ".join(f'{k}="{escape(v)}"' for k, v in attrs.items() if re.fullmatch(r"[a-z]+", str(k)))
+        parts.append(f"<{tag} {body}/>")
+    klass = "i" + (f" {escape(cls)}" if cls else "") + (f" i-{name}" if name in icons else "")
+    return Markup(
+        f'<svg class="{klass}" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" '
+        f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        + "".join(parts) + "</svg>")
 
 
 AXIS_STEPS = (0.05, 0.1, 0.2, 0.25, 0.4, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0)
@@ -822,49 +991,6 @@ AXIS_STEPS = (0.05, 0.1, 0.2, 0.25, 0.4, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0)
 def nice_scale(max_abs: float) -> float:
     return next((s for s in AXIS_STEPS if s >= max_abs - EPS), AXIS_STEPS[-1])
 
-
-def diverging_bar(weight: float, ref: float | None, scale: float, geo: Geometry,
-                  short_scale: float | None = None) -> dict[str, Any]:
-    """An HTML/CSS bar on one shared scale: long to the right (teal), short to the left (orange),
-    a thin tick at the mechanical reference, the value label always at the bar's tip.
-
-    `scale` is the long side of the axis, `short_scale` the short side (default: the same, so zero
-    sits in the middle; 0 for a long-only book, so zero sits at the left edge and bars use the whole
-    track). Widths and positions are shares of the whole track."""
-    lo = scale if short_scale is None else max(0.0, short_scale)
-    total = scale + lo
-    zero = 100.0 * lo / total
-
-    def pos(v: float) -> float:
-        return zero + 100.0 * max(-lo, min(scale, v)) / total
-
-    side = "long" if weight > EPS else "short" if weight < -EPS else "zero"
-    width = 100.0 * min(abs(weight), scale if side != "short" else lo) / total
-    out: dict[str, Any] = {
-        "side": side, "w": geo.cls("width", width), "label": fmt_share(weight), "ref": None,
-        "zero": geo.cls("left", zero),
-        "start": geo.cls("right", 100.0 - zero) if side == "short" else geo.cls("left", zero),
-        "at": geo.cls("left", pos(weight)),
-    }
-    if ref is not None and abs(ref) > EPS:       # a tick at zero would only thicken the zero line
-        out["ref"] = geo.cls("left", pos(ref))
-    return out
-
-
-def axis_ticks(scale: float, short_scale: float, geo: Geometry) -> list[dict[str, str]]:
-    """Five labels on the holdings axis; the in-between ones (t1, t3) hide on narrow phones."""
-    total = scale + short_scale
-    zero = 100.0 * short_scale / total
-    if short_scale <= EPS:
-        values = [0.0, scale / 4, scale / 2, 3 * scale / 4, scale]
-    else:
-        values = [-short_scale, -short_scale / 2, 0.0, scale / 2, scale]
-    ticks = []
-    for i, v in enumerate(values):
-        edge = " edge-start" if i == 0 and short_scale <= EPS else ""
-        ticks.append({"label": "0" if abs(v) < EPS else fmt_share(v), "cls": f"t{i}{edge}",
-                      "at": geo.cls("left", zero + 100.0 * v / total)})
-    return ticks
 
 
 # ------------------------------------------------------------------------------ evidence labels
@@ -909,6 +1035,328 @@ def evidence_label(ref: Any, lines: Lines) -> dict[str, str]:
     if prefix == "S":
         return {"label": "company filing", "raw": rid, "css": "filing"}
     return {"label": rid, "raw": rid, "css": kind or "market"}
+
+
+# ------------------------------------------------------------------------------ the facts table
+FACT_DIGITS = {"pct": 2, "sigma": 2, "ratio": 3, "x": 3, "bps": 1, "bps_day": 2, "hours": 1, "days": 1}
+FACT_SUFFIX = {"pct": "%", "x": "x", "ratio": "", "bps": " bp", "bps_day": " bp a day", "days": " days",
+               "hours": " h", "sigma": "σ"}
+FACT_KINDS = (
+    # kind, heading, accent
+    ("market", "Market", "code"), ("vol", "Volatility", "code"), ("cost", "Costs", "risk"),
+    ("macro", "Macro (FRED)", "macro"), ("event", "Scheduled events", "human"),
+    ("news", "Broker news items (ids only)", "analyst"), ("filing", "Company filings (ids only)", "analyst"),
+    ("fundamental", "Fundamentals", "code"),
+)
+WITHHELD_WORDS = {
+    "licensed_series": "licensed series: cited by name, value not republished",
+    "not_publishable": "not publishable",
+    "broker_data": "broker data: not republished",
+    "unknown_source": "unknown source: not shown",
+}
+SOURCE_WORDS = {
+    "tiingo": "Tiingo history", "binance": "Binance history", "broker": "broker", "fred": "FRED",
+    "clock": "market clock", "policy": "cost policy", "calendar": "public calendar",
+    "broker_feed": "broker feed", "filing": "filing", "unknown": "unknown",
+}
+
+
+def fmt_fact_value(value: Any, unit: str | None, field: str = "") -> str:
+    """A facts-table value in words: 11.7 pct -> "11.7%", True market_open -> "open"."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        if field == "market_open":
+            return "open" if value else "closed"
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return trim_number(float(value), FACT_DIGITS.get(unit or "", 3)) + FACT_SUFFIX.get(unit or "", "")
+    return str(value).replace("_", " ")
+
+
+def anchor_slug(prefix: str, raw: str) -> str:
+    """A fragment id from an evidence id: "F:NDX:trend" -> "f-F-NDX-trend"."""
+    return prefix + "-" + (re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-") or "x")
+
+
+class FactIndex:
+    """One run's facts table, looked up by evidence id. `chip(ref)` resolves an evidence reference
+    to "label: value" with a link to its row in the run page's facts table (or, for a card, to the
+    card); `base` is "" on the run page and "<root>cycles/<id>.html" elsewhere."""
+
+    def __init__(self, doc: PublicCycleV1, lines: Lines, base: str = ""):
+        self.lines = lines
+        self.base = base
+        self.facts = {f.id: f for f in doc.facts}
+        self.cards = {k.card_id: k for k in doc.cards}
+
+    def fact_anchor(self, rid: str) -> str:
+        return anchor_slug("f", rid)
+
+    def href(self, rid: str) -> str:
+        if rid in self.cards:
+            return f"{self.base}#{anchor_slug('k', rid)}"
+        if rid in self.facts:
+            return f"{self.base}#{self.fact_anchor(rid)}"
+        return ""
+
+    def value_words(self, f: PublicFact) -> str:
+        field = f.id.split(":")[-1] if f.id[:1] in "FVC" else ""
+        return fmt_fact_value(f.value, f.unit, field)
+
+    def chip(self, ref: Any) -> dict[str, str]:
+        base = evidence_label(ref, self.lines)
+        kind = getattr(ref, "kind", "")
+        rid = base["raw"].split(" · ")[0]
+        out = {**base, "value": "", "note": "", "href": self.href(rid)}
+        f = self.facts.get(rid)
+        if kind == "fred":
+            if not getattr(ref, "publishable", True):
+                out["note"] = "value not republished"
+            return out
+        if f is None:
+            return out
+        if f.value is not None and kind not in ("broker_feed", "card"):
+            out["value"] = self.value_words(f)
+        elif f.withheld is not None:
+            out["note"] = "not public"
+            out["raw"] = f"{rid} · {WITHHELD_WORDS.get(f.withheld, f.withheld)}"
+        return out
+
+    def row(self, f: PublicFact) -> dict[str, Any]:
+        return {
+            "id": f.id, "anchor": self.fact_anchor(f.id), "label": f.label,
+            "line": self.lines.name(f.line) if f.line else "", "ticker": ticker(f.line) if f.line else "",
+            "value": self.value_words(f) if f.value is not None else "",
+            "withheld": WITHHELD_WORDS.get(f.withheld, f.withheld) if f.withheld else "",
+            "source": SOURCE_WORDS.get(f.source or "", f.source or ""),
+            "as_of": fmt_short_when(f.as_of) if f.as_of else "",
+            "kind": f.kind,
+        }
+
+
+def ref_id(ref: Any) -> str:
+    """The evidence id of a reference, as the facts table keys it."""
+    if getattr(ref, "kind", "") == "fred":
+        return (f"M:{ref.series}" + (f".{ref.measure}" if ref.measure else "")
+                + (f"@{ref.as_of}" if ref.as_of else ""))
+    return str(getattr(ref, "id", ""))
+
+
+# ------------------------------------------------------------------------------ agents and calls
+@dataclass(frozen=True)
+class AgentSpec:
+    slug: str                        # page name (agents/<slug>.html) and run-page anchor (a-<slug>)
+    name: str
+    kind: str                        # CODE | LLM | HUMAN
+    accent: str
+    group: str                       # the run page's contents groups
+    job: str                         # one sentence
+    roles: tuple[str, ...] = ()      # the call roles this agent answers for
+    source: str = ""                 # a repository path: the prompt or the code
+    more: str = ""                   # the longer description on its own page
+
+
+AGENT_SPECS: tuple[AgentSpec, ...] = (
+    AgentSpec("data", "Data steward", "CODE", "code", "Code officers",
+              "Builds the percentage-only fact pack from completed daily bars and freezes stale or closed markets.",
+              source="src/council/facts/pack.py",
+              more="Every fact carries the time it became available; a run may only use facts available at its "
+                   "slot start, and only completed bars. A lookahead test checks it."),
+    AgentSpec("reference", "Reference book", "CODE", "code", "Code officers",
+              "Computes the weight the rules alone would hold on each line: the default, the benchmark and the fallback.",
+              source="src/council/reference/book.py",
+              more="A fixed base weight per line, scaled by its trend and trimmed when the line is unusually "
+                   "volatile. The book is long-only and never levered."),
+    AgentSpec("vol", "Volatility officer", "CODE", "code", "Code officers",
+              "Writes a volatility-shock card when a line's short-term volatility jumps, and trips the breaker.",
+              source="src/council/deliberation/officers.py",
+              more="A volatility card is one of the two kinds of card that allow the council to cut a line in an "
+                   "uptrend."),
+    AgentSpec("event", "Event officer", "CODE", "code", "Code officers",
+              "Writes event cards for scheduled macro releases and blocks adds in the window around them.",
+              source="src/council/deliberation/officers.py",
+              more="It never forces a sale: selling is always allowed inside an event window."),
+    AgentSpec("news", "News analyst", "LLM", "analyst", "Analysts",
+              "Reads broker news items and writes evidence cards that cite them by id.",
+              roles=("news",), source="prompts/news.md",
+              more="The news text itself is licensed and never republished: a card cites a feed item by its id "
+                   "only, and the analyst's own short paraphrase is shown."),
+    AgentSpec("macro", "Macro analyst", "LLM", "macro", "Analysts",
+              "Describes the macro regime and its drivers from public macro data; context only.",
+              roles=("macro",), source="prompts/macro.md",
+              more="It runs on the first run of each UTC day. Code never acts on its regime or tilts; the "
+                   "advocates and the manager may cite it."),
+    AgentSpec("bull", "Bull", "LLM", "bull", "Debate",
+              "Opens the debate with a case for a set of positions, then answers the bear.",
+              roles=("bull_open", "bull_rebuttal"), source="prompts/bull_open.md",
+              more="Two turns per run: the opening (claims the bear must answer) and the rebuttal (after the "
+                   "bear). It has no authority; the manager decides."),
+    AgentSpec("bear", "Bear", "LLM", "bear", "Debate",
+              "Answers the bull's claims one by one, conceding or contesting each, and argues its own case.",
+              roles=("bear",), source="prompts/bear.md",
+              more="It must answer the bull's specific claims by their ids, with evidence. It has no authority."),
+    AgentSpec("pm", "Portfolio manager", "LLM", "pm", "Decision",
+              "Makes three separate attempts at a decision of at most three changes; the most typical one is used.",
+              roles=("pm",), source="prompts/pm.md",
+              more="Each attempt may move at most three lines, inside ranges that code sets. The attempt closest "
+                   "to the others (the medoid) is used: a real decision, never an average."),
+    AgentSpec("control", "Single-agent control", "LLM", "stone", "Decision",
+              "One agent with the same facts, no analysts and no debate, as a comparison; it never trades.",
+              roles=("single_agent",), source="prompts/single_agent.md",
+              more="Published so readers can see what the council's analysts and debate change."),
+    AgentSpec("audit", "Auditor and bands", "CODE", "code", "Checks",
+              "Reverts uncited or contradictory changes, discards broken attempts and clips levels into their range.",
+              source="src/council/deliberation/audit.py",
+              more="The allowed range (band) of each line comes from its trend; the auditor reverts a change that "
+                   "cites evidence the pack does not hold."),
+    AgentSpec("risk", "Risk engine", "CODE", "risk", "Checks",
+              "Checks every limit in the risk policy and can hold a change back; it has the final word.",
+              source="src/council/risk/engine.py",
+              more="Gross and net exposure, caps, margin, volatility breakers, deadband, minimum holds, churn, "
+                   "costs and the kill switch. Rules live in code, not in prompts."),
+    AgentSpec("costs", "Cost desk and plan", "CODE", "risk", "Checks",
+              "Prices every order (spread, fees, overnight carry) and turns the decision into order legs.",
+              source="src/council/execution/planner.py",
+              more="Costs are shown in basis points of the portfolio (1 bp = 0.01%), never as amounts."),
+)
+AGENT_BY_SLUG = {a.slug: a for a in AGENT_SPECS}
+ROLE_AGENT = {r: a.slug for a in AGENT_SPECS for r in a.roles}
+ROLE_WORDS = {"bull_open": "opening", "bull_rebuttal": "rebuttal", "single_agent": "control"}
+# call role -> (the agent's name as the page says it, its accent, its run-page anchor)
+CALL_AGENT = {
+    "news": ("News analyst", "analyst", "a-news"), "macro": ("Macro analyst", "macro", "a-macro"),
+    "bull_open": ("Bull · opening", "bull", "a-bull"), "bear": ("Bear", "bear", "a-bear"),
+    "bull_rebuttal": ("Bull · rebuttal", "bull", "a-rebuttal"), "pm": ("Portfolio manager", "pm", "a-pm"),
+    "single_agent": ("Control", "stone", "a-control"),
+}
+
+# Call status -> (glyph, word, css). The glyph is decoration; the word is always shown or read.
+STATUS_GLYPHS = {
+    "ok": ("✓", "ok", "ok"), "corrected": ("✓", "ok after a correction", "ok"),
+    "cached": ("✓", "cached", "ok"), "partial": ("!", "partly failed", "fallback"),
+    "parse_fail": ("✗", "parse fail", "failed"), "timeout": ("◷", "timeout", "timeout"),
+    "transport": ("✗", "service error", "failed"), "skipped": ("–", "skipped", "idle"),
+    "invalid": ("✗", "invalid", "failed"), "not_run": ("–", "not run", "idle"),
+    "fallback": ("!", "fallback", "fallback"), "none": ("–", "nothing to do", "idle"),
+}
+# error_kind -> (short word, what it means). The private error text is never published.
+ERROR_WORDS = {
+    "timeout": ("timed out", "The model did not answer within the time limit, so the call was abandoned."),
+    "not_json": ("unreadable reply", "The reply was not JSON, even after one correction turn."),
+    "schema": ("wrong format", "The reply was JSON but did not match the required format, even after one "
+                               "correction turn."),
+    "correction_failed": ("correction failed", "The reply was unusable, and the correction call itself failed."),
+    "corrected": ("corrected", "The first reply was unusable; one correction turn fixed it. What is shown is "
+                               "the corrected reply."),
+    "http_429": ("rate limited", "The model service refused the call: too many requests at once."),
+    "http_4xx": ("request refused", "The model service rejected the request."),
+    "http_5xx": ("service error", "The model service failed with an internal error."),
+    "server_error": ("service error", "The model service reported an error instead of a reply."),
+    "bad_response": ("bad response", "The model service answered with something that was not a model reply."),
+    "connection": ("no connection", "The model service could not be reached."),
+    "internal_error": ("internal error", "Our own code failed while handling the call."),
+    "call_budget": ("skipped: call budget", "Not run: the run had already used its budget of model calls."),
+    "council_unavailable": ("skipped: outage", "Not run: the model service was down, so the council stood down."),
+    "skipped": ("skipped", "Not run."),
+    "invalid": ("invalid record", "The call's record could not be read."),
+}
+# What a failed call did, as the end of a sentence that starts with the agent's name.
+FAIL_PHRASES = {
+    "not_json": "gave a reply that could not be read", "schema": "replied in the wrong format",
+    "correction_failed": "gave an unusable reply, and its correction failed",
+    "http_429": "was refused: too many requests", "http_4xx": "was refused by the model service",
+    "http_5xx": "hit a model-service error", "server_error": "hit a model-service error",
+    "bad_response": "got an answer that was not a model reply", "connection": "could not reach the model service",
+    "internal_error": "failed in our own code", "call_budget": "was skipped: the call budget was used up",
+    "council_unavailable": "was skipped: the model service was down", "skipped": "was skipped",
+    "invalid": "left an unreadable record", "parse_fail": "gave a reply that could not be read",
+    "transport": "hit a model-service error",
+}
+STATUS_ERROR = {   # older cycles carry no error_kind: explain the status itself
+    "parse_fail": ("unreadable reply", "The reply could not be read as the required JSON, even after a "
+                                       "correction turn."),
+    "timeout": ERROR_WORDS["timeout"],
+    "transport": ("service error", "The model service could not be reached or answered with an error."),
+    "skipped": ERROR_WORDS["skipped"], "invalid": ERROR_WORDS["invalid"],
+}
+# What the system did instead when an agent gave no usable output (fixed text per role).
+FALLBACK_WORDS = {
+    "news": "No news cards this run: the advocates and the manager worked from the code facts and cards only.",
+    "macro": "No macro context this run. Nothing depends on it: code never acts on the macro analyst.",
+    "bull_open": "The bear still argued its own case, with no bull claims to answer; the manager saw the "
+                 "bear's case and the bull's rebuttal, if any.",
+    "bear": "The bull's rebuttal was skipped (there was nothing to answer); the manager saw the bull's opening only.",
+    "bull_rebuttal": "The manager saw the bull's opening and the bear's answer, without the bull's reply.",
+    "pm": "This attempt was discarded; the used attempt is chosen among the valid ones. With fewer than two "
+          "valid attempts every line falls back to the mechanical reference.",
+    "single_agent": "The control has fewer attempts this run. It never trades, so nothing else changes.",
+}
+
+
+def prompt_href(prompt_id: str, role: str, commit: str = "") -> str:
+    """The prompt file on GitHub: "council-bull_open/v1" -> prompts/bull_open.md, at the sealed
+    code commit when the commitment names one."""
+    m = re.match(r"^council-([a-z_]+)/v\d+$", prompt_id or "")
+    stem = m.group(1) if m else role
+    if not re.fullmatch(r"[a-z_]{1,32}", stem or ""):
+        return ""
+    ref = commit if re.fullmatch(r"[0-9a-f]{7,40}", commit or "") else "main"
+    return f"{REPO_URL}/blob/{ref}/prompts/{stem}.md"
+
+
+def call_view(call: PublicCall, commit: str = "") -> dict[str, Any]:
+    """One model call, for the per-agent headers and the call log."""
+    key = "corrected" if call.error_kind == "corrected" else call.status
+    glyph, word, css = STATUS_GLYPHS.get(key, ("!", key.replace("_", " "), "fallback"))
+    if call.error_kind:
+        short, explain = ERROR_WORDS.get(call.error_kind, (call.error_kind.replace("_", " "), ""))
+    elif call.status in STATUS_ERROR:
+        short, explain = STATUS_ERROR[call.status]
+    else:
+        short, explain = "", ""
+    failed = call.status not in ("ok", "cached")
+    name, accent, anchor = CALL_AGENT.get(call.role, (call.role.replace("_", " ").capitalize(), "code", ""))
+    if call.role in ("pm", "single_agent"):
+        anchor = f"{anchor}-{call.replicate + 1}"
+    if call.status == "timeout" or call.error_kind == "timeout":
+        fail = f"timed out after {fmt_secs(call.latency_ms)}"
+    else:
+        fail = FAIL_PHRASES.get(call.error_kind or call.status, f"failed ({(call.error_kind or call.status).replace('_', ' ')})")
+    return {
+        "role": call.role, "role_words": ROLE_WORDS.get(call.role, call.role.replace("_", " ")),
+        "agent_name": name, "accent": accent, "anchor": anchor, "fail_phrase": fail if failed else "",
+        "agent": ROLE_AGENT.get(call.role, ""), "replicate": call.replicate + 1,
+        "status": key, "glyph": glyph, "word": word, "css": css, "failed": failed,
+        "error_kind": call.error_kind or "", "error_word": short, "explain": explain,
+        "latency": fmt_secs(call.latency_ms), "latency_ms": call.latency_ms,
+        "tokens_in": fmt_int(call.tokens_in), "tokens_out": fmt_int(call.tokens_out),
+        "prompt_id": call.prompt_id, "prompt_sha": short_sha(call.prompt_sha),
+        "prompt_href": prompt_href(call.prompt_id, call.role, commit),
+    }
+
+
+def status_of(calls: list[dict[str, Any]], *, ran: bool = True) -> dict[str, str]:
+    """An agent's status from its calls: all ok -> ok (or "ok after a correction"), all failed ->
+    the failure, a mix -> partly failed; no call -> not run."""
+    if not calls:
+        key = "not_run" if not ran else "none"
+    else:
+        bad = [c for c in calls if c["failed"]]
+        if not bad:
+            key = "corrected" if any(c["status"] == "corrected" for c in calls) else "ok"
+        elif len(bad) < len(calls):
+            key = "partial"
+        else:
+            kinds = {c["status"] for c in bad}
+            key = kinds.pop() if len(kinds) == 1 else "parse_fail"
+    glyph, word, css = STATUS_GLYPHS.get(key, ("!", key, "fallback"))
+    return {"key": key, "glyph": glyph, "word": word, "css": css}
+
+
+def code_status(state: str, word: str = "") -> dict[str, str]:
+    glyph, default, css = STATUS_GLYPHS[state]
+    return {"key": state, "glyph": glyph, "word": word or default, "css": css}
 
 
 # ------------------------------------------------------------------------------ run view
@@ -1120,17 +1568,22 @@ FLOW = (
     ("bear", "Bear", "LLM", "bear", "attacks the bull's case, claim by claim"),
     ("pm", "Portfolio manager ×3", "LLM", "pm", "decides, within limits: three separate attempts, the most typical is used"),
     ("risk", "Risk engine", "CODE", "risk", "code that checks every limit and can hold a change back"),
-    ("decision", "Decision", "CODE", "human", "a proposal, or nothing to do"),
-    ("human", "Human", "HUMAN", "human", "approves every order"),
+    ("decision", "Plan & costs", "CODE", "risk", "prices each order and builds the proposal, or finds nothing to do"),
+    ("human", "Human approval", "HUMAN", "human", "approves every order"),
 )
 MARKS = {"ok": "✓", "fallback": "!", "failed": "✗", "idle": "–", "waiting": "…"}
+
+
+# Each step of the diagram links to its agent's section of the run page.
+NODE_ANCHOR = {"data": "a-data", "officers": "officers", "analysts": "a-news", "bull": "a-bull", "bear": "a-bear",
+               "pm": "a-pm", "risk": "a-risk", "decision": "a-costs", "human": "a-decision"}
 
 
 def _node(key: str, state: str, word: str, result: str, detail: str = "", title: str = "") -> dict[str, str]:
     spec = next(f for f in FLOW if f[0] == key)
     return {"key": key, "name": spec[1], "kind": spec[2], "accent": spec[3], "state": state,
             "mark": MARKS[state], "word": word, "result": result, "detail": detail,
-            "title": title or f"{spec[1]}: {spec[4]}", "what": spec[4]}
+            "title": title or f"{spec[1]}: {spec[4]}", "what": spec[4], "anchor": NODE_ANCHOR[key]}
 
 
 def empty_flow(n_lines: int) -> list[dict[str, str]]:
@@ -1139,6 +1592,64 @@ def empty_flow(n_lines: int) -> list[dict[str, str]]:
         text = f"reads prices for {n_lines} lines" if key == "data" else what
         nodes.append(_node(key, "waiting", "not run yet", text))
     return nodes
+
+
+HUMAN_WORDS = {
+    "completed": "approved · executed", "completed_partial": "approved · partly executed", "approved": "approved",
+    "executing": "approved · executing", "rejected": "rejected", "expired": "expired, no answer in time",
+    "proposed": "awaiting approval", "awaiting_publication": "awaiting approval", "superseded": "superseded",
+    "blocked": "blocked, under review", "execution_unknown": "under review",
+}
+
+
+def outcome_chain(cv: CycleView, lines: Lines, bull: PublicAdvocate | None, bear: PublicAdvocate | None,
+                  reply: PublicAdvocate | None, council_changes: dict[str, tuple[float, float]], council_w: Weights,
+                  weights_for: Any, ref_levels: dict[str, float], passed: int, n_checks: int,
+                  held_lines: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """One run in one line, step by step: what each advocate asked, what the manager decided (and
+    whose side it named), what the risk engine and the human then did. Each step links to its
+    section of the run page."""
+    c = cv.doc
+
+    def asked(a: PublicAdvocate | None) -> str:
+        if a is None:
+            return "no valid answer"
+        ch = change_list(a.proposal_levels, ref_levels)
+        text = stance(ch, lines, weights_for(ch))
+        return text[:1].lower() + text[1:]
+
+    final_bull = reply if reply is not None else bull
+    steps = [
+        {"who": "Bull asked", "accent": "bull", "text": asked(final_bull),
+         "anchor": "a-rebuttal" if reply is not None else "a-bull"},
+        {"who": "Bear asked", "accent": "bear", "text": asked(bear), "anchor": "a-bear"},
+    ]
+    used = next((r for r in c.pm.replicates if r.replicate == c.pm.medoid), None)
+    total = len(c.pm.replicates)
+    if not c.pm.replicates or c.pm.valid_replicates == 0 or used is None:
+        pm_text = "no usable answer: the reference applied"
+    else:
+        decided = stance(council_changes, lines, council_w)
+        same = sum(1 for r in c.pm.replicates if r.valid and r.sided_with == used.sided_with)
+        side = SIDED_WORDS.get(used.sided_with or "", "")
+        pm_text = decided[:1].lower() + decided[1:] + (f" (sided with {side}, {same} of {total} attempts)" if side else "")
+    steps.append({"who": "Manager", "accent": "pm", "text": pm_text, "anchor": "a-pm"})
+    if c.risk is None:
+        risk_text = "did not run"
+    else:
+        risk_text = f"{passed}/{n_checks} checks passed"
+        if held_lines:
+            risk_text += ", held back " + join_words([r["name"] for r in held_lines])
+    steps.append({"who": "Risk engine", "accent": "risk", "text": risk_text, "anchor": "a-risk"})
+    legs = len(c.plan.legs) if c.plan else 0
+    if cv.rehearsal:
+        human = "not needed: rehearsal"
+    elif cv.final_state in HUMAN_WORDS and (legs or cv.final_state not in ("proposed", "awaiting_publication")):
+        human = HUMAN_WORDS[cv.final_state]
+    else:
+        human = "nothing to approve"
+    steps.append({"who": "Human", "accent": "human", "text": human, "anchor": "a-decision"})
+    return steps
 
 
 def build_run_view(cv: CycleView, lines: Lines) -> dict[str, Any]:
@@ -1195,7 +1706,17 @@ def build_run_view(cv: CycleView, lines: Lines) -> dict[str, Any]:
             "why": why, "held": [h["text"] for h in held], "held_raw": [h["raw"] for h in held],
         })
     changed_rows = [r for r in rows if r["differs"]]
-    steady = [r for r in rows if not r["differs"]]
+    # orders that no agent asked for: a line bought up to (or back to) its reference weight
+    changed_lines = {r["line"] for r in changed_rows}
+    ref_trades = []
+    for leg in (c.plan.legs if c.plan else []):
+        if leg.line in changed_lines or any(t["line"] == leg.line for t in ref_trades):
+            continue
+        ref_trades.append({"line": leg.line, "name": lines.name(leg.line),
+                           "words": f"{lines.name(leg.line)} {fmt_share(leg.weight_before_x)} → "
+                                    f"{fmt_share(leg.weight_after_x)}"})
+    traded = {t["line"] for t in ref_trades}
+    steady = [r for r in rows if not r["differs"] and r["line"] not in traded]
 
     # ---- the nine nodes
     trends = [r.trend for r in c.reference.values() if r.trend]
@@ -1448,33 +1969,6 @@ def build_run_view(cv: CycleView, lines: Lines) -> dict[str, Any]:
     if held_lines:
         change_words += " · held: " + ", ".join(r["name"] for r in held_lines)
 
-    # ---- the debate: three turns, each with a short excerpt, a stance and (bear) its verdicts in words
-    bull_claims = {cl.claim_id: cl for cl in bull.claims} if bull else {}
-    bear_verdicts = {r.claim_id: r for r in bear.rebuttals} if bear else {}
-    turns = []
-    for role, a, accent, key in (("Bull · opening", bull, "bull", "bull"), ("Bear · answer", bear, "bear", "bear"),
-                                 ("Bull · reply", reply, "bull", "rebuttal")):
-        if a is None:
-            turns.append({"role": role, "accent": accent, "a": None})
-            continue
-        ch = change_list(a.proposal_levels, ref_levels)
-        short, cut = excerpt(a.argument)
-        verdict_words = ""
-        disputed = []
-        if key == "bear" and a.rebuttals:
-            n_bull = len(bull_claims)
-            of = f" of the bull's {plural(n_bull, 'point')}" if n_bull else (" point" if len(concede) == 1 else " points")
-            verdict_words = f"Accepts {len(concede)}{of}; disputes {len(refute)}"
-            for cid in refute[:2]:
-                if cid in bull_claims:
-                    disputed.append(excerpt(bull_claims[cid].text, 80)[0])
-        turns.append({
-            "role": role, "accent": accent, "a": a, "key": key, "summary": short, "cut": cut,
-            "stance": stance(ch, lines, weights_for(ch)),
-            "verdicts": bear_verdicts if key == "bull" else {},
-            "verdict_words": verdict_words, "disputed": disputed,
-            "more_disputed": max(0, len(refute) - len(disputed)),
-        })
     debate_texts = [t for a in (bull, bear, reply) if a is not None
                     for t in [a.argument, *(cl.text for cl in a.claims), *(r.text for r in a.rebuttals)]]
 
@@ -1523,11 +2017,13 @@ def build_run_view(cv: CycleView, lines: Lines) -> dict[str, Any]:
                          f"({fmt_late(c.late_by_min)} late)")
 
     return {
-        "turns": turns, "reps": reps, "pm_same": pm_same, "pm_lead": pm_lead,
+        "reps": reps, "pm_same": pm_same, "pm_lead": pm_lead,
         "agreement": agreement, "agreement_rest": agreement_rest,
         "status_words": status_words, "why": [plain_why(w, lines) for w in c.why_we_met],
         "nodes": nodes, "summary": summary, "headline": headline, "control": control, "rows": rows,
         "changed_rows": changed_rows, "steady": steady, "general_holds": general_holds, "change_words": change_words,
+        "ref_trades": ref_trades, "chain": outcome_chain(cv, lines, bull, bear, reply, council_changes, council_w,
+                                                         weights_for, ref_levels, passed, len(checks), held_lines),
         "checks_passed": passed, "checks_total": len(checks),
         "failed_checks": [ch for ch in checks if not ch.passed], "agreement_words": low_words,
         "council_changes": council_changes, "when": when, "n_lines": n_lines,
@@ -1537,46 +2033,845 @@ def build_run_view(cv: CycleView, lines: Lines) -> dict[str, Any]:
     }
 
 
-# ------------------------------------------------------------------------------ portfolio view
-def build_portfolio(view: JournalView, lines: Lines, geo: Geometry, kill: dict[str, Any]) -> dict[str, Any] | None:
-    """Holdings by line and the four stat tiles. None when there is nothing to show yet."""
+# ------------------------------------------------------------------------------ the run transcript
+TURNS = (
+    # debate turn, run-page anchor, heading, the agent page's words
+    ("bull_open", "a-bull", "Bull · opening", "the bull's opening"),
+    ("bear", "a-bear", "Bear · answer", "the bear's answer"),
+    ("bull_rebuttal", "a-rebuttal", "Bull · rebuttal", "the bull's rebuttal"),
+)
+TURN_ANCHOR = {t: a for t, a, _, _ in TURNS}
+TURN_WORDS = {t: w for t, _, _, w in TURNS}
+TURN_ROLE = {"bull_open": "bull", "bear": "bear", "bull_rebuttal": "bull"}
+CLAIM_PREFIX = re.compile(
+    r"^\s*(?:(bull_open|bull_rebuttal|bull|bear|rebuttal|opening)\s*[:/.\-]\s*)?(c\d+)\s*$", re.I)
+PREFIX_TURN = {"bull_open": "bull_open", "bull": "bull_open", "opening": "bull_open", "bear": "bear",
+               "bull_rebuttal": "bull_rebuttal", "rebuttal": "bull_rebuttal"}
+SIDED_WORDS = {"bull": "the bull", "bear": "the bear", "neither": "neither advocate", "reference": "the reference"}
+REGIME_WORDS = {"risk_on": ("risk on", "executed"), "neutral": ("neutral", "sealed"), "risk_off": ("risk off", "warn")}
+TILT_WORDS = {-1: "lean less", 0: "neutral", 1: "lean more"}
+CARD_TYPE_WORDS = {
+    "news_material": "material news", "news_context": "news context", "filing_material": "material filing",
+    "filing_context": "filing context", "macro_context": "macro context", "event_binary": "scheduled event",
+    "vol_shock": "volatility shock", "sector_rank": "sector rank",
+}
+
+
+def claim_anchor(turn: str, claim_id: str) -> str:
+    return anchor_slug("cl", f"{turn}-{claim_id}")
+
+
+def debate_turns(c: PublicCycleV1) -> dict[str, PublicAdvocate | None]:
+    return {"bull_open": c.debate.bull, "bear": c.debate.bear, "bull_rebuttal": c.debate.rebuttal}
+
+
+def resolve_claim(claim_id: str, sided: str | None,
+                  claims: dict[str, set[str]]) -> list[tuple[str, str, str]]:
+    """Which advocate's claim a manager dismissal names: [(turn, claim id, how)]. `how` is "named"
+    ("bear:c2"), "only" (one advocate has that id), "inferred" (an unnamed id read as the claim of
+    the side the attempt did not take) or "ambiguous" (several advocates have it)."""
+    m = CLAIM_PREFIX.match(claim_id or "")
+    if not m:
+        return []
+    prefix, cid = m.group(1), m.group(2).lower()
+    if prefix:
+        turn = PREFIX_TURN[prefix.lower()]
+        return [(turn, cid, "named")] if cid in claims.get(turn, set()) else []
+    owners = [t for t, _, _, _ in TURNS if cid in claims.get(t, set())]
+    if len(owners) == 1:
+        return [(owners[0], cid, "only")]
+    if sided == "bear" and "bull_open" in owners:
+        return [("bull_open", cid, "inferred")]
+    if sided == "bull" and "bear" in owners:
+        return [("bear", cid, "inferred")]
+    return [(t, cid, "ambiguous") for t in owners]
+
+
+HOW_WORDS = {   # the footnotes (†) for a claim the manager named by its bare number
+    "named": "",
+    "only": "",
+    "inferred": "The manager wrote only the claim number; it sided with the other advocate, so the number is "
+                "read as that advocate's claim.",
+    "ambiguous": "The manager wrote only the claim number, and more than one advocate has a claim with that "
+                 "number, so it is not shown under either claim.",
+}
+
+
+def citations(c: PublicCycleV1) -> dict[str, list[tuple[str, str]]]:
+    """Evidence id -> the agents that cited it this run: [(agent slug, short name)], in run order."""
+    out: dict[str, list[tuple[str, str]]] = {}
+
+    def add(refs: Any, slug: str, name: str) -> None:
+        for r in refs:
+            if r is None:
+                continue
+            rid = ref_id(r)
+            seen = out.setdefault(rid, [])
+            if (slug, name) not in seen:
+                seen.append((slug, name))
+
+    card_agent = {"vol": ("vol", "Volatility officer"), "event": ("event", "Event officer"),
+                  "news": ("news", "News analyst"), "macro": ("macro", "Macro analyst")}
+    for k in c.cards:
+        slug, name = card_agent.get(k.role, (k.role, k.role.replace("_", " ").capitalize()))
+        add(k.evidence, slug, name)
+    if c.macro is not None:
+        for d in c.macro.drivers:
+            add(d.evidence, "macro", "Macro analyst")
+    for turn, a in debate_turns(c).items():
+        if a is None:
+            continue
+        slug, name = {"bull_open": ("bull", "Bull"), "bear": ("bear", "Bear"),
+                      "bull_rebuttal": ("rebuttal", "Bull (rebuttal)")}[turn]
+        for cl in a.claims:
+            add(cl.evidence, slug, name)
+        for rb in a.rebuttals:
+            add(rb.evidence, slug, name)
+        add([a.strongest_opposing], slug, name)
+    for block, slug, name in ((c.pm, "pm", "Manager"), (c.single_agent, "control", "Control")):
+        if block is None:
+            continue
+        for r in block.replicates:
+            for d in r.deviations:
+                add(d.evidence, slug, name)
+            if r.decisive_fact is not None:
+                add([r.decisive_fact.evidence], slug, name)
+    return out
+
+
+def card_view(k: PublicCard, lines: Lines, fx: FactIndex, cited: dict[str, list[tuple[str, str]]],
+              pre: str = "") -> dict[str, Any]:
+    label = evidence_label(SimpleNamespace(kind="card", id=k.card_id), lines)["label"]
+    return {
+        "id": k.card_id, "anchor": pre + anchor_slug("k", k.card_id), "label": label,
+        "type": CARD_TYPE_WORDS.get(k.card_type, k.card_type.replace("_", " ")), "direction": k.direction,
+        "claim": k.claim, "falsifier": k.falsifier, "horizon": k.horizon_days, "qualifying": k.qualifying,
+        "scope": [lines.name(s) if s in lines.info or re.fullmatch(r"[A-Z0-9](?:[A-Z0-9_]{0,10}[A-Z0-9])?", s) else s for s in k.scope],
+        "chips": [fx.chip(r) for r in k.evidence],
+        "corroborated": [{"label": evidence_label(SimpleNamespace(kind="card", id=x), lines)["label"],
+                          "href": fx.href(x)} for x in k.corroborated_by],
+        "cited_by": [name for slug, name in cited.get(k.card_id, []) if slug not in (k.role,)],
+    }
+
+
+AGENT_SHORT = {"a-news": "news", "a-macro": "macro", "a-bull": "bull", "a-bear": "bear", "a-rebuttal": "reply",
+               "a-pm": "PM", "a-control": "control"}
+
+
+def _agent(slug: str, **extra: Any) -> dict[str, Any]:
+    spec = AGENT_BY_SLUG[slug]
+    out = {"slug": slug, "id": f"a-{slug}", "name": spec.name, "kind": spec.kind, "accent": spec.accent,
+           "group": spec.group, "job": spec.job, "calls": [], "meta": "", "failure": None, "result": "",
+           "compact": False,
+           "page": f"agents/{slug}.html", "icon": AGENT_ICONS.get(slug, "cpu"), **extra}
+    out["short"] = AGENT_SHORT.get(out["id"], out["name"])
+    return out
+
+
+def _calls_meta(calls: list[dict[str, Any]], raw: list[PublicCall]) -> str:
+    """The footer of an agent's call log: "3 calls · median 1.7 s · 24,855 tokens in / 981 out"
+    ("1 call · 3.0 s · ..." for one call); empty without calls."""
+    if not raw:
+        return ""
+    tokens = f"{fmt_int(sum(x.tokens_in for x in raw))} tokens in / {fmt_int(sum(x.tokens_out for x in raw))} out"
+    if len(raw) == 1:
+        return f"1 call · {fmt_secs(raw[0].latency_ms)} · {tokens}"
+    lat = [float(x.latency_ms) for x in raw]
+    med = median(lat) or 0.0
+    slow = any(c["failed"] for c in calls) or max(lat) > 10 * med
+    total = f"total {fmt_secs(int(sum(lat)))} · " if slow else ""
+    return f"{len(raw)} calls · {total}median {fmt_secs(int(med))} · {tokens}"
+
+
+def _failure(role: str, calls: list[dict[str, Any]]) -> dict[str, Any] | None:
+    bad = [x for x in calls if x["failed"]]
+    if not bad:
+        return None
+    what = list(dict.fromkeys(x["explain"] for x in bad if x["explain"]))
+    return {"what": " ".join(what), "instead": FALLBACK_WORDS.get(role, "")}
+
+
+def _proposal(levels: dict[str, float], ref_levels: dict[str, float]) -> dict[str, float]:
+    """A set of levels as the call it makes: {line: level} for the lines away from the reference."""
+    return {k: round(after, 3) for k, (_before, after) in change_list(levels, ref_levels).items()}
+
+
+def _replicate_call(r: PublicPMReplicate, ref_levels: dict[str, float]) -> dict[str, float]:
+    return _proposal({d.line: d.level for d in r.deviations}, ref_levels)
+
+
+def advocate_view(turn: str, a: PublicAdvocate | None, c: PublicCycleV1, lines: Lines, fx: FactIndex,
+                  weights_for: Any, ref_levels: dict[str, float]) -> dict[str, Any] | None:
+    """One debate turn: its argument in full, its claims (each with an anchor and what happened to
+    it), its answers to the other side, its concessions, and whether the manager did what it asked."""
+    if a is None:
+        return None
+    turns = debate_turns(c)
+    claims_by_turn = {t: {cl.claim_id for cl in x.claims} for t, x in turns.items() if x is not None}
+    ch = change_list(a.proposal_levels, ref_levels)
+    fates: dict[str, list[dict[str, Any]]] = {cl.claim_id: [] for cl in a.claims}
+    # the bear answers the bull's opening claims
+    if turn == "bull_open" and turns["bear"] is not None:
+        for rb in turns["bear"].rebuttals:
+            if rb.claim_id in fates:
+                fates[rb.claim_id].append({"who": "Bear", "href": f"{fx.base}#{anchor_slug('rb', 'bear-' + rb.claim_id)}",
+                                           "verdict": rb.verdict, "text": rb.text, "dagger": False})
+    # the bull's rebuttal concedes bear claims as "c<N>: why"
+    if turn == "bear" and turns["bull_rebuttal"] is not None:
+        for text in turns["bull_rebuttal"].concessions:
+            m = re.match(r"^\s*(c\d+)\s*[:.\-–]\s*(.*)$", text)
+            if m and m.group(1) in fates:
+                fates[m.group(1)].append({"who": "Bull (rebuttal)", "href": f"{fx.base}#a-rebuttal", "verdict": "concede",
+                                          "text": m.group(2), "dagger": False})
+    # the manager's attempts set a claim aside (dismissed). A bare claim number that more than one
+    # advocate used is ambiguous: it is shown once, on the attempt, never as a firm fate here.
+    medoid = c.pm.medoid
+    for r in c.pm.replicates:
+        for d in r.dismissed:
+            for t, cid, how in resolve_claim(d.claim_id, r.sided_with, claims_by_turn):
+                if t == turn and cid in fates and how != "ambiguous":
+                    used = " (used)" if r.replicate == medoid else ""
+                    fates[cid].append({"who": f"Manager, attempt {r.replicate + 1}{used}",
+                                       "href": f"{fx.base}#a-pm-{r.replicate + 1}", "verdict": "dismissed",
+                                       "text": d.why, "dagger": how == "inferred"})
+    used_rep = next((r for r in c.pm.replicates if r.replicate == medoid), None)
+    used_ids: set[str] = set()
+    if used_rep is not None:
+        for d in used_rep.deviations:
+            used_ids |= {ref_id(e) for e in d.evidence}
+        if used_rep.decisive_fact is not None and used_rep.decisive_fact.evidence is not None:
+            used_ids.add(ref_id(used_rep.decisive_fact.evidence))
+    claims = []
+    for cl in a.claims:
+        shared = [e for e in cl.evidence if ref_id(e) in used_ids]
+        dismissed_by_used = any(f["verdict"] == "dismissed" and "(used)" in f["who"] for f in fates[cl.claim_id])
+        if shared and not dismissed_by_used:
+            fates[cl.claim_id].append({
+                "who": "Manager, the used attempt", "href": f"{fx.base}#a-pm-{(medoid or 0) + 1}", "verdict": "used",
+                "text": "cited the same evidence: " + ", ".join(fx.chip(e)["label"] for e in shared[:3]),
+                "dagger": False})
+        claims.append({"id": cl.claim_id, "anchor": claim_anchor(turn, cl.claim_id), "text": cl.text,
+                       "short": clip(cl.text, 90), "chips": [fx.chip(e) for e in cl.evidence],
+                       "fates": fates[cl.claim_id]})
+    rebuttals = []
+    for rb in a.rebuttals:
+        target = turns["bull_open"]
+        target_claim = next((x for x in (target.claims if target else []) if x.claim_id == rb.claim_id), None)
+        rebuttals.append({
+            "claim_id": rb.claim_id, "verdict": rb.verdict, "text": rb.text, "chips": [fx.chip(e) for e in rb.evidence],
+            "anchor": anchor_slug("rb", f"{turn}-{rb.claim_id}"),
+            "target_href": f"{fx.base}#{claim_anchor('bull_open', rb.claim_id)}" if target_claim else "",
+            "target_text": clip(target_claim.text, 110) if target_claim else "",
+        })
+    concessions = []
+    for text in a.concessions:
+        m = re.match(r"^\s*(c\d+)\s*[:.\-–]\s*(.*)$", text) if turn == "bull_rebuttal" else None
+        bear_ids = claims_by_turn.get("bear", set())
+        if m and m.group(1) in bear_ids:
+            concessions.append({"text": m.group(2), "ref": m.group(1),
+                                "href": f"{fx.base}#{claim_anchor('bear', m.group(1))}"})
+        else:
+            concessions.append({"text": text, "ref": "", "href": ""})
+    # did the manager do what this turn asked? By outcome (the call the attempt made), and by the
+    # side the attempt named. An empty proposal asks to keep the reference.
+    side = TURN_ROLE[turn]
+    asked = _proposal(a.proposal_levels, ref_levels)
+    valid = [r for r in c.pm.replicates if r.valid]
+    got = sum(1 for r in valid if _replicate_call(r, ref_levels) == asked)
+    sided = sum(1 for r in valid if r.sided_with == side)
+    used_ok = used_rep is not None and used_rep.valid
+    used_call = _replicate_call(used_rep, ref_levels) if used_ok and used_rep is not None else {}
+    used_ch = {k: (ref_levels[k], v) for k, v in used_call.items()}
+    did = stance(used_ch, lines, weights_for(used_ch))
+    text = stance(ch, lines, weights_for(ch))
+    # published before the full-text record: arguments were cut at 600 characters
+    legacy_cut = a.argument.rstrip().endswith("…") and (len(a.argument) == 600 or not c.facts)
+    return {
+        "turn": turn, "argument": a.argument, "stance": text, "changes": bool(ch), "legacy_cut": legacy_cut,
+        "claims": claims, "rebuttals": rebuttals, "concessions": concessions,
+        "strongest": fx.chip(a.strongest_opposing) if a.strongest_opposing else None,
+        "asked": text[:1].lower() + text[1:], "did": did[:1].lower() + did[1:],
+        "got": got, "sided": sided, "valid": len(valid), "used_ok": used_ok,
+        "used_got": used_ok and used_call == asked,
+        "used_sided": used_ok and used_rep is not None and used_rep.sided_with == side,
+        "used_label": SIDED_WORDS.get(used_rep.sided_with or "", "") if used_ok and used_rep is not None else "",
+        "who": "the bear" if side == "bear" else "the bull",
+        "daggers": any(f["dagger"] for cl in claims for f in cl["fates"]),
+        "concede": sum(1 for r in a.rebuttals if r.verdict == "concede"),
+        "refute": sum(1 for r in a.rebuttals if r.verdict == "refute"),
+    }
+
+
+def _unique_refs(refs: list[Any]) -> list[Any]:
+    seen: set[str] = set()
+    out = []
+    for r in refs:
+        rid = ref_id(r)
+        if rid not in seen:
+            seen.add(rid)
+            out.append(r)
+    return out
+
+
+def replicate_view(r: PublicPMReplicate, block: PublicPM, calls: dict[int, dict[str, Any]], c: PublicCycleV1,
+                   lines: Lines, fx: FactIndex, weights_for: Any, ref_levels: dict[str, float],
+                   anchor: str, *, control: bool = False, pre: str = "") -> dict[str, Any]:
+    """One manager (or control) attempt, with its own call, its changes and what it set aside.
+    The control sees no debate, so its claim ids are never resolved against the advocates' claims.
+    `pre` prefixes the element id (the agents' pages repeat a run's attempts; ids stay unique)."""
+    claims_by_turn = {t: {cl.claim_id for cl in x.claims} for t, x in debate_turns(c).items() if x is not None}
+    changes = []
+    for d in r.deviations:
+        rl = ref_levels.get(d.line)
+        w = weights_for({d.line: (rl, d.level)}) if rl is not None else {}
+        if d.line in w:
+            words = (f"{d.direction} {lines.name(d.line)} from {fmt_share(w[d.line][0])} to "
+                     f"{fmt_share(w[d.line][1])}")
+            size = f"size {fmt_level(rl)} → {fmt_level(d.level)}"
+        else:
+            words = f"{d.direction} {lines.name(d.line)} to size {fmt_level(d.level)}"
+            size = ""
+        changes.append({"words": words, "size": size, "reason": d.reason, "chips": [fx.chip(e) for e in d.evidence],
+                        "direction": d.direction})
+    dismissed = []
+    for d in ([] if control else r.dismissed):
+        targets = [{"href": f"{fx.base}#{claim_anchor(t, cid)}", "label": f"{TURN_WORDS[t]} {cid}", "how": how}
+                   for t, cid, how in resolve_claim(d.claim_id, r.sided_with, claims_by_turn)]
+        hows = {x["how"] for x in targets}
+        dismissed.append({"claim_id": d.claim_id, "why": d.why, "targets": targets,
+                          "ambiguous": "ambiguous" in hows, "dagger": "inferred" in hows})
+    call = calls.get(r.replicate)
+    failure = ""
+    if not r.valid:
+        if call is not None and call["failed"]:
+            failure = f"No usable answer: it {call['fail_phrase']}"
+        else:
+            what = "; ".join(v["text"] for v in (plain_violation(x, lines) for x in r.violations)) or "broke a rule"
+            failure = f"Discarded by the auditor: {what}"
+    return {
+        "n": r.replicate + 1, "anchor": f"{pre}{anchor}-{r.replicate + 1}", "used": r.replicate == block.medoid,
+        "valid": r.valid, "call": call, "sided": SIDED_WORDS.get(r.sided_with or "", "—"), "control": control,
+        "failure": failure, "same_as": 0, "sig": (tuple(sorted((d.line, round(d.level, 3)) for d in r.deviations)),
+                                                   r.sided_with) if r.valid else None,
+        "changes": changes, "dismissed": dismissed, "no_change": r.no_change_reason,
+        "decisive": ({"text": r.decisive_fact.text,
+                      "chip": fx.chip(r.decisive_fact.evidence) if r.decisive_fact.evidence else None}
+                     if r.decisive_fact else None),
+        "violations": [plain_violation(v, lines) for v in r.violations],
+        "reverted": [plain_violation(v, lines) for v in r.reverted],
+    }
+
+
+def _mark_same(reps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attempts that made exactly the same call as the used one (same changes, same side named)
+    are marked `same_as`: the page shows them folded, the used one in full."""
+    lead = next((rp for rp in reps if rp["used"] and rp["valid"]), None) or next((rp for rp in reps if rp["valid"]), None)
+    if lead is None:
+        return reps
+    for rp in reps:
+        if rp is not lead and rp["valid"] and rp["sig"] == lead["sig"]:
+            rp["same_as"] = lead["n"]
+    return reps
+
+
+def leg_reason(leg: Any, council_changes: dict[str, tuple[float, float]], ref_x: dict[str, float], lines: Lines,
+               medoid: int | None) -> str:
+    """Why an order exists: the council's change, a line bought up to its reference, or a
+    rebalance back to the reference."""
+    line = leg.line
+    ref = ref_x.get(line)
+    if line in council_changes:
+        verb = verb_for(*council_changes[line]).replace("add to", "add")
+        return f"Council: {verb} (manager attempt {(medoid or 0) + 1})"
+    if ref is not None and abs(leg.weight_before_x) < EPS and abs(ref) > EPS and abs(leg.weight_after_x - ref) < 5e-4:
+        return f"Reference: not yet held, bought up to its reference weight ({fmt_share(ref)})"
+    if ref is not None and abs(leg.weight_after_x - ref) < 5e-4:
+        return "Reference: back to its reference weight (drift beyond the deadband)"
+    return "Risk engine: rebalanced to fit the book's limits"
+
+
+IN_SENTENCE = {"news": "the news analyst", "macro": "the macro analyst", "bull_open": "the bull's opening",
+               "bear": "the bear", "bull_rebuttal": "the bull's rebuttal", "pm": "manager attempt {n}",
+               "single_agent": "control attempt {n}"}
+FAIL_THEN = {
+    "news": "no news cards", "macro": "no macro context (nothing depends on it)",
+    "bull_open": "no bull opening; the bear argued its own case", "bear": "no bear answer; the rebuttal was skipped",
+    "bull_rebuttal": "the manager saw no bull rebuttal", "single_agent": "the control has fewer attempts (it never trades)",
+}
+
+
+def build_transcript(cv: CycleView, lines: Lines, run: dict[str, Any], base: str = "") -> dict[str, Any]:
+    """The run page as a transcript: every agent in execution order, each with its status, its
+    calls, what it saw, what it said or did, and what happened to it; then the facts table."""
+    c = cv.doc
+    fx = FactIndex(c, lines, base)
+    # the agents' pages repeat a run's cards and attempts: their element ids get the run's id
+    pre = f"{c.cycle_id}-" if base else ""
+    commit = cv.commitment.code_commit if cv.commitment else ""
+    cited = citations(c)
+    ref_levels = {k: r.level_ref for k, r in c.reference.items()}
+    ref_x = {k: r.weight_ref_x for k, r in c.reference.items()}
+    units = unit_weights(c)
+    raw_x = dict(c.risk.raw_x) if c.risk else {}
+
+    def weights_for(changes: dict[str, tuple[float, float]], own: dict[str, float] | None = None) -> Weights:
+        out: Weights = {}
+        for k, (before, after) in changes.items():
+            b = ref_x.get(k, units[k] * before if k in units else None)
+            a = (own or {}).get(k, units[k] * after if k in units else None)
+            if b is not None and a is not None:
+                out[k] = (b, a)
+        return out
+
+    by_role: dict[str, list[PublicCall]] = {}
+    for call in c.calls:
+        by_role.setdefault(call.role, []).append(call)
+    views = {id(call): call_view(call, commit) for call in c.calls}
+
+    def calls_for(*roles: str) -> tuple[list[dict[str, Any]], list[PublicCall]]:
+        raw = [call for r in roles for call in by_role.get(r, [])]
+        return [views[id(x)] for x in raw], raw
+
+    cards = {k.card_id: card_view(k, lines, fx, cited, pre) for k in c.cards}
+    agents: list[dict[str, Any]] = []
+    risk = c.risk
+    checks = risk.checks if risk else []
+
+    # ---- 1 data steward
+    trends = [r.trend for r in c.reference.values() if r.trend]
+    kinds = {}
+    for f in c.facts:
+        kinds[f.kind] = kinds.get(f.kind, 0) + 1
+    holds, _general = split_holds(risk.hold_reasons if risk else [])
+    stale = [lines.name(k) for k in lines.sort(holds) if any(h["text"] == "data too old" for h in holds[k])]
+    closed = [lines.name(k) for k in lines.sort(holds) if any(h["text"] == "market closed" for h in holds[k])]
+    cal = calendar_words([f for f in c.flags if f.startswith("calendar:")])
+    data_state = ("failed" if not c.reference else "fallback" if stale or cal else "ok")
+    n_facts = len(c.facts)
+    agents.append(_agent(
+        "data", status=code_status("ok" if data_state == "ok" else "fallback" if data_state == "fallback"
+                                   else "invalid", {"ok": "ok", "fallback": "incomplete", "failed": "no data"}[data_state]),
+        body={
+            "n_lines": len(c.reference), "trends": " · ".join(f"{trends.count(t)} {t}" for t in ("up", "mixed", "down")
+                                                           if trends.count(t)),
+            "kinds": [(heading, kinds[k]) for k, heading, _ in FACT_KINDS if kinds.get(k)],
+            "n_facts": len(c.facts), "stale": stale, "closed": closed, "calendar": cal, "why": run["why"],
+        },
+        result=(f"read {plural(len(c.reference), 'line')}"
+                + (f" (trend {' · '.join(f'{trends.count(t)} {t}' for t in ('up', 'mixed', 'down') if trends.count(t))})"
+                   if trends else "")
+                + (f" and built {plural(n_facts, 'fact')}" if n_facts else "")),
+        compact=data_state == "ok"))
+
+    # ---- 2 reference book
+    ref_rows = []
+    for k in lines.sort(c.reference):
+        r = c.reference[k]
+        ref_rows.append({"line": k, "ticker": ticker(k), "name": lines.name(k), "trend": r.trend,
+                         "day": fmt_signed(r.day_change_pct), "day_dir": move_dir(r.day_change_pct),
+                         "level": fmt_level(r.level_ref), "weight": fmt_share(r.weight_ref_x)})
+    ref_gross = sum(abs(r.weight_ref_x) for r in c.reference.values())
+    held_ref = sum(1 for r in c.reference.values() if abs(r.weight_ref_x) > EPS)
+    agents.append(_agent("reference", status=code_status("ok" if c.reference else "invalid",
+                                                         "ok" if c.reference else "no book"),
+                         body={"rows": ref_rows, "gross": fmt_share(ref_gross), "held": held_ref,
+                               "n": len(ref_rows)},
+                         result=f"would hold {held_ref} of {plural(len(ref_rows), 'line')}, {fmt_share(ref_gross)} of "
+                                "the portfolio in total",
+                         compact=bool(c.reference)))
+
+    # ---- 3 volatility officer
+    vol_cards = [cards[k.card_id] for k in c.cards if k.card_type == "vol_shock"]
+    breaker = next((ch for ch in checks if ch.name == "vol_breaker"), None)
+    shocked = [s for k in vol_cards for s in k["scope"]]
+    agents.append(_agent(
+        "vol", status=code_status("ok", plural(len(vol_cards), "card") if vol_cards else "no shock"),
+        body={"cards": vol_cards, "breaker": breaker, "windows": []},
+        result=("volatility shock on " + join_words(shocked) if shocked else "no volatility shock")
+               + ("; the breaker tripped" if breaker is not None and not breaker.passed else ""),
+        compact=True))
+
+    # ---- 4 event officer
+    event_cards = [cards[k.card_id] for k in c.cards if k.card_type == "event_binary"]
+    windows = [lines.name(k) for k in lines.sort(c.bands) if any("event window" in r for r in c.bands[k].reasons)]
+    agents.append(_agent(
+        "event", status=code_status("fallback" if cal else "ok",
+                                    "calendar incomplete" if cal else
+                                    plural(len(event_cards), "card") if event_cards else "no event"),
+        body={"cards": event_cards, "windows": windows, "calendar": cal},
+        result=(plural(len(event_cards), "event card") if event_cards else "no scheduled event near this run")
+               + (f"; adds blocked on {join_words(windows)}" if windows else ""),
+        compact=not cal))
+
+    # ---- 5 news analyst
+    news_calls, news_raw = calls_for("news")
+    news_cards = [cards[k.card_id] for k in c.cards if k.role == "news"]
+    agents.append(_agent(
+        "news", status=status_of(news_calls, ran=bool(news_cards)), calls=news_calls,
+        meta=_calls_meta(news_calls, news_raw), failure=_failure("news", news_calls),
+        body={"cards": news_cards, "n_items": kinds.get("news", 0),
+              "qualifying": [x for x in news_cards if x["qualifying"]]}))
+
+    # ---- 6 macro analyst
+    macro_calls, macro_raw = calls_for("macro")
+    macro_cards = [cards[k.card_id] for k in c.cards if k.role == "macro"]
+    macro = None
+    if c.macro is not None:
+        regime, css = REGIME_WORDS.get(c.macro.regime, (c.macro.regime, "sealed"))
+        macro = {"regime": regime, "css": css,
+                 "drivers": [{"text": d.text, "chips": [fx.chip(e) for e in d.evidence]} for d in c.macro.drivers],
+                 "tilts": [{"sleeve": k.replace("_", " "), "tilt": v, "words": TILT_WORDS.get(v, str(v))}
+                           for k, v in c.macro.sleeve_tilts.items()]}
+    ok_calls = [x for x in macro_calls if not x["failed"]]
+    if not macro_calls:
+        macro_note = "Not scheduled this run: the macro analyst runs on the first run of each UTC day."
+    elif macro is None and ok_calls:
+        macro_note = "Its structured output is not part of this older record; its cards, if any, are below."
+    else:
+        macro_note = ""
+    agents.append(_agent(
+        "macro", status=status_of(macro_calls, ran=False), calls=macro_calls,
+        meta=_calls_meta(macro_calls, macro_raw), failure=_failure("macro", macro_calls),
+        body={"macro": macro, "cards": macro_cards, "note": macro_note,
+              "fx_count": kinds.get("macro", 0)}))
+
+    # ---- 7-9 the debate
+    for turn, anchor, heading, _words in TURNS:
+        role_calls, raw = calls_for(turn)
+        a = debate_turns(c)[turn]
+        view = advocate_view(turn, a, c, lines, fx, weights_for, ref_levels)
+        slug = "bull" if turn != "bear" else "bear"
+        failure = _failure(turn, role_calls)
+        if a is None and failure is None:
+            if turn == "bull_rebuttal" and c.debate.bear is None:
+                failure = {"what": "Not run: the bear gave no usable answer, so there was nothing to reply to.",
+                           "instead": FALLBACK_WORDS["bear"]}
+            else:
+                failure = {"what": "No usable output was recorded for this turn.",
+                           "instead": FALLBACK_WORDS.get(turn, "")}
+        status = status_of(role_calls, ran=a is not None)
+        if a is None and not role_calls:
+            status = code_status("not_run", "skipped" if turn == "bull_rebuttal" else "no output")
+        agents.append(_agent(slug, id=anchor, name=heading,
+                             status=status, calls=role_calls, meta=_calls_meta(role_calls, raw),
+                             failure=failure, turn=turn, body=view,
+                             **({"icon": AGENT_ICONS["rebuttal"]} if turn == "bull_rebuttal" else {})))
+
+    # ---- 10 portfolio manager
+    pm_calls, pm_raw = calls_for("pm")
+    pm_by_rep = {x["replicate"] - 1: x for x in pm_calls}
+    reps = _mark_same([replicate_view(r, c.pm, pm_by_rep, c, lines, fx, weights_for, ref_levels, "a-pm", pre=pre)
+                       for r in c.pm.replicates])
+    council_levels = dict(c.pm.levels)
+    council_changes = change_list(council_levels, ref_levels)
+    pm_failure = _failure("pm", pm_calls)
+    n_valid = c.pm.valid_replicates
+    if pm_failure is not None and n_valid >= 2:
+        pm_failure["instead"] = (f"The failed attempt was discarded; the decision used the {n_valid} valid attempts"
+                                 + (", which agreed." if run["pm_same"] else "."))
+    if c.basis in ("fallback_parse", "fallback_disagreement", "council_unavailable"):
+        pm_failure = {"what": pm_failure["what"] if pm_failure else "",
+                      "instead": "Fallback: " + BASIS_WORDS.get(c.basis, c.basis) + ". Every line was set to the "
+                                 "mechanical reference."}
+    agreement = []
+    for k in lines.sort(c.pm.agreement_pct):
+        share = c.pm.agreement_pct[k]
+        if k in council_changes or share < 100 - EPS:
+            agreement.append({"name": lines.name(k), "words": count_words(share, c.pm.valid_replicates),
+                              "call": verb_for(*council_changes[k]) if k in council_changes else "hold"})
+    agents.append(_agent(
+        "pm", name=f"Portfolio manager ×{len(c.pm.replicates) or 3}",
+        status=status_of(pm_calls, ran=bool(c.pm.replicates)), calls=pm_calls, meta=_calls_meta(pm_calls, pm_raw),
+        failure=pm_failure,
+        body={"reps": reps, "valid": c.pm.valid_replicates, "total": len(c.pm.replicates),
+              "daggers": any(d["dagger"] for rp in reps for d in rp["dismissed"]),
+              "ambiguous": any(d["ambiguous"] for rp in reps for d in rp["dismissed"]),
+              "agreement": agreement, "agreement_rest": len(c.pm.agreement_pct) - len(agreement),
+              "decision": (phrase_changes(council_changes, lines, weights=weights_for(council_changes, raw_x))
+                           if council_changes else ""),
+              "basis": BASIS_WORDS.get(c.basis or "", ""), "pm_lead": run["pm_lead"], "pm_same": run["pm_same"],
+              "cards": list(cards.values())}))
+
+    # ---- 11 single-agent control
+    sa_calls, sa_raw = calls_for("single_agent")
+    ctrl = c.single_agent
+    ctrl_reps = []
+    differs = []
+    if ctrl is not None:
+        sa_by_rep = {x["replicate"] - 1: x for x in sa_calls}
+        ctrl_reps = _mark_same([replicate_view(r, ctrl, sa_by_rep, c, lines, fx, weights_for, ref_levels,
+                                               "a-control", control=True, pre=pre) for r in ctrl.replicates])
+        for k in lines.sort(set(ctrl.levels) & set(council_levels)):
+            if abs(ctrl.levels[k] - council_levels[k]) > EPS:
+                differs.append({"name": lines.name(k), "council": fmt_level(council_levels[k]),
+                                "control": fmt_level(ctrl.levels[k]),
+                                "council_w": fmt_share(weights_for({k: (ref_levels.get(k, 0.0), council_levels[k])})
+                                                       .get(k, (0, None))[1]),
+                                "control_w": fmt_share(weights_for({k: (ref_levels.get(k, 0.0), ctrl.levels[k])})
+                                                       .get(k, (0, None))[1])})
+    agents.append(_agent(
+        "control", name=f"Single-agent control ×{len(ctrl.replicates) if ctrl else 3}",
+        status=status_of(sa_calls, ran=ctrl is not None), calls=sa_calls, meta=_calls_meta(sa_calls, sa_raw),
+        failure=_failure("single_agent", sa_calls),
+        body={"reps": ctrl_reps, "control": run["control"], "differs": differs,
+              "valid": ctrl.valid_replicates if ctrl else 0, "total": len(ctrl.replicates) if ctrl else 0,
+              "present": ctrl is not None, "agrees": cv.control_agrees is True}))
+
+    # ---- 12 auditor and bands
+    audit_notes = []
+    for r in c.pm.replicates:
+        call = pm_by_rep.get(r.replicate)
+        if not r.valid and call is not None and call["failed"]:
+            audit_notes.append({"n": r.replicate + 1, "kind": "discarded", "raw": "; ".join(r.violations),
+                                "text": f"no usable answer (it {call['fail_phrase']})"})
+            continue
+        for v in r.violations:
+            audit_notes.append({"n": r.replicate + 1, "kind": "discarded" if not r.valid else "flagged",
+                                **plain_violation(v, lines)})
+        for v in r.reverted:
+            audit_notes.append({"n": r.replicate + 1, "kind": "reverted", **plain_violation(v, lines)})
+    band_rows = []
+    clipped = []
+    for k in lines.sort(c.bands):
+        b = c.bands[k]
+        raw_l = risk.raw_levels.get(k) if risk else None
+        band_l = risk.banded_levels.get(k) if risk else None
+        was_clipped = raw_l is not None and band_l is not None and abs(raw_l - band_l) > EPS
+        if was_clipped:
+            clipped.append({"name": lines.name(k), "asked": fmt_level(raw_l), "got": fmt_level(band_l)})
+        band_rows.append({"name": lines.name(k), "ticker": ticker(k), "trend": b.trend,
+                          "range": f"{fmt_level(b.lo)} to {fmt_level(b.hi)}", "ref": fmt_level(b.ref_level),
+                          "reasons": "; ".join(b.reasons), "qualifying": b.qualifying_cards,
+                          "fixed": abs(b.hi - b.lo) < EPS, "clipped": was_clipped})
+    audit_state = "fallback" if audit_notes or clipped else "ok"
+    agents.append(_agent(
+        "audit", status=code_status(audit_state, "ok" if audit_state == "ok" else
+                                    plural(len(audit_notes) + len(clipped), "correction")),
+        body={"notes": audit_notes, "bands": band_rows, "clipped": clipped,
+              "open": sum(1 for b in band_rows if not b["fixed"])}))
+
+    # ---- 13 risk engine
+    risk_state = "invalid" if risk is None else "ok" if run["checks_passed"] == run["checks_total"] else "fallback"
+    agents.append(_agent(
+        "risk", status=code_status(risk_state, {"invalid": "did not run", "ok": "all checks pass",
+                                                "fallback": "limits applied"}[risk_state]),
+        body={"held": [r for r in run["rows"] if r["held"]]}))
+
+    # ---- 14 cost desk and plan
+    legs = c.plan.legs if c.plan else []
+    why_leg = {leg.seq: leg_reason(leg, council_changes, ref_x, lines, c.pm.medoid) for leg in legs}
+    agents.append(_agent(
+        "costs", status=code_status("ok" if legs else "none", plural(len(legs), "order") if legs else "no orders"),
+        body={"legs": [{"leg": leg, "why": why_leg[leg.seq]} for leg in legs], "why_leg": why_leg,
+              "skipped": run["skipped"]}))
+
+    # ---- facts table
+    cited_rows, rest = [], {}
+    for f in c.facts:
+        row = fx.row(f)
+        who = cited.get(f.id, [])
+        row["cited_by"] = [{"name": n, "href": f"{fx.base}#a-{s}"} for s, n in who]
+        if who:
+            cited_rows.append(row)
+        else:
+            rest.setdefault(f.kind, []).append(row)
+    heading = {k: h for k, h, _ in FACT_KINDS}
+    facts = {
+        "cited": cited_rows, "total": len(c.facts),
+        "rest": [(heading.get(k, k), rows) for k in [x for x, _, _ in FACT_KINDS] + sorted(rest)
+                 if (rows := rest.pop(k, None))],
+        "withheld": sum(1 for f in c.facts if f.withheld),
+    }
+
+    groups: list[tuple[str, list[dict[str, Any]]]] = []
+    for a in agents:
+        if not groups or groups[-1][0] != a["group"]:
+            groups.append((a["group"], []))
+        groups[-1][1].append(a)
+    all_calls = [views[id(x)] for x in c.calls]
+    state = cv.final_state
+    if cv.rehearsal:
+        decision = code_status("none", "not traded")
+    elif state in ("completed", "completed_partial"):
+        decision = code_status("ok", "executed" if state == "completed" else "partly executed")
+    elif state in ("approved", "executing"):
+        decision = code_status("ok", "approved")
+    elif state in ("blocked", "execution_unknown"):
+        decision = code_status("fallback", "under review")
+    elif state in ("proposed", "awaiting_publication"):
+        decision = {"key": "waiting", "glyph": "…", "word": "awaiting approval", "css": "waiting"}
+    else:
+        decision = code_status("none", (DECISION_CHIP.get(state, ("no decision", ""))[0]).lower())
+    n_ok = sum(1 for x in all_calls if not x["failed"])
+    # every failed call in one list, each with what the run did instead
+    failures = []
+    for x in all_calls:
+        if not x["failed"]:
+            continue
+        who = x["agent_name"] + (f" attempt {x['replicate']}" if x["role"] in ("pm", "single_agent") else "")
+        if x["role"] == "pm":
+            then = (f"decision taken on the {n_valid} valid attempts" + (", which agreed" if run["pm_same"] else "")
+                    if n_valid >= 2 else "every line fell back to the mechanical reference")
+        else:
+            then = FAIL_THEN.get(x["role"], "")
+        failures.append({"who": who, "what": x["fail_phrase"], "then": then, "href": f"{base}#{x['anchor']}",
+                         "css": x["css"], "in_sentence": IN_SENTENCE.get(x["role"], who).format(n=x["replicate"])})
+    fail_sentence = ""
+    if failures:
+        parts = [f"{f['in_sentence']} {f['what']}" for f in failures]
+        fail_sentence = (f"{plural(len(failures), 'model call')} failed and the run fell back safely: "
+                         + join_words(parts) + ".")
+    return {
+        "failures": failures, "fail_sentence": fail_sentence, "chain": run["chain"],
+        "decision_status": decision,
+        "agents": agents, "by_id": {a["id"]: a for a in agents}, "groups": groups, "facts": facts,
+        "calls": all_calls, "fx": fx, "cards": cards,
+        "failed_calls": len(all_calls) - n_ok,
+        "totals": {
+            "calls": len(all_calls), "ok": n_ok,
+            "ok_pct": 100.0 * n_ok / len(all_calls) if all_calls else None,
+            "tokens_in": fmt_int(sum(x.tokens_in for x in c.calls)),
+            "tokens_out": fmt_int(sum(x.tokens_out for x in c.calls)),
+            "model_time": fmt_secs(sum(x.latency_ms for x in c.calls)) if c.calls else "—",
+            "foot": _calls_meta(all_calls, list(c.calls)),
+        },
+    }
+
+
+# ------------------------------------------------------------------------------ holdings (home)
+FILTER_GROUPS = (
+    # key, chip label, asset classes, the words for "No … held."
+    ("stock", "Stocks", ("stock",), "stocks"),
+    ("fund", "ETFs & indices", ("etf", "index"), "ETFs or indices"),
+    ("crypto", "Crypto", ("crypto",), "crypto"),
+    ("commodity", "Commodities", ("commodity",), "commodities"),
+    ("fx", "FX", ("fx",), "FX pairs"),
+)
+AC_GROUP = {ac: key for key, _, acs, _ in FILTER_GROUPS for ac in acs}
+AC_WORDS = {"stock": "Stock", "etf": "ETF", "index": "Index", "crypto": "Crypto", "commodity": "Commodity",
+            "fx": "Currency pair"}
+SESSION_CHIP = {
+    "crypto": ("24/7", "Trades around the clock, every day"),
+    "fx24x5": ("24/5", "Trades around the clock on weekdays"),
+    "us": ("US hours", "Trades during US market hours"),
+    "lse": ("LSE hours", "Held through a London-listed fund: trades during London Stock Exchange hours"),
+}
+PENDING_STATES = (None, "awaiting_publication", "proposed")
+EXECUTING_STATES = ("approved", "executing")
+
+
+def monogram(sym: str, asset_class: str | None) -> str:
+    """A neutral tile's letters: the ticker, at most four characters (three for a currency pair)."""
+    letters = re.sub(r"[^A-Z0-9]", "", ticker(sym).upper())
+    return letters[:3] if asset_class == "fx" and len(letters) == 6 else letters[:4]
+
+
+def weight_bar(weight: float, ref: float | None, scale: float, geo: Geometry) -> dict[str, Any]:
+    """A thin magnitude bar for a table cell (long teal, short orange) with a tick at the reference."""
+    side = "long" if weight > EPS else "short" if weight < -EPS else "zero"
+    out: dict[str, Any] = {"side": side, "w": geo.cls("width", 100.0 * min(abs(weight), scale) / scale), "ref": None}
+    if ref is not None and abs(ref) > EPS:
+        out["ref"] = geo.cls("left", 100.0 * min(abs(ref), scale) / scale)
+    return out
+
+
+def sealed_runs(view: JournalView) -> list[dict[str, Any]]:
+    """Runs that are sealed but not yet revealed (a commitment or an ops row without a cycle file),
+    newest first, with their final state when the ops log already has it."""
+    revealed = {cv.doc.cycle_id for cv in view.cycles}
+    ops = {r.cycle_id: r for r in view.ops}
+    ids = (set(view.commitments) | set(ops)) - revealed
+    out = []
+    for cid in sorted(ids, reverse=True):
+        row = ops.get(cid)
+        out.append({"cycle_id": cid, "slot": parse_cycle_id(cid), "state": row.decision_state if row else None,
+                    "legs": row.legs if row else None, "sealed": cid in view.commitments})
+    return out
+
+
+def _filters(held: list[dict[str, Any]], flat: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+    """The asset-class filter chips with their counts; the classes with no flat line; those with no held line."""
+    present = [(key, label, phrase) for key, label, _, phrase in FILTER_GROUPS
+               if any(r["group"] == key for r in held + flat)]
+    counts = {"all": (len(held), len(flat))}
+    for key, _label, _phrase in present:
+        counts[key] = (sum(1 for r in held if r["group"] == key), sum(1 for r in flat if r["group"] == key))
+    filters = [{"key": "all", "label": "All", "phrase": "lines", "held": counts["all"][0], "total": sum(counts["all"])}]
+    filters += [{"key": key, "label": label, "phrase": phrase, "held": counts[key][0], "total": sum(counts[key])}
+                for key, label, phrase in present]
+    empty_flat = [f["key"] for f in filters if counts[f["key"]][1] == 0]
+    empty_held = [f for f in filters if counts[f["key"]][0] == 0]
+    return filters, empty_flat, empty_held
+
+
+def _asset(k: str, lines: Lines) -> dict[str, Any]:
+    """A line's asset cell: ticker, name, monogram, class, filter group and session chip."""
+    ac = lines.asset_class(k)
+    session = lines.session(k)
+    chip_ = SESSION_CHIP.get(session or "")
+    words = AC_WORDS.get(ac or "", "")
+    if session == "lse":
+        words = (words + " · " if words else "") + "via a London-listed fund"
+    return {"line": k, "ticker": ticker(k), "name": lines.name(k), "mono": monogram(k, ac), "ac": ac or "other",
+            "ac_words": words, "group": AC_GROUP.get(ac or "", "other"),
+            "session": chip_[0] if chip_ else "", "session_title": chip_[1] if chip_ else ""}
+
+
+def build_holdings(view: JournalView, lines: Lines, geo: Geometry, kill: dict[str, Any],
+                   status: dict[str, Any]) -> dict[str, Any]:
+    """The home page's holdings list, modelled on a broker's portfolio list but percent-only: one
+    row per line (asset, 1-day move, position, P/L % since open, weight with the reference tick,
+    reference weight), held lines by weight, flat lines folded into "Not held". Before any run or
+    book it is a skeleton: every line of the policy, nothing held."""
     latest = view.cycles[0] if view.cycles else None
     if latest is None and view.book is None:
-        return None
+        flat = []
+        for k in lines.sort(lines.info):
+            flat.append({**_asset(k, lines), "day": "—", "day_dir": "none", "day_raw": None, "direction": "flat",
+                         "position": "—", "lev": "", "settlement": "", "pnl": "—", "pnl_dir": "none", "weight": 0.0,
+                         "share1": "—", "ref": None, "ref_share1": "—", "ref_above": False, "show_bar": False,
+                         "bar": {"side": "zero", "w": "", "ref": None}, "notes": [],
+                         "title": f"{lines.name(k)}: not held yet"})
+        filters, empty_flat, empty_held = _filters([], flat)
+        return {"basis": "skeleton", "label": "", "when": "", "run_id": "", "held": [], "flat": flat,
+                "filters": filters, "empty_flat": empty_flat, "empty_held": empty_held, "strip": None,
+                "scale": "", "target": True, "show_day": False, "show_pnl": False}
     doc = latest.doc if latest is not None else None
-    weights: dict[str, float] = {}
-    refs: dict[str, float] = {}
-    trends: dict[str, str | None] = {}
-    basis = ""
-    gross = net = cash = None
-    when = ""
-    if doc is not None:
-        refs = {k: r.weight_ref_x for k, r in doc.reference.items()}
-        trends = {k: r.trend for k, r in doc.reference.items()}
+    book = view.book
     if latest is not None and latest.rehearsal:
-        weights = dict(doc.risk.final_x) if doc is not None and doc.risk else {}
         basis = "target"
-        when = fmt_when(latest.doc.slot)
-    elif view.book is not None:
-        weights = {k: b.weight_x for k, b in view.book.lines.items()}
-        refs = {**refs, **{k: b.reference_weight_x for k, b in view.book.lines.items()
-                           if b.reference_weight_x is not None}}
-        gross, net, cash = view.book.gross_x, view.book.net_x, view.book.cash_x
+    elif book is not None:
         basis = "book"
-        when = fmt_when(parse_cycle_id(view.book.as_of_cycle_id))
-    elif doc is not None and doc.risk is not None:
-        weights = dict(doc.risk.base_x)
-        basis = "start"
-        when = fmt_when(doc.slot)
-    # one source for both pages: the run page's "Invested" is the same sum of |weights|
-    gross = sum(abs(v) for v in weights.values()) if gross is None else gross
-    net = sum(weights.values()) if net is None else net
-    cash = max(0.0, 1.0 - gross) if cash is None else cash
-    values = list(weights.values()) + list(refs.values())
-    has_short = any(v < -EPS for v in values)
-    scale = nice_scale(max([v for v in values if v > 0] + [0.05]))
-    short_scale = nice_scale(max(-v for v in values if v < -EPS)) if has_short else 0.0
+    else:
+        basis = "target"
+    rows: dict[str, dict[str, Any]] = {}
+    refs: dict[str, float] = {k: r.weight_ref_x for k, r in doc.reference.items()} if doc is not None else {}
+    days: dict[str, float] = ({k: r.day_change_pct for k, r in doc.reference.items() if r.day_change_pct is not None}
+                              if doc is not None else {})
+    if basis == "book" and book is not None:
+        as_of = next((cv.doc for cv in view.cycles if cv.doc.cycle_id == book.as_of_cycle_id), None)
+        book_days = {k: r.day_change_pct for k, r in as_of.reference.items()
+                     if r.day_change_pct is not None} if as_of is not None else {}
+        weights = {k: b.weight_x for k, b in book.lines.items()}
+        refs = {**refs, **{k: b.reference_weight_x for k, b in book.lines.items() if b.reference_weight_x is not None}}
+        for k, b in book.lines.items():
+            rows[k] = {"direction": b.direction, "settlement": b.settlement, "leverage": b.leverage,
+                       "pnl": b.pnl_since_open_pct,
+                       "day": b.day_change_pct if b.day_change_pct is not None else book_days.get(k)}
+        gross, net, cash = book.gross_x, book.net_x, book.cash_x
+        when = fmt_when(parse_cycle_id(book.as_of_cycle_id))
+        run_id = book.as_of_cycle_id
+    else:
+        weights = dict(doc.risk.final_x) if doc is not None and doc.risk else {}
+        gross = sum(abs(v) for v in weights.values())
+        net = sum(weights.values())
+        cash = max(0.0, 1.0 - gross)
+        when = fmt_when(doc.slot) if doc is not None else ""
+        run_id = doc.cycle_id if doc is not None else ""
+    keys = lines.sort(set(lines.info) | set(weights) | set(refs))
+    scale = nice_scale(max([abs(v) for v in list(weights.values()) + list(refs.values())] + [0.05]))
 
+    # the latest run's council changes and risk holds, as a note under the line's name
     per_line, _ = split_holds(doc.risk.hold_reasons if doc is not None and doc.risk else [])
     ref_levels = {k: r.level_ref for k, r in doc.reference.items()} if doc is not None else {}
     council = dict(doc.pm.levels) if doc is not None else {}
@@ -1587,88 +2882,255 @@ def build_portfolio(view: JournalView, lines: Lines, geo: Geometry, kill: dict[s
     verbs = {"cut": "cut", "add": "added", "short": "went short", "cover": "covered", "lever": "levered up"}
     decided = "" if latest is None or latest.rehearsal else DECISION_NOTE.get(latest.final_state or "", "")
 
-    groups = []
-    flat = []
-    keys = lines.sort(set(lines.info) | set(weights) | set(refs))
-    for sleeve, label in (*SLEEVES, ("other", "Other")):
-        members = [k for k in keys if (lines.info[k].sleeve if k in lines.info else "other") == sleeve]
-        if not members:
-            continue
-        infos = [lines.info[k] for k in members if k in lines.info]
-        note = ""
-        if infos and all(not i.in_reference for i in infos):
-            note = "Optional extras: the rules hold none; the council may add a small position when the trend allows."
-        elif infos and all(not i.council for i in infos):
-            note = ("Reference only: the council may not change these lines, because trading costs are too high; "
-                    "they follow the rules.")
-        rows = []
-        for k in members:
-            w = weights.get(k, 0.0)
-            ref = refs.get(k)
-            notes = []
-            rl, cl = ref_levels.get(k), council.get(k)
-            if rl is not None and cl is not None and abs(cl - rl) > EPS:
-                verb = dev_dir.get(k) or verb_for(rl, cl).split(" ")[0]
-                verb = verbs.get(verb, verb)
-                wb = ref if ref is not None else (units[k] * rl if k in units else None)
-                wa = raw_x.get(k, units[k] * cl if k in units else None)
-                if wb is not None and wa is not None:
-                    text = (f"Council {verb}: {fmt_share(wb)} → {fmt_share(wa)} of the portfolio "
-                            f"(size {fmt_level(rl)} → {fmt_level(cl)})")
-                else:
-                    text = f"Council {verb}: size {fmt_level(rl)} → {fmt_level(cl)}"
-                notes.append(text + (f", {decided}" if decided else ""))
-            for h in per_line.get(k, []):
-                notes.append(f"Held: {h['text']}")
-            info = lines.info.get(k)
-            marker = ("reference only" if info is not None and not info.council else
-                      "council only" if info is not None and not info.in_reference else "")
-            row = {
-                "line": k, "name": lines.name(k), "trend": trends.get(k), "weight": w, "share": fmt_share(w),
-                "ref": ref, "ref_share": fmt_share(ref), "notes": notes, "ref_level": rl, "council_level": cl,
-                "bar": diverging_bar(w, ref, scale, geo, short_scale=short_scale),
-                "marker": marker,
-                "title": f"{lines.name(k)}: {fmt_share(w)} of the portfolio ({fmt_x(w)})"
-                         + (f"; mechanical reference {fmt_share(ref)}" if ref is not None else ""),
-            }
-            rows.append(row)
-            flat.append(row)
-        if note:                       # the group note already says it for every row
-            for row in rows:
-                row["marker"] = ""
-        groups.append({"key": sleeve, "label": label, "rows": rows, "note": note,
-                       "share": fmt_share(sum(abs(weights.get(k, 0.0)) for k in members))})
+    held, flat = [], []
+    for k in keys:
+        w = weights.get(k, 0.0)
+        ref = refs.get(k)
+        extra = rows.get(k, {})
+        day = extra.get("day", days.get(k)) if basis == "book" else days.get(k)
+        direction = extra.get("direction") or ("long" if w > EPS else "short" if w < -EPS else "flat")
+        lev = extra.get("leverage")
+        settlement = extra.get("settlement")
+        pnl = extra.get("pnl") if basis == "book" else None
+        notes = []
+        rl, cl = ref_levels.get(k), council.get(k)
+        if rl is not None and cl is not None and abs(cl - rl) > EPS:
+            verb = verbs.get(dev_dir.get(k) or verb_for(rl, cl).split(" ")[0], verb_for(rl, cl))
+            wb = ref if ref is not None else (units[k] * rl if k in units else None)
+            wa = raw_x.get(k, units[k] * cl if k in units else None)
+            text = (f"Council {verb}: {fmt_share(wb)} → {fmt_share(wa)}" if wb is not None and wa is not None
+                    else f"Council {verb}: size {fmt_level(rl)} → {fmt_level(cl)}")
+            notes.append(text + (f", {decided}" if decided else ""))
+        for h in per_line.get(k, []):
+            notes.append(f"Held back: {h['text']}")
+        is_held = abs(w) > EPS
+        row = {
+            **_asset(k, lines),
+            "day": fmt_signed(day), "day_dir": move_dir(day), "day_raw": day,
+            "direction": direction, "position": {"long": "Long", "short": "Short"}.get(direction, "—"),
+            "lev": f"{lev}x" if lev and lev > 1 else "", "lev_n": lev or 1,
+            "settlement": {"real": "real", "cfd": "CFD", "realFutures": "futures", "marginTrade": "margin"}.get(
+                settlement or "", ""),
+            "pnl": fmt_signed(pnl), "pnl_dir": move_dir(pnl), "pnl_raw": pnl,
+            "weight": w, "share1": fmt_share1(w) if is_held else "0.0%",
+            "ref": ref, "ref_share1": fmt_share1(ref) if ref is not None else "—",
+            "ref_above": not is_held and ref is not None and abs(ref) > EPS,
+            "show_bar": is_held or (ref is not None and abs(ref) > EPS),
+            "bar": weight_bar(w, ref, scale, geo), "notes": notes,
+            "title": f"{lines.name(k)}: {fmt_share(w)} of the portfolio"
+                     + (f"; the mechanical reference would hold {fmt_share(ref)}" if ref is not None else ""),
+        }
+        (held if is_held else flat).append(row)
+    order = {k: i for i, k in enumerate(keys)}
+    held.sort(key=lambda r: (-abs(r["weight"]), order[r["line"]]))
+    flat.sort(key=lambda r: (-(r["ref"] or 0.0), order[r["line"]]))
+    filters, empty_flat, empty_held = _filters(held, flat)
+
+    # the book's 1-day move: the weighted sum of the held lines' last daily returns
+    known = [(r["weight"], r["day_raw"]) for r in held if r["day_raw"] is not None]
+    book_day = sum(w * d for w, d in known) if known else None
+    # the book's P/L since open: each line's P/L % weighted by the amount invested in it (exposure / leverage)
+    inv = [(abs(r["weight"]) / max(float(r["lev_n"]), 1.0), r["pnl_raw"]) for r in held if r["pnl_raw"] is not None]
+    pnl_book = (sum(i * p for i, p in inv) / sum(i for i, _ in inv)) if inv and sum(i for i, _ in inv) > EPS else None
 
     halt_dd = (1 - float(kill.get("halt_at", 0.75))) * 100
     warn_dd = (1 - float(kill.get("warn_at", 0.80))) * 100
-    dd = None
-    rehearsal = latest is not None and latest.rehearsal
-    if not rehearsal:
-        dd = next((p.drawdown_pct for p in reversed(view.performance) if p.drawdown_pct is not None), None)
-    warn_label, halt_label = f"−{warn_dd:.0f}%", f"−{halt_dd:.0f}%"
+    dd = None if basis == "target" else next((p.drawdown_pct for p in reversed(view.performance)
+                                               if p.drawdown_pct is not None), None)
     if dd is None:
-        meter = {"value": "—", "fill": geo.cls("width", 0), "state": "none", "word": "",
-                 "sub": "starts at go-live" if rehearsal else "no data yet",
-                 "aria": "Fall from peak: not tracked until go-live" if rehearsal else "Fall from peak: no data yet"}
+        meter = {"value": "—", "fill": geo.cls("width", 0), "state": "none",
+                 "sub": "tracked from go-live" if basis == "target" else "no data yet",
+                 "aria": "Fall from peak: " + ("not tracked until go-live" if basis == "target" else "no data yet")}
     else:
         depth = abs(min(dd, 0.0))
         state = "halted" if depth >= halt_dd - EPS else "warn" if depth >= warn_dd - EPS else "ok"
         value = f"−{depth:.1f}%" if depth >= 0.05 else "0%"
         meter = {"value": value, "fill": geo.cls("width", 100.0 * min(depth, halt_dd) / halt_dd), "state": state,
-                 "word": {"ok": "normal", "warn": "no new risk", "halted": "stop"}[state],
-                 "sub": "below the best value so far",
-                 "aria": f"Fall from peak {value}; no new risk at {warn_label}, stop at {halt_label}"}
-    meter.update({"warn_at": geo.cls("left", 100.0 * warn_dd / halt_dd), "warn_label": warn_label,
-                  "halt_label": halt_label})
-    tiles = {
-        "invested": fmt_share(gross), "net": fmt_share(net), "cash": fmt_share(cash),
-        "all_long": not any(v < -EPS for v in weights.values()),
-        "held": sum(1 for v in weights.values() if abs(v) > EPS), "n_lines": len(keys), "meter": meter,
-    }
+                 "sub": "below the best value so far", "aria": f"Fall from peak {value}"}
+    meter.update({"warn_at": geo.cls("left", 100.0 * warn_dd / halt_dd), "warn_label": f"−{warn_dd:.0f}%",
+                  "halt_label": f"−{halt_dd:.0f}%"})
+
+    rehearsal = latest is not None and latest.rehearsal
+    if basis == "target":
+        label = ("Target book — no account connected, nothing traded" if rehearsal or status["state"] == "AWAITING_ACCOUNT"
+                 else "Target book of the latest run — the live book is not published yet")
+    else:
+        label = "Live book"
+    if rehearsal:
+        account = {"label": "REHEARSAL", "css": "rehearsal", "sub": "no broker account"}
+    elif status["state"] == "AWAITING_ACCOUNT":
+        account = {"label": "AWAITING ACCOUNT", "css": "awaiting", "sub": "no broker account yet"}
+    else:
+        account = {"label": status["label"], "css": status["css"], "sub": "agent portfolio"}
+    kc = chip(KILL_CHIP, status["kill"])
+    if basis == "target":
+        day_label = "Target, last day"
+        day_sub = ("hypothetical: target weights × last daily move; nothing traded" if known
+                   else "no daily moves published")
+    else:
+        day_label = "Book, last day"
+        day_sub = (f"weight × last daily move, {plural(len(known), 'line')}" if known
+                   else "no daily moves published")
     return {
-        "basis": basis, "groups": groups, "rows": flat, "one_sided": not has_short, "has_short": has_short,
-        "axis": axis_ticks(scale, short_scale, geo), "tiles": tiles, "when": when,
+        "basis": basis, "label": label, "when": when, "run_id": run_id, "held": held, "flat": flat,
+        "filters": filters, "empty_flat": empty_flat, "empty_held": empty_held,
+        "strip": {
+            "account": account, "gross": fmt_x(gross), "gross_share": fmt_share(gross), "net": fmt_x(net),
+            "net_share": fmt_share(net), "cash": fmt_share(cash), "held": len(held), "lines": len(held) + len(flat),
+            "day": fmt_signed(book_day), "day_dir": move_dir(book_day), "day_known": len(known),
+            "day_label": day_label, "day_sub": day_sub,
+            "pnl": fmt_signed(pnl_book), "pnl_dir": move_dir(pnl_book), "pnl_known": len(inv),
+            "kill": kc, "meter": meter, "all_long": not any(r["weight"] < -EPS for r in held),
+        },
+        "scale": fmt_share(scale),
+        "target": basis == "target",
+        "show_pnl": basis == "book",
+        "show_day": any(r["day_raw"] is not None for r in held + flat),
     }
+
+
+# ------------------------------------------------------------------------------ agents pages
+HISTORY_CAP = 30
+
+
+def prompt_files(prompts_dir: Path) -> dict[str, dict[str, str]]:
+    """prompts/manifest.json keyed by file stem -> {id, sha, href}; tolerant of a missing file."""
+    path = prompts_dir / "manifest.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except ValueError:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    if isinstance(data, dict):
+        for stem, meta in data.items():
+            if not isinstance(meta, dict) or not re.fullmatch(r"[a-z_]{1,32}", str(stem)):
+                continue
+            sha = str(meta.get("sha256") or meta.get("sha") or "")
+            out[str(stem)] = {"id": str(meta.get("id") or stem)[:64],
+                              "sha": short_sha(sha) if re.fullmatch(r"[0-9a-f]{8,64}", sha) else "",
+                              "href": f"{REPO_URL}/blob/main/prompts/{stem}.md"}
+    return out
+
+
+def _share_words(n: int, total: int) -> str:
+    return "—" if total == 0 else f"{n} of {total}"
+
+
+def ring_css(pct: float | None) -> str:
+    """A ring's colour by how much of the whole it covers: ok (≥ 90%), fallback (≥ 60%), failed."""
+    if pct is None:
+        return "idle"
+    return "ok" if pct >= 90 - EPS else "fallback" if pct >= 60 - EPS else "failed"
+
+
+def build_agents(view: JournalView, transcripts: dict[str, dict[str, Any]], prompts: dict[str, dict[str, str]],
+                 model: str) -> list[dict[str, Any]]:
+    """One entry per agent: its spec, its numbers over every published run and its history
+    (newest first; the transcript sections of each run, with links into the run page)."""
+    out = []
+    for spec in AGENT_SPECS:
+        calls = [call_view(x) for cv in view.cycles for x in cv.doc.calls if x.role in spec.roles]
+        n = len(calls)
+        ok = sum(1 for x in calls if not x["failed"])
+        # every failed call, newest run first, linking to its place in the run
+        failed = [{"when": fmt_short_when(cv.doc.slot), "word": v["word"], "error": v["error_word"],
+                   "what": v["fail_phrase"], "css": v["css"],
+                   "attempt": v["replicate"] if x.role in ("pm", "single_agent") else 0,
+                   "href": f"../cycles/{cv.doc.cycle_id}.html#{v['anchor']}"}
+                  for cv in view.cycles for x in cv.doc.calls if x.role in spec.roles
+                  for v in [call_view(x)] if v["failed"]]
+        kinds: dict[str, int] = {}
+        for f in failed:
+            kinds[f["word"]] = kinds.get(f["word"], 0) + 1
+        entries = []
+        for cv in view.cycles:
+            tr = transcripts[cv.doc.cycle_id]
+            sections = [a for a in tr["agents"] if a["slug"] == spec.slug]
+            if not sections:
+                continue
+            entries.append({"cv": cv, "sections": sections, "href": f"../cycles/{cv.doc.cycle_id}.html",
+                            "chain": tr["chain"] if spec.slug in ("bull", "bear", "pm", "control") else [],
+                            "status": sections[0]["status"] if len(sections) == 1 else _merge_status(sections)})
+        seen = [e for e in entries if any(a["calls"] for a in e["sections"])] if spec.roles else entries
+        stats = {
+            "runs": len(entries), "calls": n, "ok": ok, "ok_pct": f"{100.0 * ok / n:.0f}%" if n else "—",
+            "ok_num": 100.0 * ok / n if n else None, "ok_css": ring_css(100.0 * ok / n if n else None),
+            "parse_fail": sum(1 for x in calls if x["status"] == "parse_fail"),
+            "timeouts": sum(1 for x in calls if x["status"] == "timeout"),
+            "other_fail": sum(1 for x in calls if x["failed"] and x["status"] not in ("parse_fail", "timeout")),
+            "corrected": sum(1 for x in calls if x["status"] == "corrected"),
+            "latency": fmt_secs(int(m)) if (m := median([float(x["latency_ms"]) for x in calls])) is not None else "—",
+            "last": seen[0] if seen else None, "failed": failed,
+            "fail_words": [plural(k, w, w if w in ("skipped", "invalid", "not run") else None)
+                           for w, k in kinds.items()],
+            "worst": _worst([e["status"] for e in entries]),
+        }
+        if spec.slug in ("bull", "bear"):
+            # did the used attempt do what the advocate finally asked (the bull: its rebuttal, when
+            # it gave one)? And did it name the advocate as its side?
+            got = named = decided = 0
+            for e in entries:
+                bodies = [a["body"] for a in e["sections"] if a["body"]]
+                if not bodies or not bodies[-1]["used_ok"]:
+                    continue
+                decided += 1
+                got += bool(bodies[-1]["used_got"])
+                named += bool(bodies[-1]["used_sided"])
+            claims = dismissed = 0
+            for e in entries:
+                for a in e["sections"]:
+                    if a.get("turn") == "bull_rebuttal" or not a["body"]:
+                        continue
+                    for cl in a["body"]["claims"]:
+                        claims += 1
+                        if any(f["verdict"] == "dismissed" and "(used)" in f["who"] for f in cl["fates"]):
+                            dismissed += 1
+            stats["got"] = f"{got} of {plural(decided, 'run')}" if decided else "—"
+            stats["named"] = named
+            stats["dismissed"] = _share_words(dismissed, claims)
+        elif spec.slug == "pm":
+            valid = [r for cv in view.cycles for r in cv.doc.pm.replicates]
+            stats["valid"] = _share_words(sum(1 for r in valid if r.valid), len(valid))
+            stats["changed"] = _share_words(
+                sum(1 for cv in view.cycles if transcripts[cv.doc.cycle_id]["by_id"]["a-pm"]["body"]["decision"]),
+                len(view.cycles))
+        elif spec.slug == "control":
+            stats["differs"] = _share_words(sum(1 for cv in view.cycles if cv.control_agrees is False),
+                                            sum(1 for cv in view.cycles if cv.control_agrees is not None))
+        stems = [r for r in spec.roles if r in prompts] if spec.roles else []
+        out.append({
+            "spec": spec, "slug": spec.slug, "name": spec.name, "kind": spec.kind, "accent": spec.accent,
+            "icon": AGENT_ICONS.get(spec.slug, "cpu"),
+            "job": spec.job, "more": spec.more, "model": model if spec.kind == "LLM" else "code",
+            "source": f"{REPO_URL}/blob/main/{spec.source}" if spec.source else "",
+            "source_path": spec.source, "prompts": [{"stem": s, **prompts[s]} for s in stems],
+            "stats": stats, "entries": entries[:HISTORY_CAP], "older": entries[HISTORY_CAP:],
+        })
+    return out
+
+
+STATUS_RANK = {"failed": 4, "timeout": 3, "fallback": 2, "waiting": 1, "idle": 1, "ok": 0}
+
+
+def _worst(statuses: list[dict[str, str]]) -> dict[str, str] | None:
+    """The worst status over a window of runs (a failure anywhere shows, not only the last run)."""
+    return max(statuses, key=lambda s: STATUS_RANK.get(s["css"], 1), default=None)
+
+
+def _merge_status(sections: list[dict[str, Any]]) -> dict[str, str]:
+    """One status for an agent with several sections in a run (the bull's two turns): ok when
+    every turn that ran was ok, the failure when every turn failed, else "partly failed"."""
+    okish, idle = {"ok", "corrected", "cached"}, {"not_run", "none"}
+    keys = [a["status"]["key"] for a in sections]
+    if all(k in okish | idle for k in keys):
+        ran = [k for k in keys if k in okish]
+        return code_status("corrected" if "corrected" in ran else "ok") if ran else sections[0]["status"]
+    bad = [a["status"] for a in sections if a["status"]["key"] not in okish | idle]
+    if not any(k in okish for k in keys):
+        return bad[0]
+    return code_status("partial")
 
 
 # ------------------------------------------------------------------------------ charts
@@ -1740,6 +3202,7 @@ def make_env(lines: Lines | list[str] | None = None) -> Environment:
         """Line-keyed dicts in universe order (journal files store keys sorted alphabetically)."""
         return [(k, mapping[k]) for k in line_set.sort(mapping)]
 
+    icons = load_icons()
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATES)),
         autoescape=True,
@@ -1751,6 +3214,8 @@ def make_env(lines: Lines | list[str] | None = None) -> Environment:
         x=fmt_x, pct=fmt_pct, bp=fmt_bp, level=fmt_level, slot=fmt_slot, sha=short_sha, value=fmt_value,
         by_line=by_line, sort_lines=line_set.sort, share=fmt_share, when=fmt_when, day=fmt_day,
         line_name=line_set.name, hold=plain_hold, pct1=fmt_pct1, late=fmt_late,
+        signed=fmt_signed, move=move_dir, count=fmt_int, secs=fmt_secs, ticker=ticker, short_when=fmt_short_when,
+        share1=fmt_share1, cap=lambda s: str(s)[:1].upper() + str(s)[1:],
     )
     env.globals.update(
         decision_chip=lambda state: chip(DECISION_CHIP, state),
@@ -1762,6 +3227,12 @@ def make_env(lines: Lines | list[str] | None = None) -> Environment:
         agreement_words=count_words,
         plural=plural,
         id_label=lambda rid: evidence_label(SimpleNamespace(kind="card", id=rid), line_set),
+        repo_url=REPO_URL,
+        icon=lambda name, cls="": icon_svg(icons, name, cls),
+        status_icon=lambda css: STATUS_ICONS.get(css, "circle-dot"),
+        ring_cls=Geometry().ring,        # replaced by the build's own geometry in build()
+        ring_css=ring_css,
+        how_words=HOW_WORDS,
     )
     return env
 
@@ -1825,7 +3296,7 @@ def redirect_page(target: str, name: str) -> str:
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
         f"<meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">\n"
         "<meta name=\"referrer\" content=\"no-referrer\">\n"
-        "<meta name=\"color-scheme\" content=\"light dark\">\n"
+        "<meta name=\"color-scheme\" content=\"dark\">\n"
         f"<meta http-equiv=\"refresh\" content=\"0; url={target}\">\n"
         f"<link rel=\"canonical\" href=\"{target}\">\n"
         "<link rel=\"stylesheet\" href=\"static/style.css\">\n"
@@ -1845,15 +3316,16 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     reference_file = policy_dir / "reference.yaml"
     reference = (yaml.safe_load(reference_file.read_text()) or {}) if reference_file.exists() else {}
     lines = Lines(universe)
+    lines.describe(view.book)
     env = make_env(lines)
     geo = Geometry()
+    env.globals["ring_cls"] = geo.ring
     status = _status_context(view, now)
     disclaimer = load_disclaimer(policy_dir.parent)
     if status["prelive"]:
         disclaimer = prelive_disclaimer(disclaimer, rehearsal=status["mode"] == "rehearsal")
     common = {
         "csp": Markup(CSP),               # a constant; single quotes must not be entity-escaped
-        "stale_script": Markup(STALE_SCRIPT),
         "nav": NAV,
         "status": status,
         "disclaimer": disclaimer,
@@ -1884,20 +3356,36 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
         written.append(path)
 
     runs = {cv.doc.cycle_id: build_run_view(cv, lines) for cv in view.cycles}
+    transcripts = {cid: build_transcript(cv, lines, runs[cid])
+                   for cv in view.cycles for cid in [cv.doc.cycle_id]}
+    # the same transcripts with links into the run pages, for the agents' history pages
+    linked = {cid: build_transcript(cv, lines, runs[cid], base=f"../cycles/{cid}.html")
+              for cv in view.cycles for cid in [cv.doc.cycle_id]}
+    council_cfg = yaml.safe_load((policy_dir / "council.yaml").read_text()) or {}
+    agents = build_agents(view, linked, prompt_files(prompts_dir), str(council_cfg.get("model", "")))
     latest = view.cycles[0] if view.cycles else None
     ops_on_time = sum(1 for r in view.ops if r.status == "on_time")
     chart = performance_chart(view.performance)
+    sealed = sealed_runs(view)
     render("index.html.j2", "index.html", "", "portfolio", latest=latest,
+           pending=[dict(x, chip=chip(DECISION_CHIP, x["state"] or "awaiting_publication")) for x in sealed if x["state"] in PENDING_STATES],
+           executing=[x for x in sealed if x["state"] in EXECUTING_STATES],
            run=runs[latest.doc.cycle_id] if latest else None,
-           portfolio=build_portfolio(view, lines, geo, risk.get("killswitch", {})),
-           recent=[(cv, runs[cv.doc.cycle_id]) for cv in view.cycles[:5]], cycles_count=len(view.cycles),
-           ops_count=len(view.ops), ops_on_time=ops_on_time,
+           tr_latest=transcripts[latest.doc.cycle_id] if latest else None,
+           holdings=build_holdings(view, lines, geo, risk.get("killswitch", {}), status),
+           recent=[(cv, runs[cv.doc.cycle_id], transcripts[cv.doc.cycle_id]) for cv in view.cycles[:5]],
+           cycles_count=len(view.cycles), ops_count=len(view.ops), ops_on_time=ops_on_time,
            chart=chart, points=view.performance[-10:][::-1],
            controls=[sr for sr in CONTROL_SERIES if any(x["key"] == sr[0] for x in (chart or {}).get("series", []))])
-    render("cycles.html.j2", "cycles.html", "", "runs", cycles=[(cv, runs[cv.doc.cycle_id]) for cv in view.cycles])
+    render("cycles.html.j2", "cycles.html", "", "runs",
+           cycles=[(cv, runs[cv.doc.cycle_id], transcripts[cv.doc.cycle_id]) for cv in view.cycles])
     for cv in view.cycles:
         render("cycle.html.j2", f"cycles/{cv.doc.cycle_id}.html", "../", "runs", cv=cv, c=cv.doc,
-               run=runs[cv.doc.cycle_id])
+               run=runs[cv.doc.cycle_id], tr=transcripts[cv.doc.cycle_id])
+    render("agents.html.j2", "agents/index.html", "../", "agents", agents=agents, cycles_count=len(view.cycles),
+           model=str(council_cfg.get("model", "")), think=bool(council_cfg.get("think", False)))
+    for agent in agents:
+        render("agent.html.j2", f"agents/{agent['slug']}.html", "../", "agents", agent=agent, agents=agents)
     render("how.html.j2", "how.html", "", "how", roster=load_roster(prompts_dir, policy_dir))
     render("rules.html.j2", "rules.html", "", "rules", rules=load_rules(policy_dir))
     render("record.html.j2", "record.html", "", "record", incidents=view.incidents, withdrawn=load_withdrawn())

@@ -7,20 +7,32 @@ Rules (each one is tested):
 - `cycle_id` (e.g. `2026-10-01T1440Z`) is the only key. Timestamps are UTC.
 - Evidence is referenced by typed refs. Broker feed items are ids only: licensed text is never
   republished. FRED values appear only for series flagged publishable.
+- Additive evolution: a field added after documents were first sealed is optional and listed in
+  the model's `OMIT_WHEN_DEFAULT`; it is left out of the output while it holds its default, so a
+  document sealed before the field existed still re-serialises to exactly its sealed bytes.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import AfterValidator, AwareDatetime, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from council.models.common import Frozen
 
 # ------------------------------------------------------------------------------------------ types
 CYCLE_ID_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{4}Z$"
-LINE_PATTERN = r"^[A-Z0-9]{2,12}$"
+# 1-12 characters; "_" only inside a single-stock id (BRK.B is written BRK_B); one-letter tickers
+# (V, F, T, C) are valid lines.
+LINE_PATTERN = r"^[A-Z0-9](?:[A-Z0-9_]{0,10}[A-Z0-9])?$"
 SHA_PATTERN = r"^([0-9a-f]{8,64})?$"          # empty when unknown
 HEX64_PATTERN = r"^[0-9a-f]{64}$"
 
@@ -32,6 +44,24 @@ RoleName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")]
 ModelName = Annotated[str, Field(pattern=r"^[A-Za-z0-9:._/-]{0,80}$")]
 ShortText = Annotated[str, Field(max_length=160)]
 Code = Annotated[str, Field(max_length=120)]   # code-generated reason codes and flags
+# Model text: each public cap is the private schema's cap plus ~10% slack, so the cleaner's
+# placeholders ("[amount removed]") never force a cut of text the model was allowed to write.
+Argument = Annotated[str, Field(max_length=1600)]
+ClaimText = Annotated[str, Field(max_length=330)]
+RebuttalText = Annotated[str, Field(max_length=270)]
+Concession = Annotated[str, Field(max_length=300)]
+ReasonText = Annotated[str, Field(max_length=180)]      # PM deviation reason, dismissal "why"
+FactText = Annotated[str, Field(max_length=220)]        # decisive fact, card claim, macro driver
+CardId = Annotated[str, Field(pattern=r"^K:[a-z_]+:\d+$")]
+# Every evidence-id form: F/V/C/E/S/K ids, broker feed items (N:<8 hex>) and FRED series (M:...).
+EVIDENCE_ID_PATTERN = (
+    r"^(?:[FVCESK]:[A-Za-z0-9_.:@#+-]{1,80}|N:[0-9a-f]{8}"
+    r"|M:[A-Z0-9_]{1,32}(?:\.[a-z0-9_]{1,16})?(?:@\d{4}-\d{2}-\d{2})?)$"
+)
+EvidenceId = Annotated[str, Field(pattern=EVIDENCE_ID_PATTERN)]
+StateWord = Annotated[str, Field(pattern=r"^[a-z][a-z_]{0,15}$")]   # e.g. a trend state: "up"
+SleeveName = Annotated[str, Field(pattern=r"^[a-z][a-z_]{0,15}$")]
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 
 
 def _utc(ts: datetime) -> datetime:
@@ -77,10 +107,47 @@ LegState = Literal[
 ]
 Direction = Literal["long", "short"]
 Settlement = Literal["real", "cfd", "realFutures", "marginTrade"]
+AssetClass = Literal["stock", "etf", "crypto", "index", "commodity", "fx"]
+Session = Literal["us", "lse", "fx24x5", "crypto"]     # when the line's preferred vehicle trades
+MacroRegime = Literal["risk_on", "neutral", "risk_off"]
+# Why a call did not simply succeed, as a fixed code (the private error text is never read out):
+# corrected = valid only after the one correction turn; not_json / schema = the reply could not be
+# read / failed the schema even after the correction; correction_failed = the correction call
+# itself failed; call_budget / council_unavailable = skipped before it ran.
+ErrorKind = Literal[
+    "corrected", "timeout", "not_json", "schema", "correction_failed", "http_429", "http_4xx",
+    "http_5xx", "server_error", "bad_response", "connection", "internal_error", "call_budget",
+    "council_unavailable", "skipped", "invalid",
+]
+FactKind = Literal["market", "vol", "cost", "macro", "event", "news", "filing", "fundamental"]
+FactUnit = Literal["pct", "x", "ratio", "bps", "bps_day", "days", "hours", "sigma", "state"]
+FactSource = Literal[
+    "tiingo", "binance", "broker", "fred", "clock", "policy", "calendar", "broker_feed", "filing",
+    "unknown",
+]
+# Why a fact's value is not shown (docs/data-rights.md): a licensed FRED-hosted series, a value
+# derived from broker data beyond the coarse states the record may show, or an unknown source.
+Withheld = Literal["licensed_series", "not_publishable", "broker_data", "unknown_source"]
 
 
 class PublicModel(Frozen):
-    """Base for every public document: extra fields forbidden, instances immutable."""
+    """Base for every public document: extra fields forbidden, instances immutable.
+
+    `OMIT_WHEN_DEFAULT` names fields added after v1 documents were sealed: they are omitted from
+    the output while they hold their default (see the module docstring)."""
+
+    OMIT_WHEN_DEFAULT: ClassVar[frozenset[str]] = frozenset()
+
+    @model_serializer(mode="wrap")
+    def _omit_new_defaults(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        omit = type(self).OMIT_WHEN_DEFAULT
+        if omit and isinstance(data, dict):
+            fields = type(self).model_fields
+            for name in omit:
+                if name in data and getattr(self, name) == fields[name].get_default(call_default_factory=True):
+                    del data[name]
+        return data
 
 
 # ---------------------------------------------------------------------------------- evidence refs
@@ -124,9 +191,15 @@ EvidenceRef = Annotated[BrokerFeedRef | FredRef | IdRef, Field(discriminator="ki
 
 # ------------------------------------------------------------------------------------ cycle parts
 class PublicReferenceLine(PublicModel):
+    """`day_change_pct`: the line's last completed daily return from its signal history, in %
+    (derived; None when the history is broker candles, which the record does not republish)."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"day_change_pct"})
+
     trend: TrendState | None
     level_ref: Level
     weight_ref_x: X
+    day_change_pct: Pct | None = None
 
 
 class PublicCard(PublicModel):
@@ -135,9 +208,9 @@ class PublicCard(PublicModel):
     card_type: CardType
     scope: list[Annotated[str, Field(max_length=24)]] = Field(max_length=6)
     direction: CardDirection
-    claim: str = Field(max_length=200)
+    claim: FactText
     horizon_days: int = Field(ge=1, le=60)
-    falsifier: str = Field(default="", max_length=160)
+    falsifier: str = Field(default="", max_length=180)
     qualifying: bool = False
     corroborated_by: list[str] = Field(default_factory=list, max_length=8)
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=8)
@@ -145,22 +218,22 @@ class PublicCard(PublicModel):
 
 class PublicClaim(PublicModel):
     claim_id: str = Field(pattern=r"^c\d+$")
-    text: str = Field(max_length=300)
+    text: ClaimText
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=6)
 
 
 class PublicRebuttal(PublicModel):
     claim_id: str = Field(max_length=16)
     verdict: Literal["concede", "refute"]
-    text: str = Field(max_length=240)
+    text: RebuttalText
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=4)
 
 
 class PublicAdvocate(PublicModel):
-    argument: str = Field(max_length=1500)
+    argument: Argument
     proposal_levels: dict[Line, Level] = Field(default_factory=dict)
     claims: list[PublicClaim] = Field(default_factory=list, max_length=6)
-    concessions: list[ShortText] = Field(default_factory=list, max_length=4)
+    concessions: list[Concession] = Field(default_factory=list, max_length=4)
     strongest_opposing: EvidenceRef | None = None
     rebuttals: list[PublicRebuttal] = Field(default_factory=list, max_length=6)
 
@@ -175,18 +248,18 @@ class PublicDeviation(PublicModel):
     line: Line
     level: Level
     direction: Literal["cut", "add", "short", "cover", "lever"]
-    reason: ShortText
+    reason: ReasonText
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=6)
 
 
 class PublicDecisiveFact(PublicModel):
-    text: str = Field(max_length=200)
+    text: FactText
     evidence: EvidenceRef | None = None
 
 
 class PublicDismissal(PublicModel):
     claim_id: str = Field(max_length=16)
-    why: ShortText
+    why: ReasonText
 
 
 class PublicPMReplicate(PublicModel):
@@ -197,7 +270,7 @@ class PublicPMReplicate(PublicModel):
     decisive_fact: PublicDecisiveFact | None = None
     sided_with: Literal["bull", "bear", "neither", "reference"] | None = None
     dismissed: list[PublicDismissal] = Field(default_factory=list, max_length=6)
-    no_change_reason: str = Field(default="", max_length=200)
+    no_change_reason: str = Field(default="", max_length=220)
     violations: list[Code] = Field(default_factory=list)
     reverted: list[Code] = Field(default_factory=list)
 
@@ -215,6 +288,55 @@ class PublicPM(PublicModel):
     agreement_pct: dict[Line, Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]] = Field(
         default_factory=dict)
     valid_replicates: int = Field(default=0, ge=0)
+
+
+class PublicMacroDriver(PublicModel):
+    text: FactText
+    evidence: list[EvidenceRef] = Field(default_factory=list, max_length=6)
+
+
+class PublicMacro(PublicModel):
+    """The macro analyst's output (it runs on the first cycle of each UTC day): the regime, up to
+    four short drivers with their evidence, a tilt per sleeve (-1 lean less, 0 neutral, +1 lean
+    more; context only, code never acts on it) and the ids of the cards it wrote (in `cards`)."""
+
+    regime: MacroRegime
+    drivers: list[PublicMacroDriver] = Field(default_factory=list, max_length=4)
+    sleeve_tilts: dict[SleeveName, Literal[-1, 0, 1]] = Field(default_factory=dict)
+    cards: list[CardId] = Field(default_factory=list, max_length=8)
+
+
+class PublicFact(PublicModel):
+    """One fact of the pack the agents saw this cycle, looked up by its evidence id.
+
+    `value` is present only where docs/data-rights.md allows it: derived percentages, ratios and
+    states from Tiingo / Binance history, the clock and the public cost policy; FRED values only
+    for publishable series; broker-candle facts only as coarse states (trend, market open) and
+    volatility ratios. Otherwise `withheld` says why. News and filing items are ids only.
+    `as_of`: when the value became available to the council (always at or before the slot).
+    Rounding by unit: pct / sigma 0.01, ratio / x 0.001, bps / hours 0.1, bps_day 0.01."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"line", "value", "unit", "as_of", "source", "withheld"})
+
+    id: EvidenceId
+    kind: FactKind
+    label: str = Field(max_length=80)
+    line: Line | None = None
+    value: bool | FiniteFloat | StateWord | None = None
+    unit: FactUnit | None = None
+    as_of: UtcDatetime | None = None
+    source: FactSource | None = None
+    withheld: Withheld | None = None
+
+    @model_validator(mode="after")
+    def _value_rules(self) -> PublicFact:
+        if self.value is not None and self.withheld is not None:
+            raise ValueError("a withheld fact may not carry a value")
+        if self.kind in ("news", "filing") and self.value is not None:
+            raise ValueError("news and filing items are ids only")
+        if isinstance(self.value, float) and abs(self.value) > 1_000_000:
+            raise ValueError("fact value out of range")
+        return self
 
 
 class PublicBand(PublicModel):
@@ -287,6 +409,11 @@ class PublicDecision(PublicModel):
 
 
 class PublicCall(PublicModel):
+    """One language-model call. `error_kind` is a fixed code for why it did not simply succeed
+    (see `ErrorKind`); it is absent for a clean call. The private error text is never read out."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"error_kind"})
+
     role: RoleName
     replicate: int = Field(ge=0, le=16)
     status: CallStatus
@@ -295,10 +422,16 @@ class PublicCall(PublicModel):
     tokens_out: int = Field(ge=0, le=1_000_000)
     prompt_id: str = Field(max_length=64)
     prompt_sha: Sha
+    error_kind: ErrorKind | None = None
 
 
 class PublicCycleV1(PublicModel):
-    """One council cycle, as revealed after its decision is final."""
+    """One council cycle, as revealed after its decision is final.
+
+    Added after the first cycles were sealed (omitted while empty): `macro`, the macro analyst's
+    output; `facts`, the evidence table of the pack the agents saw."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"macro", "facts"})
 
     schema_id: Literal["council-book/cycle/v1"] = "council-book/cycle/v1"
     cycle_id: CycleId
@@ -316,6 +449,7 @@ class PublicCycleV1(PublicModel):
     kill_state: KillState = "NORMAL"
     reference: dict[Line, PublicReferenceLine] = Field(default_factory=dict)
     cards: list[PublicCard] = Field(default_factory=list)
+    macro: PublicMacro | None = None
     debate: PublicDebate = Field(default_factory=PublicDebate)
     pm: PublicPM = Field(default_factory=PublicPM)
     single_agent: PublicPM | None = None           # control: one agent, no debate
@@ -327,6 +461,7 @@ class PublicCycleV1(PublicModel):
     decision: PublicDecision = Field(default_factory=PublicDecision)
     calls: list[PublicCall] = Field(default_factory=list)
     flags: list[Code] = Field(default_factory=list)
+    facts: list[PublicFact] = Field(default_factory=list, max_length=4000)
 
 
 # ----------------------------------------------------------------------------- commit and reveal
@@ -368,10 +503,29 @@ class PublicStatus(PublicModel):
 
 
 class PublicBookLine(PublicModel):
+    """One line of the book. Descriptive fields (added later, omitted when unknown):
+    `name`, `asset_class`, `session` come from the public policy; `settlement` and `leverage` are
+    those of the line's largest open position; `pnl_since_open_pct` is the book's own P/L on the
+    line's open positions in % of the amount invested (price return since open x leverage,
+    weighted by invested amount, in the instrument's currency); `day_change_pct` is the line's
+    last completed daily return from its Tiingo / Binance history (never from broker candles)."""
+
+    OMIT_WHEN_DEFAULT = frozenset({
+        "name", "asset_class", "session", "settlement", "leverage", "pnl_since_open_pct",
+        "day_change_pct",
+    })
+
     direction: Literal["long", "short", "flat"]
     weight_x: X
     level: Level | None = None
     reference_weight_x: X | None = None
+    name: str | None = Field(default=None, max_length=48)
+    asset_class: AssetClass | None = None
+    session: Session | None = None
+    settlement: Settlement | None = None
+    leverage: int | None = Field(default=None, ge=1, le=10)
+    pnl_since_open_pct: Pct | None = None
+    day_change_pct: Pct | None = None
 
 
 class PublicBook(PublicModel):

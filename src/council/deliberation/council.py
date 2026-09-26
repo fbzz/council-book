@@ -155,13 +155,16 @@ async def run_council(
     sleep: Sleep = asyncio.sleep,
     code_cards: list[EvidenceCard] | None = None,
     bands_fn: BandsFn | None = None,
+    call_log: list[RoleCall] | None = None,
 ) -> CouncilResult:
     """Run the council for one cycle. Never raises on LLM failures (they become statuses/flags).
 
     `code_cards`: this cycle's vol/event officer cards (built once by the orchestrator with
     `now = slot`); None rebuilds them here from `pack` and `now`.
     `bands_fn`: called once after the specialists with ALL cards; its bands are the ones the
-    desk pack, debate, PM, audit and enforce use (see the module rules)."""
+    desk pack, debate, PM, audit and enforce use (see the module rules).
+    `call_log`: a list the calls are appended to as each stage finishes (the same list is
+    returned in `calls`), so a caller that cancels the council still has the calls that ran."""
     ctx = prompt_context(policy)
     ref_levels = reference_levels(ref, lines)
     current = {ln.symbol: float(current_levels.get(ln.symbol, 0.0)) for ln in lines}
@@ -170,7 +173,7 @@ async def run_council(
     wait_s = float(guard.get("stage_retry_wait_s", 120))
     retries = int(guard.get("stage_retries", 3))
 
-    calls: list[RoleCall] = []
+    calls: list[RoleCall] = call_log if call_log is not None else []
     flags: list[str] = []
     dropped: list[str] = []
     raw: dict[str, str] = {}

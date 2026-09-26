@@ -1,5 +1,18 @@
-{% macro toc_item(id, label, accent) %}
-<li><a href="#{{ id }}"><span class="dot accent-{{ accent }}" aria-hidden="true"></span>{{ label }}</a></li>
+{# Shared pieces. Visual language adapted from OpenSourceUI (MIT); icons from Lucide (ISC).
+   No script and no style attribute anywhere: geometry comes from classes in static/geometry.css. #}
+
+{# A contents entry: the dot is the agent's colour (neutral for a non-agent section); a status
+   other than ok shows its word next to the glyph, since touch screens show no title. #}
+{% macro toc_item(id, label, accent, st=none) %}
+<li><a href="#{{ id }}"><span class="dot accent-{{ accent }}" aria-hidden="true"></span><span class="toc-label">{{ label }}</span>{% if st %}<span class="tg tg-{{ st.css }}" title="{{ st.word }}">{{ icon(status_icon(st.css)) }}{% if st.css == "ok" %}<span class="sr">{{ st.word }}</span>{% else %}<span class="tg-w">{{ st.word }}</span>{% endif %}</span>{% endif %}</a></li>
+{% endmacro %}
+
+{% macro toc_legend() %}
+<p class="toc-legend"><span class="tg tg-ok">{{ icon(status_icon("ok")) }}</span>ok · <span class="tg tg-fallback">{{ icon(status_icon("fallback")) }}</span>partly failed or limited · <span class="tg tg-timeout">{{ icon(status_icon("timeout")) }}</span>timed out · <span class="tg tg-failed">{{ icon(status_icon("failed")) }}</span>failed · <span class="tg tg-idle">{{ icon(status_icon("idle")) }}</span>not run or nothing to do</p>
+{% endmacro %}
+
+{% macro toc_group(label) %}
+<li class="toc-group" aria-hidden="true">{{ label }}</li>
 {% endmacro %}
 
 {% macro section(id, num, title, accent) %}
@@ -10,6 +23,15 @@
 {% endmacro %}
 
 {% macro chip(c) %}<span class="chip state-{{ c.css }}"{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.label }}</span>{% endmacro %}
+
+{# A status mark: an icon in the status colour and the word (never colour alone). #}
+{% macro mark(st) %}<span class="mark mark-{{ st.css }}">{{ icon(status_icon(st.css)) }}<span class="mark-w">{{ st.word }}</span></span>{% endmacro %}
+
+{# A role's avatar tile: its icon on a tint of its colour (a neutral tile, never a logo). #}
+{% macro avatar(name, accent, size="") %}<span class="avatar accent-{{ accent }}{% if size %} avatar-{{ size }}{% endif %}" aria-hidden="true">{{ icon(name) }}</span>{% endmacro %}
+
+{# A progress ring (conic-gradient; its fill is a geometry class). `pct` is 0-100 or none. #}
+{% macro pring(pct, css, label, text=none, size="") %}<span class="ring ring-{{ css }} {{ ring_cls(pct) }}{% if size %} ring-{{ size }}{% endif %}" role="img" aria-label="{{ label }}"><span class="ring-v" aria-hidden="true">{{ text if text is not none else ("%.0f%%" | format(pct) if pct is not none else "—") }}</span></span>{% endmacro %}
 
 {# Polarity colours (teal/orange) are reserved for the literal long and short; a change in size is
    a neutral chip with an arrow. #}
@@ -28,10 +50,19 @@
 {% else %}<span class="chip trend">no trend</span>{% endif %}
 {% endmacro %}
 
+{# A market move or a P/L: sign, arrow and colour together (colour is never the only cue). #}
+{% macro move(text, dir) %}{% if dir == "none" %}<span class="mv mv-none">—</span>{% else %}<span class="mv mv-{{ dir }}"><span class="mv-arrow" aria-hidden="true">{{ "▲" if dir == "up" else "▼" if dir == "down" else "·" }}</span>{{ text }}</span>{% endif %}{% endmacro %}
+
 {# Evidence ids read as plain labels; the raw id stays in the title attribute for auditors. #}
 {% macro evidence(refs) %}
 {% for r in refs %}{% set e = ev(r) %}<span class="ev ev-{{ e.css }}" title="{{ e.raw }}">{{ e.label }}</span>{% endfor %}
 {% endmacro %}
+
+{# Resolved evidence chips: label, the value from the run's facts table (or why it is not shown),
+   and a link to the fact's row. #}
+{% macro ev_chip(e) %}{% if e.href %}<a class="ev ev-{{ e.css }}" href="{{ e.href }}" title="{{ e.raw }}">{% else %}<span class="ev ev-{{ e.css }}" title="{{ e.raw }}">{% endif %}{{ e.label }}{% if e.value %}: <strong class="ev-val">{{ e.value }}</strong>{% endif %}{% if e.note %} <span class="ev-note">{{ e.note }}</span>{% endif %}{% if e.href %}</a>{% else %}</span>{% endif %}{% endmacro %}
+
+{% macro chips(list) %}{% for e in list %}{{ ev_chip(e) }}{% endfor %}{% endmacro %}
 
 {% macro empty(title, text) %}
 <div class="empty">
@@ -40,32 +71,39 @@
 </div>
 {% endmacro %}
 
-{% macro rehearsal_banner(text) %}
-<div class="banner" role="note">
-  <span class="banner-icon" aria-hidden="true">R</span>
-  <p><strong>Rehearsal — no broker account is connected yet.</strong> {{ text }}</p>
+{# A system-alert / deploy-notification banner: an icon tile, a title with a time on the right,
+   and the caller's text. `kind` sets the tile colour. #}
+{% macro alert(kind, icon_name, title, when="") %}
+<div class="alert alert-{{ kind }}" role="note">
+  <span class="alert-icon" aria-hidden="true">{{ icon(icon_name) }}</span>
+  <p class="alert-top"><strong class="alert-title">{{ title }}</strong>{% if when %}<span class="alert-when">{{ when }}</span>{% endif %}</p>
+  <div class="alert-text">{{ caller() }}</div>
 </div>
+{% endmacro %}
+
+{% macro rehearsal_banner(text) %}
+{% call alert("rehearsal", "flask-conical", "Rehearsal — no broker account is connected yet") %}<p>{{ text }}</p>{% endcall %}
 {% endmacro %}
 
 {# The run diagram: nine nodes, each with its role colour, kind, a state mark with a word, and
    one result line computed from the cycle JSON. Pure HTML/CSS; it stacks vertically on phones.
-   What each step does is written out under the diagram (touch screens have no hover). #}
-{% macro flow(nodes, label, states=true) %}
-<ol class="flow" role="list" aria-label="{{ label }}">
+   With `href`, each node's name links to its agent's section of the run page. #}
+{% macro flow(nodes, label, states=true, href=none) %}
+<ol class="flow{% if href is not none %} linked{% endif %}" role="list" aria-label="{{ label }}">
 {% for n in nodes %}
   <li class="node accent-{{ n.accent }}" title="{{ n.title }}">
     <p class="node-head"><span class="node-step">{{ loop.index }}</span><span class="node-kind kind-{{ n.kind | lower }}">{{ n.kind }}</span></p>
-    <p class="node-name">{{ n.name }}</p>
+    <p class="node-name">{% if href is not none %}<a class="node-link" href="{{ href }}#{{ n.anchor }}">{{ n.name }}</a>{% else %}{{ n.name }}{% endif %}</p>
     <p class="node-result">{{ n.result }}</p>
     {% if n.detail %}<p class="node-detail">{{ n.detail }}</p>{% endif %}
-    {% if states %}<p class="node-state"><span class="mark mark-{{ n.state }}"><span aria-hidden="true">{{ n.mark }}</span> {{ n.word }}</span></p>{% endif %}
+    {% if states %}<p class="node-state">{{ mark({"css": n.state, "word": n.word}) }}</p>{% endif %}
   </li>
 {% endfor %}
 </ol>
 {% endmacro %}
 
-{% macro flow_key(nodes) %}
-<p class="flow-legend small muted"><span class="node-kind kind-code">CODE</span> fixed rules in code · <span class="node-kind kind-llm">LLM</span> a language model · <span class="node-kind kind-human">HUMAN</span> a person.</p>
+{% macro flow_key(nodes, linked=false) %}
+<p class="flow-legend small muted"><span class="node-kind kind-code">CODE</span> fixed rules in code · <span class="node-kind kind-llm">LLM</span> a language model · <span class="node-kind kind-human">HUMAN</span> a person.{% if linked %} Each step opens that agent's part of the run.{% endif %}</p>
 <p class="flow-roles small"><strong>Bull</strong> makes the case for a set of positions (it may still cut a line) · <strong>Bear</strong> attacks it, claim by claim · <strong>Portfolio manager</strong> decides, within limits · <strong>Risk engine</strong> is code that checks every limit.</p>
 <details class="more">
   <summary>What each step does</summary>
@@ -73,22 +111,12 @@
 </details>
 {% endmacro %}
 
-{# A bar on one shared scale: long to the right (teal), short to the left (orange), a thin tick at
-   the mechanical reference, the value at the bar tip on a halo. Geometry comes from classes. #}
-{% macro dbar(b, title) %}
-<div class="dbar" role="img" aria-label="{{ title }}" title="{{ title }}">
-  <span class="dzero {{ b.zero }}" aria-hidden="true"></span>
-  {% if b.ref %}<span class="dref {{ b.ref }}" aria-hidden="true"></span>{% endif %}
-  <span class="dfill {{ b.side }} {{ b.start }} {{ b.w }}" aria-hidden="true"></span>
-  <span class="dval {{ 'to-left' if b.side == 'short' else 'to-right' }}{{ ' zero' if b.side == 'zero' }} {{ b.at }}" aria-hidden="true">{{ b.label }}</span>
-</div>
-{% endmacro %}
 
 {% macro control_strip(control) %}
 {% if control %}
 <div class="control-strip{% if control.differs %} differs{% endif %}">
-  <span class="chip state-stone">CONTROL</span>
-  <p><strong>One agent, no analysts or debate:</strong> {{ control.text }} <span class="muted small">It never trades.</span></p>
+  {{ avatar("git-compare-arrows", "stone", "sm") }}
+  <p><strong>Control — one agent, no analysts or debate:</strong> {{ control.text }} <span class="muted small">It never trades.</span></p>
 </div>
 {% endif %}
 {% endmacro %}
@@ -97,6 +125,157 @@
 <div class="story">
 {% for s in sentences %}<p>{{ s }}</p>{% endfor %}
 </div>
+{% endmacro %}
+
+{# A terminal-log card of model calls: one command line per call (the prompt, linked to its file),
+   an output line (prompt hash, tokens, time) and a result line coloured by type: ok, error, and
+   the fallback the system took. Glyphs and words carry the meaning, not colour alone. #}
+{% macro terminal(calls, title, foot="", failure=none, label="Model calls") %}
+<figure class="term" aria-label="{{ label }}">
+  <figcaption class="term-head"><span class="term-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="term-title">{{ title }}</span>{{ icon("terminal", "term-i") }}</figcaption>
+  <div class="term-body">
+  {% for x in calls %}
+    <p class="tl tl-cmd"><span class="tl-p" aria-hidden="true">$ </span>call {{ x.role }}{% if calls | length > 1 or x.role in ("pm", "single_agent") %} <span class="tl-flag">--attempt {{ x.replicate }}</span>{% endif %} <span class="tl-flag">--prompt</span> {% if x.prompt_href %}<a href="{{ x.prompt_href }}" title="The prompt file on GitHub">{{ x.prompt_id }}</a>{% else %}{{ x.prompt_id }}{% endif %}</p>
+    <p class="tl tl-out">sha {{ x.prompt_sha }} · {{ x.tokens_in }} tokens in · {{ x.tokens_out }} out · {{ x.latency }}</p>
+    {% if not x.failed %}
+    <p class="tl tl-ok"><span aria-hidden="true">✓ </span>{{ x.word }}{% if x.status == "corrected" %} (one correction turn){% endif %}</p>
+    {% else %}
+    <p class="tl {{ 'tl-to' if x.status == 'timeout' else 'tl-err' }}"><span aria-hidden="true">{{ "◷ " if x.status == "timeout" else "✗ " }}</span>{{ x.word }}{% if x.error_kind and x.error_kind != x.status %} <span class="tl-flag">[{{ x.error_kind }}]</span>{% endif %}</p>
+    {% endif %}
+  {% else %}
+    <p class="tl tl-out"><span class="tl-p" aria-hidden="true">$ </span>no model call recorded</p>
+  {% endfor %}
+  {% if failure and failure.instead %}<p class="tl tl-fb"><span aria-hidden="true">→ </span>fallback taken (explained below)</p>{% endif %}
+  </div>
+  {% if foot %}<p class="term-foot">{{ foot }}</p>{% endif %}
+</figure>
+{% endmacro %}
+
+{# One call as a compact inline line (inside a manager attempt). #}
+{% macro call_meta(x, attempt=false) %}
+<p class="callline">{{ mark(x) }}{% if x.error_kind and x.error_kind not in (x.status, "corrected") %} <span class="muted">({{ x.error_word }})</span>{% endif %}{% if attempt %} <span class="cm">attempt {{ x.replicate }}</span>{% endif %} <span class="cm n" title="Time the call took">{{ x.latency }}</span> <span class="cm n" title="Tokens in / out">{{ x.tokens_in }} in / {{ x.tokens_out }} out</span> <span class="cm">{% if x.prompt_href %}<a href="{{ x.prompt_href }}" title="The prompt on GitHub">{{ x.prompt_id }}</a>{% else %}<code>{{ x.prompt_id }}</code>{% endif %}</span></p>
+{% endmacro %}
+
+{# The monogram tile of a line: neutral letters, tinted by asset class (never a broker logo). #}
+{% macro mono(r) %}<span class="mono ac-{{ r.ac }}" aria-hidden="true">{{ r.mono }}</span>{% endmacro %}
+
+{# The holdings table (home page): one row per line, as a broker's portfolio list but percent-only. #}
+{% macro hcolgroup(day=true, pnl=true) %}<colgroup><col class="c-asset">{% if day %}<col class="c-day">{% endif %}<col class="c-pos">{% if pnl %}<col class="c-pnl">{% endif %}<col class="c-weight"><col class="c-ref"></colgroup>{% endmacro %}
+
+{% macro hhead(h, sr=false) %}<thead{% if sr %} class="sr"{% endif %}><tr><th scope="col">{% if sr %}Asset{% else %}<span class="th-assets">Assets ({{ hcount(h.filters, "held") }})</span>{% if h.strip %}<span class="th-key" aria-hidden="true">Weight · tick = reference{% if h.show_day or h.show_pnl %} / {% endif %}{% if h.show_day %}1 day{% endif %}{% if h.show_day and h.show_pnl %} · {% endif %}{% if h.show_pnl %}P/L{% endif %}</span>{% endif %}{% endif %}</th>{% if h.show_day %}<th scope="col" class="n">1 day</th>{% endif %}<th scope="col">Position</th>{% if h.show_pnl %}<th scope="col" class="n">P/L since open</th>{% endif %}<th scope="col" class="n"{% if h.scale %} title="Bars run from 0 to {{ h.scale }} of the portfolio"{% endif %}>Weight</th><th scope="col" class="n"><abbr title="The mechanical reference's weight">Reference</abbr></th></tr></thead>{% endmacro %}
+
+{# A count per filter: only the one matching the checked filter shows (CSS, no script). #}
+{% macro hcount(filters, kind) %}{% for f in filters %}<span class="cnt cnt-{{ f.key }}">{{ f.held if kind == "held" else f.total - f.held }}</span>{% endfor %}{% endmacro %}
+
+{% macro hrow(r, day=true, pnl=true) %}
+<tr class="hr g-{{ r.group }}{% if not r.weight %} flat{% endif %}{% if r.ref_above %} ref-above{% endif %}" title="{{ r.title }}">
+  <td class="h-asset">
+    <div class="asset">{{ mono(r) }}<div class="asset-text"><p class="asset-top"><strong class="tick">{{ r.ticker }}</strong>{% if r.session %}<span class="chip sess" title="{{ r.session_title }}">{{ r.session }}</span>{% endif %}</p><p class="asset-name">{{ r.name }}{% if r.ac_words %}<span class="sr"> · {{ r.ac_words }}</span>{% endif %}{% if r.weight %}<span class="pos-inline"> · {{ r.position }}{% if r.lev %} {{ r.lev }}{% endif %}{% if r.settlement %} · {{ r.settlement }}{% endif %}</span>{% endif %}</p></div></div>
+    {% for n in r.notes %}<p class="hnote">{{ n }}</p>{% endfor %}
+  </td>
+  {% if day %}<td class="h-day n" data-label="1 day">{{ move(r.day, r.day_dir) }}</td>{% endif %}
+  <td class="h-pos" data-label="Position">{% if r.weight %}<span class="pos pos-{{ r.direction }}">{{ r.position }}</span>{% if r.lev %} <span class="lev">{{ r.lev }}</span>{% endif %}{% if r.settlement %} <span class="chip set-{{ r.settlement | lower }}">{{ r.settlement }}</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+  {% if pnl %}<td class="h-pnl n" data-label="P/L since open">{{ move(r.pnl, r.pnl_dir) }}</td>{% endif %}
+  <td class="h-weight n" data-label="Weight"><span class="wv">{{ r.share1 }}</span><span class="wref-txt">ref {{ r.ref_share1 }}</span>{% if r.show_bar %}<span class="wbar" aria-hidden="true"><span class="wfill {{ r.bar.side }} {{ r.bar.w }}"></span>{% if r.bar.ref %}<span class="wref {{ r.bar.ref }}"></span>{% endif %}</span>{% endif %}</td>
+  <td class="h-ref n" data-label="Reference">{{ r.ref_share1 }}</td>
+</tr>
+{% endmacro %}
+
+{# The language-model agents of one run, each with its status, linking into the run page. #}
+{% macro agent_strip(tr, href) %}
+<span class="astrip">{% for a in tr.agents if a.kind == "LLM" %}<a class="as tg-{{ a.status.css }}" href="{{ href }}#{{ a.id }}" title="{{ a.name }}: {{ a.status.word }}">{{ icon(status_icon(a.status.css)) }}{{ a.short }}<span class="sr"> {{ a.status.word }}</span></a>{% endfor %}</span>
+{% endmacro %}
+
+{# Pieces shared by the run page and the agents' pages. #}
+{% macro failure(f) %}
+{% if f %}
+<div class="failnote" role="note">
+  <span class="alert-icon" aria-hidden="true">{{ icon("triangle-alert") }}</span>
+  <div>
+  {% if f.what %}<p><strong>What went wrong:</strong> {{ f.what }}</p>{% endif %}
+  {% if f.instead %}<p><strong>What the system did instead:</strong> {{ f.instead }}</p>{% endif %}
+  </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro kcard(k) %}
+<article class="kcard" id="{{ k.anchor }}">
+  <p class="kcard-head"><strong>{{ k.label }}</strong> {{ direction_chip(k.direction) }} <span class="chip state-sealed">{{ k.type }}</span>{% if k.qualifying %} <span class="chip state-proposed" title="Allows the council to cut a line in an uptrend">qualifying</span>{% endif %}</p>
+  <p class="kcard-claim">{{ k.claim }}</p>
+  <p class="small muted">{% if k.scope %}On {{ k.scope | join(", ") }} · {% endif %}for {{ plural(k.horizon, "day") }}{% if k.falsifier %} · would be wrong if: {{ k.falsifier }}{% endif %}</p>
+  {% if k.chips %}<p class="evs">{{ chips(k.chips) }}</p>{% endif %}
+  {% if k.corroborated %}<p class="small">Corroborated by {% for x in k.corroborated %}{% if x.href %}<a href="{{ x.href }}">{{ x.label }}</a>{% else %}{{ x.label }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+  {% if k.cited_by %}<p class="small cited">Cited by {{ k.cited_by | join(", ") }}.</p>{% endif %}
+</article>
+{% endmacro %}
+
+{% macro verdict(v) %}{% if v == "concede" %}<span class="chip verdict v-concede">concedes</span>{% elif v == "refute" %}<span class="chip verdict v-refute">contests</span>{% elif v == "dismissed" %}<span class="chip verdict v-dismissed">set aside</span>{% elif v == "used" %}<span class="chip verdict v-used">used</span>{% endif %}{% endmacro %}
+
+{# One manager (or control) attempt. An invalid attempt says why in one line; an attempt that made
+   the same call as the used one is folded (see reps); the control saw no debate, so it has no
+   "Set aside". † marks a claim named by its bare number (footnote under the attempts). #}
+{% macro rep_card(rp, with_id=true) %}
+<article class="rep{% if rp.used %} used{% endif %}{% if not rp.valid %} invalid{% endif %}"{% if with_id %} id="{{ rp.anchor }}"{% endif %}>
+  <h4>Attempt {{ rp.n }} {% if rp.used %}<span class="chip state-proposed" title="The medoid: the attempt closest to the others">USED · MOST TYPICAL</span>{% endif %}{% if not rp.valid %}<span class="chip state-warn"><span aria-hidden="true">! </span>DISCARDED</span>{% endif %}</h4>
+  {% if rp.call %}{{ call_meta(rp.call) }}{% endif %}
+  {% if not rp.valid %}
+  <p class="rep-fail">{{ rp.failure }}.</p>
+  {% else %}
+  <dl class="rep-facts">
+    <dt>Sided with</dt><dd>{{ rp.sided }}</dd>
+    <dt>{{ "Change" if rp.changes | length == 1 else "Changes" }}</dt>
+    <dd>{% for ch in rp.changes %}<p><strong>{{ ch.words }}</strong>{% if ch.size %} <span class="muted small">({{ ch.size }})</span>{% endif %}</p><p class="small">{{ ch.reason }}</p>{% if ch.chips %}<p class="evs">{{ chips(ch.chips) }}</p>{% endif %}{% else %}keep the reference{% if rp.no_change %}: {{ rp.no_change }}{% endif %}{% endfor %}</dd>
+    <dt>Decisive fact</dt><dd>{% if rp.decisive %}{{ rp.decisive.text }}{% if rp.decisive.chip %} {{ ev_chip(rp.decisive.chip) }}{% endif %}{% else %}—{% endif %}</dd>
+    {% if rp.dismissed %}
+    <dt>Set aside</dt>
+    <dd><ul class="dismissals">{% for d in rp.dismissed %}<li>{% if d.ambiguous %}<span class="cid">{{ d.claim_id }}</span> <span class="chip unclear" title="{{ how_words.ambiguous }}">unclear which advocate</span>{% else %}{% for t in d.targets %}<a class="cref" href="{{ t.href }}">{{ t.label }}</a>{% if not loop.last %} or {% endif %}{% else %}<span class="cid">{{ d.claim_id }}</span>{% endfor %}{% if d.dagger %}<sup class="dag" title="{{ how_words.inferred }}">†</sup>{% endif %}{% endif %} — {{ d.why }}</li>{% endfor %}</ul></dd>
+    {% endif %}
+  </dl>
+  {% if rp.violations %}<p class="small warn-text"><span aria-hidden="true">! </span>Auditor: {% for v in rp.violations %}<span title="{{ v.raw }}">{{ v.text }}</span>{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
+  {% endif %}
+  {% if rp.reverted %}<p class="small warn-text"><span aria-hidden="true">! </span>Reverted: {% for v in rp.reverted %}<span title="{{ v.raw }}">{{ v.text }}</span>{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
+</article>
+{% endmacro %}
+
+{# The attempts of one block: every different call in full, then the attempts that repeated the
+   used one, folded (their element keeps the anchor that claim threads link to). #}
+{% macro reps(list) %}
+<div class="reps">{% for rp in list if not rp.same_as %}{{ rep_card(rp) }}{% endfor %}</div>
+{% set folded = list | selectattr("same_as") | list %}
+{% if folded %}
+<div class="reps-same">
+{% for rp in folded %}
+<details class="rep-same" id="{{ rp.anchor }}">
+  <summary>{{ icon("chevron-right", "chev") }}<span>Attempt {{ rp.n }}: same call as attempt {{ rp.same_as }}{% if rp.call %} <span class="muted">({{ rp.call.word }} · {{ rp.call.latency }})</span>{% endif %}</span></summary>
+  {{ rep_card(rp, false) }}
+</details>
+{% endfor %}
+</div>
+{% endif %}
+{% set dag = [] %}{% for rp in list %}{% for d in rp.dismissed %}{% if d.dagger %}{% set _ = dag.append(1) %}{% endif %}{% endfor %}{% endfor %}
+{% set amb = [] %}{% for rp in list %}{% for d in rp.dismissed %}{% if d.ambiguous %}{% set _ = amb.append(1) %}{% endif %}{% endfor %}{% endfor %}
+{% if dag %}<p class="small muted footnote"><sup class="dag">†</sup> {{ how_words.inferred }}</p>{% endif %}
+{% if amb %}<p class="small muted footnote"><span class="chip unclear">unclear which advocate</span> {{ how_words.ambiguous }}</p>{% endif %}
+{% endmacro %}
+
+{% macro replicate(rp) %}{{ rep_card(rp) }}{% endmacro %}
+
+{# One run in one line: what each advocate asked, what the manager, the risk engine and the human
+   did; each step links to its section of the run page (href: that page, "" on the page itself). #}
+{% macro chain(steps, href="") %}
+<ol class="chain" aria-label="What happened, step by step">
+{% for s in steps %}<li class="accent-{{ s.accent }}"><a href="{{ href }}#{{ s.anchor }}"><span class="dot accent-{{ s.accent }}" aria-hidden="true"></span>{{ s.who }}</a>: {{ s.text }}</li>{% endfor %}
+</ol>
+{% endmacro %}
+
+{# Every failed model call of a run, in an amber system alert, each linked to its place. #}
+{% macro fail_alert(tr) %}
+{% if tr.failures %}
+{% call alert("warn", "triangle-alert", plural(tr.failures | length, "model call") ~ " failed; the run fell back safely") %}
+<ul class="fail-list">{% for f in tr.failures %}<li><a href="{{ f.href }}">{{ f.who }}</a> {{ f.what }}{% if f.then %} <span aria-hidden="true">→</span> {{ f.then }}{% endif %}</li>{% endfor %}</ul>
+{% endcall %}
+{% endif %}
 {% endmacro %}
 
 {# A table wrapper that scrolls sideways when it must: focusable, named, with scroll shadows. #}

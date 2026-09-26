@@ -1,0 +1,59 @@
+{
+  "achieved_drift_x": 0.003,
+  "achieved_x": {
+    "GBPUSD": -0.062,
+    "NVDA": 0.02,
+    "SEMIS": 0.067
+  },
+  "approved_slot": "2026-09-25T14:40:00Z",
+  "completed_slot": "2026-09-25T14:40:00Z",
+  "cost_bp_total": 1.2,
+  "cycle_id": "2026-09-25T1440Z",
+  "decision_state": "completed",
+  "fills": [
+    {
+      "cost_bp": 0.5,
+      "direction": "long",
+      "exposure_error_pct": null,
+      "kind": "partial_close",
+      "leverage": 1,
+      "line": "SEMIS",
+      "seq": 1,
+      "settlement": "real",
+      "slippage_bp": null,
+      "state": "filled",
+      "weight_filled_x": null,
+      "weight_target_x": -0.067
+    },
+    {
+      "cost_bp": 0.5,
+      "direction": "short",
+      "exposure_error_pct": 0.0,
+      "kind": "open",
+      "leverage": 2,
+      "line": "GBPUSD",
+      "seq": 2,
+      "settlement": "cfd",
+      "slippage_bp": 3.0,
+      "state": "filled",
+      "weight_filled_x": -0.062,
+      "weight_target_x": -0.062
+    },
+    {
+      "cost_bp": 0.2,
+      "direction": "long",
+      "exposure_error_pct": 0.0,
+      "kind": "open",
+      "leverage": 1,
+      "line": "NVDA",
+      "seq": 3,
+      "settlement": "real",
+      "slippage_bp": 4.0,
+      "state": "filled",
+      "weight_filled_x": 0.02,
+      "weight_target_x": 0.02
+    }
+  ],
+  "flags": [],
+  "schema_id": "council-book/execution/v1"
+}

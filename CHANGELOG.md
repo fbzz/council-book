@@ -1,5 +1,49 @@
 # Changelog
 
+## site v3 (2026-09-25)
+- The Portfolio page opens with a broker-style holdings list, percent only: asset (neutral monogram
+  tile, ticker, name, session), 1-day move, position (long / short, leverage, real / CFD), P/L % since
+  open, weight with a tick at the reference, and the reference weight. Held lines sort by weight;
+  flat lines fold under "Not held". Asset-class filter chips work without script (radio inputs and
+  CSS). Before go-live it shows the latest run's target book. A sealed proposal is announced without
+  its content until the decision.
+- A run page is a transcript of every agent in execution order: status, call log (prompt, tokens,
+  time, error code), what it saw, the full argument with each claim's evidence resolved to its value,
+  and what happened to it (conceded, contested, set aside by the manager, used). Failed calls say
+  what went wrong and what the system did instead. A facts table closes the page.
+- New Agents pages: every agent's job, model, call record, usable-reply rate and history.
+- Dark by default. Interface styles adapted from OpenSourceUI (MIT) and icons from Lucide (ISC), in
+  plain CSS and inline SVG; see `THIRD_PARTY_NOTICES.md`. The last script (the stale badge) is gone:
+  the CSP is now `script-src 'none'`. Not a policy change.
+- Review fixes. Phone: holdings are two-line rows (tile, ticker and name; weight with its bar, then
+  the day's move and P/L), the filter chips scroll in one row, the kill switch moves under the list;
+  run-page facts, call log, orders and fills restack as cards; no page scrolls sideways at 390 px
+  (the agent-header status overflowed by 17 px). A target book has no P/L column and a
+  "Target, last day" tile marked hypothetical; a live book gains an open-P/L tile. Weights have one
+  fixed decimal and the bar scale is stated. Every failed model call is listed in an amber alert
+  with what the run did instead; a timed-out attempt is explained by its call, not as unreadable.
+  Advocates are judged by outcome ("did what it asked"), not only by the side the manager named;
+  a bare claim number several advocates used is shown once as unclear, never as a firm fate.
+  Every order says why (council change, bought up to the reference, back to the reference).
+  Identical manager attempts fold under the used one; the code officers share one compact card.
+  Agent pages end each run with the outcome chain and list failed calls with links; element ids
+  are unique on every page. The macro analyst has its own colour (lime); non-agent sections are
+  neutral.
+- Public record: a line id may be one character or carry "_" (BRK_B, V); the facts table honours
+  a fact's `publishable=False` for every source; a floored cost quote that used a broker what-if is
+  labelled `costs:whatif` (withheld), not policy; bare price levels are scrubbed from model text.
+
+## public record — additive fields (2026-09-25)
+- Cycles publish the whole debate argument (up to about 1,500 characters; it was cut at 600), the
+  macro analyst's output (`macro`), an evidence table of the pack the agents saw (`facts`, values
+  only where `docs/data-rights.md` allows), each line's 1-day move (`reference[line].day_change_pct`)
+  and a fixed error code per model call (`calls[].error_kind`, never the error text).
+- The book describes each line: name, asset class, session, the settlement and leverage of its
+  largest open position, the P/L % since open and the 1-day move.
+- Every new field is optional and left out while empty, so a document sealed before this change
+  re-serialises to its exact sealed bytes and still verifies. Not a policy change.
+- A council cancelled by the cycle's time budget keeps the calls that ran.
+
 ## model — policy change (2026-09-25)
 - Ollama Cloud retired `deepseek-v4-flash` (version 0731) on 2026-09-25; every call returned HTTP 410
   and the outage guard correctly fell back to the reference. The council now runs on its official
