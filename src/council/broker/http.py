@@ -9,22 +9,34 @@ Rules enforced here:
   retries a read raises `BrokerUnavailable`; 401/403 raise `BrokerAuthError` at once.
 - WRITES never retry: `send_once` makes exactly one request and lets the write client classify it.
 - Credentials never appear in `repr`, error messages or exception bodies.
+- The base URL is pinned (`check_base_url`): the eToro default only, or, inside a marked rehearsal
+  sandbox, `http://127.0.0.1:<port>` where the port equals the sandbox's `fake-broker.port`.
+  Anything else raises `BrokerConfigError` before a client (or a socket) exists.
+- The transport ignores the environment (`trust_env=False`: no proxy variables, no netrc, no
+  SSL_CERT_FILE), never follows redirects, and verifies TLS against certifi's bundle.
 """
 
 from __future__ import annotations
 
 import email.utils
 import json
+import ssl
 import time
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+import certifi
 import httpx
 
 DEFAULT_BASE_URL = "https://public-api.etoro.com"
 DEFAULT_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+LOOPBACK_HOST = "127.0.0.1"
+FAKE_BROKER_PORT_FILE = ("fake-broker.port",)   # at the sandbox root (not rehearsal/: on a
+                                                # case-insensitive volume it collides with the REHEARSAL marker)
 READ_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 4.0)   # waits between read attempts on 5xx/transport
 MAX_429_RETRIES = 3
 RETRY_AFTER_DEFAULT_S = 5.0
@@ -36,6 +48,11 @@ Sleep = Callable[[float], None]
 
 class BrokerError(RuntimeError):
     """Base class for every broker failure."""
+
+
+class BrokerConfigError(BrokerError):
+    """The broker client is misconfigured (e.g. a base URL outside the pin). Raised before any
+    request is sent."""
 
 
 class BrokerAuthError(BrokerError):
@@ -82,6 +99,57 @@ class AmbiguousWriteError(BrokerError):
 
 class MissingStopLoss(ValueError):
     """Raised BEFORE sending an open without a valid stop-loss rate (invariant: SL on every open)."""
+
+
+def _fake_broker_port(state_dir: Path) -> int | None:
+    try:
+        text = state_dir.joinpath(*FAKE_BROKER_PORT_FILE).read_text().strip()
+        port = int(text)
+    except (OSError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def check_base_url(url: str, state_dir: Path | None = None) -> str:
+    """Return the normalised base URL or raise `BrokerConfigError`.
+
+    Allowed: the eToro default (`DEFAULT_BASE_URL`), or `http://127.0.0.1:<port>` only when the
+    state dir is a marked rehearsal sandbox and `<port>` equals its `fake-broker.port` (at its root).
+    The message never echoes the URL (it came from the environment)."""
+    from council import paths
+    from council.operator.release import is_marked_sandbox
+
+    text = str(url or "").strip().rstrip("/")
+    if text == DEFAULT_BASE_URL:
+        return text
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        raise BrokerConfigError("broker base URL refused (not the eToro default)") from None
+    root = state_dir if state_dir is not None else paths.state_dir()
+    if (
+        parts.scheme == "http"
+        and parts.hostname == LOOPBACK_HOST
+        and port is not None
+        and parts.path in ("", "/")
+        and not parts.query
+        and not parts.fragment
+        and not parts.username
+        and not parts.password
+        and is_marked_sandbox(root)
+        and port == _fake_broker_port(root)
+    ):
+        return f"http://{LOOPBACK_HOST}:{port}"
+    raise BrokerConfigError(
+        "broker base URL refused: only the eToro default, or the rehearsal fake broker inside a "
+        "marked sandbox, is allowed"
+    )
+
+
+def tls_context() -> ssl.SSLContext:
+    """TLS verification against certifi's bundle only (SSL_CERT_FILE/SSL_CERT_DIR are ignored)."""
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 def new_request_id() -> str:
@@ -147,16 +215,23 @@ class BrokerHTTP:
         sleep: Sleep = time.sleep,
         read_backoff: tuple[float, ...] = READ_BACKOFF_S,
         max_429_retries: int = MAX_429_RETRIES,
+        state_dir: Path | None = None,
     ) -> None:
         if not api_key or not user_key:
             raise ValueError("both x-api-key and x-user-key are required (key-pair auth only)")
+        pinned = check_base_url(base_url, state_dir)
         self.__api_key = api_key
         self.__user_key = user_key
         self._sleep = sleep
         self._read_backoff = tuple(read_backoff)
         self._max_429 = max_429_retries
         self._client = httpx.Client(
-            base_url=base_url.rstrip("/"), transport=transport, timeout=timeout
+            base_url=pinned,
+            transport=transport,
+            timeout=timeout,
+            trust_env=False,
+            follow_redirects=False,
+            verify=tls_context(),
         )
 
     def __repr__(self) -> str:

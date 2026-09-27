@@ -1,4 +1,6 @@
-"""Operator-terminal commands that can move money: approve and flatten. Reject is here too.
+"""Operator-terminal commands that can move money: approve and flatten. Reject is here too, and the
+incident commands that never send an order: `resume_exec` (lookups only), `resolve_waiting`,
+`review_blocked` and `resume_kill_switch` (m5-readiness §9.1-§9.2).
 
 Order of operations for `approve` (any failure stops before a single order is sent):
   1. process guards (TTY, COUNCIL_ROLE=operator, no CI/agent env, no agent ancestor process)
@@ -32,8 +34,6 @@ Order of operations for `approve` (any failure stops before a single order is se
 from __future__ import annotations
 
 import math
-import os
-import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -66,10 +66,9 @@ def run_guards(deps: ApprovalDeps) -> None:
     if deps.guard_fn is not None:
         deps.guard_fn()
         return
-    from council.operator.guards import assert_operator_context, process_ancestors
+    from council.operator import guards
 
-    assert_operator_context(env=os.environ, stdin_isatty=sys.stdin.isatty(),
-                            stdout_isatty=sys.stdout.isatty(), ancestors=process_ancestors())
+    guards.assert_current_process_is_operator()      # env, both TTYs, ancestor processes
 
 
 def _transition(ledger: Any, decision_id: str, state: str, reason: str) -> None:
@@ -144,7 +143,9 @@ def approve(decision_id: str, deps: ApprovalDeps) -> Any:
     report = executor.execute(decision_id, plan, nav_usd=snap.equity_usd, dropped=dropped)
     keys = list(ledger.get_runtime("execution_reports", []))
     ledger.set_runtime(f"exec_report:{decision_id}", {
-        "report": report.model_dump(mode="json"), "cycle_id": d.cycle_id, "nav_usd": snap.equity_usd,
+        "report": report.model_dump(mode="json"), "cycle_id": d.cycle_id,
+        "decision_ref": d.cycle_id or (d.target or {}).get("decision_ref") or decision_id,
+        "nav_usd": snap.equity_usd,
         "plan": plan.model_dump(mode="json"), "approved_at": now.isoformat(),
         "completed_at": deps.now_fn().isoformat()})
     ledger.set_runtime("execution_reports", [*keys, decision_id])
@@ -177,6 +178,145 @@ def resolve_waiting(decision_id: str, outcome: str, deps: ApprovalDeps) -> None:
                 f"operator recorded {len(waiting)} held order(s) as {outcome} after checking the broker")
     deps.print_fn(f"{decision_id}: {len(waiting)} held order(s) recorded as {outcome}; "
                   "the next cycle reads the book from the broker")
+
+
+REVIEWABLE_STATES = ("blocked", "execution_unknown")
+OPS_ROWS_PENDING = "ops_rows_pending"       # cycle ids whose public ops row the watch republishes
+KILL_RESUMES = "kill_resumes"               # private log of operator resumes of the kill switch
+
+
+def resume_exec(decision_id: str, deps: ApprovalDeps) -> Any:
+    """`council resume-exec`: recover an executing, execution_unknown or blocked decision with
+    lookups and reconcile ONLY. The executor is built without a write client and runs its resume
+    with a `NoWriteClient`, so nothing can be sent; a leg that provably never reached the broker
+    becomes skipped (a fresh proposal and approval are needed). The resumed report replaces the
+    stored one and is queued again for the watch to publish."""
+    from council.broker.instruments import InstrumentMap
+    from council.execution.executor import RESUMABLE_STATES, Executor
+    from council.execution.ratelimit import TokenBucket
+
+    run_guards(deps)
+    ledger = deps.ledger
+    d = ledger.get_decision(decision_id)
+    if d.state not in RESUMABLE_STATES:
+        raise ApprovalRefused(f"decision is {d.state}: nothing to resume (resume-exec takes "
+                              "executing, execution_unknown or blocked)")
+    if deps.read is None:
+        raise ApprovalRefused("no READ client: resume-exec needs the READ token for its lookups")
+    kwargs = dict(deps.executor_kwargs or {})
+    if "symbol_for" not in kwargs:
+        kwargs["symbol_for"] = InstrumentMap.load(deps.state_dir / "instruments.json").symbol_for
+    executor = Executor(None, deps.read, ledger, TokenBucket(), policy=deps.policy, **kwargs)
+    report = executor.resume(decision_id)
+    _store_report(ledger, decision_id, d, report, deps)
+    deps.print_fn(f"resume finished: {report.final_state} ({report.writes_sent} writes; lookups only)")
+    if report.final_state in REVIEWABLE_STATES:
+        deps.print_fn("still held: check the broker, then `council-op ops review "
+                      f"{decision_id} --reason ...` (or resume-exec again later)")
+    return report
+
+
+def _store_report(ledger: Any, decision_id: str, d: Any, report: Any, deps: ApprovalDeps) -> None:
+    """Replace the stored execution report with the resumed one and let the watch publish it again
+    (the watch publishes a report once; a resumed outcome supersedes the earlier record)."""
+    key = f"exec_report:{decision_id}"
+    payload = dict(ledger.get_runtime(key) or {})
+    payload.update({"report": report.model_dump(mode="json"), "cycle_id": payload.get("cycle_id") or d.cycle_id,
+                    "decision_ref": payload.get("decision_ref") or d.cycle_id
+                    or (d.target or {}).get("decision_ref") or decision_id,
+                    "resumed_at": deps.now_fn().isoformat(), "completed_at": deps.now_fn().isoformat()})
+    if "nav_usd" not in payload:                   # no approval report (e.g. a crash before storing it)
+        before = getattr(report, "equity_before", None)
+        if before is None:
+            return                                  # nothing to size the public record with: keep private
+        payload["nav_usd"] = before
+    ledger.set_runtime(key, payload)
+    keys = list(ledger.get_runtime("execution_reports", []))
+    if decision_id not in keys:
+        ledger.set_runtime("execution_reports", [*keys, decision_id])
+    done = list(ledger.get_runtime("executions_published", []))
+    if decision_id in done:
+        ledger.set_runtime("executions_published", [k for k in done if k != decision_id])
+
+
+def review_blocked(decision_id: str, reason: str, deps: ApprovalDeps) -> None:
+    """`council ops review`: after checking the broker, the operator clears a blocked (or
+    execution_unknown) decision that has no active and no waiting leg. Ledger only: nothing is
+    sent. The decision becomes reviewed_no_action with the reason, and the reason is queued for
+    publication on the cycle's public ops row (it must carry no amount, id, link, path or e-mail)."""
+    text = " ".join((reason or "").split())
+    if not text:
+        raise ApprovalRefused("a reason is required (it is published)")
+    run_guards(deps)
+    ledger, now = deps.ledger, deps.now_fn()
+    d = ledger.get_decision(decision_id)
+    if d.state not in REVIEWABLE_STATES:
+        raise ApprovalRefused(f"decision is {d.state}: ops review clears only blocked or execution_unknown")
+    from council.ledger.states import LEG_ACTIVE_STATES, WAITING_STATE
+
+    legs = ledger.legs(decision_id)
+    active = [r.seq for r in legs if r.state in LEG_ACTIVE_STATES]
+    if active:
+        raise ApprovalRefused(f"leg(s) {active} still active at the broker: run resume-exec first")
+    waiting = [r.seq for r in legs if r.state == WAITING_STATE]
+    if waiting:
+        raise ApprovalRefused(f"leg(s) {waiting} wait for their market: use ops resolve")
+    public = _public_reason(text)
+    _transition(ledger, decision_id, "reviewed_no_action", f"operator review: {public}")
+    _queue_public_outcome(ledger, d, "reviewed_no_action", f"operator review: {public}", now)
+    deps.print_fn(f"{decision_id}: reviewed (no action); the next cycle runs and the watch publishes "
+                  "the reason")
+
+
+def _public_reason(text: str) -> str:
+    """The reason exactly as it will be published, or ApprovalRefused if publishing would change
+    it (an amount, a long number, an id, a link, a path or an e-mail address)."""
+    from council.publish.redact import clean_text
+
+    cleaned = clean_text(text, 180)
+    if cleaned != text[:180].strip() or len(text) > 180:
+        raise ApprovalRefused("the reason is published: at most 180 characters and no amounts, ids, "
+                              "links, paths or e-mail addresses")
+    return cleaned
+
+
+def _queue_public_outcome(ledger: Any, d: Any, state: str, reason: str, now: datetime) -> None:
+    """Record the final outcome on the private cycle record and queue its public ops row for the
+    watch (the operator never runs git)."""
+    if not d.cycle_id:
+        return
+    rec = ledger.get_cycle(d.cycle_id)
+    if rec:
+        rec["decision_state"] = state
+        rec["decision_reason"] = reason[:200]
+        ledger.record_cycle(rec, now=now)
+    pending = list(ledger.get_runtime(OPS_ROWS_PENDING, []))
+    if d.cycle_id not in pending:
+        ledger.set_runtime(OPS_ROWS_PENDING, [*pending, d.cycle_id], now=now)
+
+
+def resume_kill_switch(reason: str, deps: ApprovalDeps) -> str:
+    """`council resume --reason`: leave HALTED or FLAT after recovery. Refused without a reason and
+    from NORMAL or WARN. The lifetime peak and the recent equity reads are untouched, so the next
+    watch or cycle re-halts while equity is still below the halt line."""
+    from council.risk import killswitch
+
+    text = " ".join((reason or "").split())
+    if not text:
+        raise ApprovalRefused("a reason is required")
+    run_guards(deps)
+    ledger, now = deps.ledger, deps.now_fn()
+    prev = str(ledger.get_runtime("kill_state", "NORMAL"))
+    try:
+        decision = killswitch.resume(prev, text)
+    except ValueError as exc:
+        raise ApprovalRefused(str(exc)) from exc
+    ledger.set_runtime("kill_state", decision.state, now=now)
+    log = list(ledger.get_runtime(KILL_RESUMES, []))
+    ledger.set_runtime(KILL_RESUMES, [*log, {"at": now.isoformat(), "from": prev, "reason": text[:200]}], now=now)
+    deps.print_fn(f"kill switch {prev} -> {decision.state}; the lifetime peak is unchanged, so the next "
+                  "check halts again while equity is below the halt line")
+    return decision.state
 
 
 def reject(decision_id: str, reason: str, deps: ApprovalDeps) -> None:

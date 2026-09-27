@@ -99,7 +99,9 @@ def test_set_mirror_command_is_operator_only(monkeypatch, tmp_path):
     monkeypatch.setenv("COUNCIL_ROLE", "dev")
     refused = runner.invoke(app, ["account", "set-mirror", "--ratio", "0.2"])
     assert refused.exit_code == 2 and not mirror_path(tmp_path / "state").exists()
-    monkeypatch.setenv("COUNCIL_ROLE", "operator")
+    from tests.cli.operator_sim import simulate_operator
+
+    simulate_operator(monkeypatch)       # the operator terminal (M5-B guard), not just COUNCIL_ROLE
     done = runner.invoke(app, ["account", "set-mirror", "--ratio", "0.2"])
     assert done.exit_code == 0, done.output
     assert load_mirror(tmp_path / "state").mirror_ratio == pytest.approx(0.2)

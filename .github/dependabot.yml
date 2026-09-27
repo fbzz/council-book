@@ -1,0 +1,18 @@
+# Dependabot proposes (never merges) weekly bumps of the SHA-pinned GitHub Actions in
+# .github/workflows/. It rewrites the 40-hex pin and the "# vX.Y.Z" comment together; review the
+# release notes and the new commit before merging. Only the github-actions ecosystem is watched:
+# Python dependencies move through uv.lock by hand, and the gitleaks binary (a curl in ci.yml,
+# checked against its sha256) is bumped manually with its digest.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns: ["*"]

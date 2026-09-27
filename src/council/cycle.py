@@ -73,10 +73,13 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from council import clock
+from council.context import broker_expected
 from council.invariants import check_policy
 from council.models.cycle import CycleRecord, Debate
 from council.models.plan import Plan
 from council.models.risk import Band, RiskDecision, changed_lines
+from council.operator import urgent
+from council.operator.urgent import KEYCHAIN_UNAVAILABLE, broker_error_kind
 from council.policy import LineSpec, Universe
 from council.runtime import (
     CycleContext,
@@ -95,6 +98,13 @@ from council.runtime import (
     material_fingerprints,
     window,
 )
+
+REDACT_ERROR = "redact_error"             # flag prefix and URGENT kind when public_cycle raises (V11)
+
+
+def redact_failed(rec: CycleRecord) -> bool:
+    return any(f.startswith(REDACT_ERROR + ":") for f in rec.flags)
+
 
 REAL_PEAK_KEY = "real_adjusted_peak"      # ledger runtime: lifetime peak of the real-adjusted equity (D19)
 
@@ -139,11 +149,23 @@ async def run_cycle_async(ctx: CycleContext, *, force: bool = False) -> CycleOut
         return CycleOutcome(cycle_id=cycle_id, status="skipped_overlap")
 
 
+LAUNCHD_LABEL_PREFIX = "com.fbzz.council"
+RUNNER_LAUNCHD = "runner:launchd"
+
+
+def runner_flags(env: Any = None) -> list[str]:
+    """`runner:launchd` when launchd started this process (its job label is in XPC_SERVICE_NAME)."""
+    import os
+
+    env = os.environ if env is None else env
+    return [RUNNER_LAUNCHD] if str(env.get("XPC_SERVICE_NAME", "")).startswith(LAUNCHD_LABEL_PREFIX) else []
+
+
 def _bare_record(ctx: CycleContext, info: clock.SlotInfo, now: datetime, *, status: str) -> CycleRecord:
     return CycleRecord(
         cycle_id=info.cycle_id, slot=info.slot, started_at=now, finished_at=now, status=status,  # type: ignore[arg-type]
         late_by_s=int(info.late_by.total_seconds()), mode=ctx.settings.mode, policy_sha=ctx.policy.sha256,
-        model=ctx.settings.ollama_model,
+        model=ctx.settings.ollama_model, flags=runner_flags(),
     )
 
 
@@ -174,9 +196,15 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     # ---- broker snapshot, NAV and kill switch (only once the Agent Portfolio is connected)
     snapshot, kill_state, nav = None, "NORMAL", None
     corporate_blockers: list[str] = []
+    if ctx.sources.broker is None and broker_expected(ctx):
+        # G4: onboarded live account without a broker (e.g. a locked Keychain): never AWAITING_ACCOUNT
+        return _skip_broker(ctx, info, now, flags, KEYCHAIN_UNAVAILABLE)
     if ctx.sources.broker is not None:
-        _settle_held_orders(ctx, now)       # before the snapshot, so a filled hold is not counted twice
-        snapshot, kill_state, nav = _snapshot_and_kill(ctx, now)
+        try:
+            _settle_held_orders(ctx, now)   # before the snapshot, so a filled hold is not counted twice
+            snapshot, kill_state, nav = _snapshot_and_kill(ctx, now)
+        except Exception as exc:  # any broker read failure: skip safely, alert once per 4 h
+            return _skip_broker(ctx, info, now, flags, f"broker_error:{broker_error_kind(exc)}")
         corporate_blockers = corporate_actions(ctx, snapshot, cycle_id)
     # PRIVATE: the fixed fee and the real trade floor as NAV shares (never published or prompted)
     econ = cycle_trade_economics(policy, ctx.state_dir, snapshot.equity_usd if snapshot is not None else None)
@@ -251,7 +279,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         late_by_s=int(info.late_by.total_seconds()), input_hash=pack.input_hash,
         policy_sha=policy.sha256, prompt_manifest_sha=_manifest_sha(ctx), model=ctx.settings.ollama_model,
         kill_state=kill_state if kill_state in ("NORMAL", "WARN", "HALTED", "FLAT") else "NORMAL",
-        reference=ref, bands=bands, cards=list(code_cards), flags=list(flags) + ref_flags + news_flags,
+        reference=ref, bands=bands, cards=list(code_cards), flags=runner_flags() + list(flags) + ref_flags + news_flags,
     )
     if snapshot is not None:            # connected: say when the fee uses an assumed mirror ratio
         rec.flags += [f for f in econ.flags if f.startswith("mirror_ratio")]
@@ -320,7 +348,12 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     # ---- seal + publish
     published, sha = _seal_and_publish(ctx, rec, pack, reveal_now=decision_id is None, snapshot=snapshot)
     state = rec.decision_state
-    if decision_id is not None:
+    if redact_failed(rec):
+        # no commitment exists: the decision never becomes `proposed` (approve refuses it) and
+        # expires with the slot; the ops row is published without the sealed document
+        _publish_ops_only(ctx, rec)
+        ledger.record_cycle(rec)
+    elif decision_id is not None:
         risk_up = plan is not None and plan.risk_increasing
         if published or not risk_up:
             ledger.transition(decision_id, "proposed", "sealed and published" if published else
@@ -340,6 +373,24 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     return CycleOutcome(cycle_id=cycle_id, status=rec.status, basis=decision.basis, decision_id=decision_id,
                         decision_state=state, legs=len(plan.legs) if plan else 0, commit_sha=sha,
                         published=published, flags=rec.flags)
+
+
+def _skip_broker(ctx: CycleContext, info: clock.SlotInfo, now: datetime, flags: list[str],
+                 code: str) -> CycleOutcome:
+    """M5-A: the broker is required but unreadable. The cycle ends `skipped_broker` with a fixed
+    code flag, publishes only its ops row (the public status is left untouched, so it never flips to
+    AWAITING_ACCOUNT), and sends one URGENT per code per 4 h. No deliberation, no plan, no order."""
+    rec = _bare_record(ctx, info, now, status="skipped_broker")
+    rec.flags = [*rec.flags, *flags, code]      # keep runner:launchd from _bare_record
+    rec.decision_state = "reviewed_no_action"
+    rec.finished_at = ctx.clock()
+    ctx.ledger.record_cycle(rec)
+    published, sha = _publish_ops_only(ctx, rec)
+    urgent.send_once(ctx, code, f"council {info.cycle_id}",
+                     f"cycle skipped: {code}. Check the Keychain and the READ token "
+                     "(council doctor --live-read in the operator terminal).", now)
+    return CycleOutcome(cycle_id=info.cycle_id, status="skipped_broker", published=published,
+                        commit_sha=sha, flags=rec.flags)
 
 
 def _settle_held_orders(ctx: CycleContext, now: datetime) -> None:
@@ -1024,7 +1075,14 @@ def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: 
     if ctx.publisher is None:
         return False, None
     lines = ctx.policy.universe
-    public = redact.public_cycle(rec, pack, lines=lines, install_key=cycle_install_key(ctx, rec))
+    try:
+        public = redact.public_cycle(rec, pack, lines=lines, install_key=cycle_install_key(ctx, rec))
+    except Exception as exc:  # V11: never a crash; no commitment, so the decision cannot be approved
+        code = f"{REDACT_ERROR}:{type(exc).__name__}"
+        rec.flags.append(code)
+        urgent.send_once(ctx, REDACT_ERROR, f"council {rec.cycle_id}",
+                         f"cycle not sealed ({code}); its decision cannot be approved.", ctx.clock())
+        return False, None
     arm_leak_scan(ctx.publisher, licensed=redact.licensed_texts(pack),
                   canaries=publish_canaries(ctx, snapshot))
     commitment, salt, sealed = _seal(commit_reveal, public, rec, ctx)
@@ -1083,8 +1141,8 @@ def _publish_ops_only(ctx: CycleContext, rec: CycleRecord) -> tuple[bool, str | 
 
     if ctx.publisher is None:
         return False, None
-    files = journal.ops_files(_existing(ctx, journal.OPS_PATH), [redact.public_ops_row(rec)])
-    try:
+    try:   # the ops row is built by the same redact module that may have just raised (V11)
+        files = journal.ops_files(_existing(ctx, journal.OPS_PATH), [redact.public_ops_row(rec)])
         result = ctx.publisher.publish(files, f"cycle {rec.cycle_id}: {rec.status}")
     except Exception:
         return False, None

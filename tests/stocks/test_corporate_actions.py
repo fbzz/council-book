@@ -402,7 +402,9 @@ def cli(book, monkeypatch):
     from typer.testing import CliRunner
 
     from council.cli import app
+    from tests.cli.operator_sim import simulate_operator
 
+    simulate_operator(monkeypatch)       # operator commands (M5-B): operator terminal, installed release
     reads = {"client": book.broker.read}
     monkeypatch.setattr("council.context.read_broker", lambda settings: reads["client"])
     monkeypatch.setattr(commands, "default_repo", lambda: book.repo)

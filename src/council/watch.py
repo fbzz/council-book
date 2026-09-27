@@ -34,9 +34,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from council.context import broker_expected
+from council.operator import urgent
+from council.operator.urgent import KEYCHAIN_UNAVAILABLE, broker_error_kind
 from council.runtime import CycleContext, LockBusy, instance_lock
 
 TERMINAL = {"completed", "completed_partial", "rejected", "expired", "superseded",
@@ -53,14 +56,52 @@ class WatchOutcome:
     revealed: list[str] = field(default_factory=list)
     executions_published: list[str] = field(default_factory=list)
     alerts: list[str] = field(default_factory=list)
+    broker_error: str | None = None     # fixed code when the broker checks could not run
+    urgent: list[str] = field(default_factory=list)   # fixed codes of URGENT conditions this run
+
+    @property
+    def fail_code(self) -> str | None:
+        """The healthcheck `/fail` body: the first URGENT code, or None for a good run."""
+        if self.urgent:
+            return self.urgent[0]
+        if any(a.startswith("URGENT") for a in self.alerts):
+            return "urgent_alert"
+        return None
 
 
-def run_watch(ctx: CycleContext) -> WatchOutcome:
+def run_watch(ctx: CycleContext, *, ping_client: Any | None = None) -> WatchOutcome:
+    """One watch run, then the dead-man switch ping (M5-E2): a success ping at the end of every
+    run, `/fail` with a fixed code when the run raised an URGENT condition or an exception (the
+    exception is re-raised after the ping). An overlapping run skips the ping: the run holding the
+    lock pings. Only a live runner pings (a rehearsal or dry run never feeds the real switch)."""
     try:
         with instance_lock(state_dir=ctx.state_dir):
-            return _run(ctx)
+            out = _run(ctx)
     except LockBusy:
         return WatchOutcome(status="skipped_overlap")
+    except Exception as exc:
+        _ping(ctx, f"watch_exception:{type(exc).__name__.lower()}", client=ping_client)
+        raise
+    _ping(ctx, out.fail_code, client=ping_client)
+    return out
+
+
+def _ping(ctx: CycleContext, fail_code: str | None, *, client: Any | None = None) -> None:
+    """Healthcheck ping plus the `ops.healthcheck` runtime record. Never raises."""
+    settings = ctx.settings
+    if getattr(settings, "mode", "") != "live" or not getattr(settings, "healthcheck_url", None):
+        return
+    try:
+        from council.operator import healthcheck
+        from council.operator.release import is_marked_sandbox
+
+        if is_marked_sandbox(ctx.state_dir):     # a rehearsal never feeds the real dead-man switch
+            return
+
+        result = healthcheck.ping(settings.healthcheck_url, fail_code=fail_code, client=client)
+        healthcheck.record(ctx.ledger, result, now=ctx.clock())
+    except Exception:  # noqa: BLE001 - the ping never stops the watch
+        return
 
 
 def _run(ctx: CycleContext) -> WatchOutcome:
@@ -69,7 +110,11 @@ def _run(ctx: CycleContext) -> WatchOutcome:
     out.alerts += _resolve_waiting(ctx, now)          # without a broker only the timeout applies
     files: dict[str, bytes] = {}
     out.revealed = _reveals(ctx, files)
-    out.executions_published = _executions(ctx, files)
+    unpublished: list[str] = []
+    out.executions_published = _executions(ctx, files, unpublished)
+    out.urgent += [code.split(":")[0] for code in dict.fromkeys(unpublished)]
+    for code in dict.fromkeys(unpublished):          # a bad record never stops the loop; retried
+        urgent.send_once(ctx, code, "council watch", f"an execution report is unpublished ({code})", now)
     if files and ctx.publisher is not None:
         try:
             ctx.publisher.publish(files, f"watch {now.strftime('%Y-%m-%dT%H%MZ')}: reveals/executions")
@@ -80,8 +125,27 @@ def _run(ctx: CycleContext) -> WatchOutcome:
         except Exception as exc:
             out.alerts.append(f"publish_error:{type(exc).__name__}")
     if ctx.sources.broker is not None:
-        out.alerts += _broker_checks(ctx, now)
+        try:
+            out.alerts += _broker_checks(ctx, now)
+        except Exception as exc:  # the heartbeat and the other alerts still run
+            code = f"broker_error:{broker_error_kind(exc)}"
+            out.broker_error = code
+            out.urgent.append(code)
+            urgent.send_once(ctx, code, "council watch",
+                             f"broker checks failed ({code}): stops and the kill switch are unchecked "
+                             "until the READ token works (council doctor --live-read)", now)
+        if out.broker_error is None:
+            out.alerts += _token_expiry(ctx, now)
+    elif broker_expected(ctx):                      # G4: onboarded, live, but no broker
+        out.broker_error = KEYCHAIN_UNAVAILABLE
+        out.urgent.append(KEYCHAIN_UNAVAILABLE)
+        urgent.send_once(ctx, KEYCHAIN_UNAVAILABLE, "council watch",
+                         "no READ token (Keychain locked or item missing): stops and the kill switch "
+                         "are unchecked", now)
     out.alerts += _heartbeat(ctx, now)
+    for flag in _daily_backup(ctx, now):             # rate-limited: a failing backup retries every run
+        out.urgent.append(BACKUP_ERROR)
+        urgent.send_once(ctx, BACKUP_ERROR, "council watch", f"ledger backup failed ({flag})", now)
     for alert in out.alerts:
         _alert(ctx, alert)
     return out
@@ -141,7 +205,11 @@ def _read_existing(ctx: CycleContext, rel: str) -> bytes | None:
 
 
 # ---------------------------------------------------------------------------- executions
-def _executions(ctx: CycleContext, files: dict[str, bytes]) -> list[str]:
+def _executions(ctx: CycleContext, files: dict[str, bytes], unpublished: list[str] | None = None) -> list[str]:
+    """Publish each finished execution report. Every record is guarded: one that cannot be made
+    public is flagged `execution_unpublished:<type>` and retried next run, never stopping the loop.
+    A report without a cycle (a watch flatten, keyed by `decision_ref`) waits for its own public
+    document type (M5-N)."""
     from council.publish import journal, redact
 
     ledger = ctx.ledger
@@ -150,20 +218,29 @@ def _executions(ctx: CycleContext, files: dict[str, bytes]) -> list[str]:
     for key in ledger.get_runtime("execution_reports", []):
         if key in done:
             continue
-        payload = ledger.get_runtime(f"exec_report:{key}")
-        if not payload or not hasattr(redact, "public_execution"):
-            continue
-        if _decision_state(ledger, key) == WAITING_STATE:     # published once resolved
-            continue
-        from council.execution.executor import ExecutionReport
-        from council.models.plan import Plan
+        try:
+            payload = ledger.get_runtime(f"exec_report:{key}")
+            if not payload or not hasattr(redact, "public_execution"):
+                continue
+            if _decision_state(ledger, key) == WAITING_STATE:     # published once resolved
+                continue
+            if payload.get("cycle_id") is None:                   # G14: no public type yet (M5-N)
+                continue
+            from council.execution.executor import ExecutionReport
+            from council.models.plan import Plan
 
-        report = ExecutionReport.model_validate(payload["report"])
-        plan = Plan.model_validate(payload["plan"]) if payload.get("plan") else None
-        public = redact.public_execution(
-            report, cycle_id=payload["cycle_id"], lines=ctx.policy.universe, nav_usd=payload["nav_usd"],
-            plan=plan, approved_at=_dt(payload.get("approved_at")), completed_at=_dt(payload.get("completed_at")))
-        files.update(journal.execution_files(public))
+            report = ExecutionReport.model_validate(payload["report"])
+            plan = Plan.model_validate(payload["plan"]) if payload.get("plan") else None
+            public = redact.public_execution(
+                report, cycle_id=payload["cycle_id"], lines=ctx.policy.universe, nav_usd=payload["nav_usd"],
+                plan=plan, approved_at=_dt(payload.get("approved_at")),
+                completed_at=_dt(payload.get("completed_at")))
+            record_files = journal.execution_files(public)
+        except Exception as exc:  # noqa: BLE001 - one bad record never stops the watch
+            if unpublished is not None:
+                unpublished.append(f"execution_unpublished:{type(exc).__name__}")
+            continue
+        files.update(record_files)
         published.append(key)
     return published
 
@@ -199,6 +276,21 @@ def _heartbeat(ctx: CycleContext, now: datetime) -> list[str]:
     if now - at > HEARTBEAT_MAX:
         return [f"URGENT no completed cycle since {last['cycle_id']}"]
     return []
+
+
+BACKUP_ERROR = "backup_error"
+
+
+def _daily_backup(ctx: CycleContext, now: datetime) -> list[str]:
+    """Once per UTC day, a private ledger backup (`ops.backup`). Never raises; returns the fixed
+    failure flags. The caller turns a failure into one URGENT per 4 h (a failed backup is retried
+    on every run, so an unthrottled alert would fire every run) and a healthcheck `/fail`."""
+    try:
+        from council.ops import backup
+
+        return list(backup.maybe_daily_backup(ctx.state_dir, now))
+    except Exception as exc:  # noqa: BLE001
+        return [f"{BACKUP_ERROR}:{type(exc).__name__}"]
 
 
 ALERT_WITHHELD = "a watch alert was withheld by the notification leak scan: run `council status`"
@@ -564,14 +656,75 @@ def _flatten_proposal(ctx: CycleContext, snapshot: Any, now: datetime) -> str | 
         return None
     plan = stamp_sessions(plan, ctx.policy.universe, asof=now)
     slot = clock.slot_at_or_before(now)
-    decision_id = f"{clock.cycle_id_for(slot)}-flatten-{uuid.uuid4().hex[:6]}"
+    decision_id = flatten_ref(now)
+    if _decision_state(ctx.ledger, decision_id) is not None:      # same minute: keep ids unique
+        decision_id = f"{decision_id}-{uuid.uuid4().hex[:6]}"
     base_w = dict(snapshot.signed_w)
     for line, w in ctx.ledger.pending_open_weights().items():   # held opens count as held (as at approval)
         base_w[line] = base_w.get(line, 0.0) + w
     ctx.ledger.create_decision(decision_id=decision_id, kind="flatten",
                                valid_until=clock.proposal_valid_until(slot), cycle_id=None,
                                target={"final_w": {}, "base_w": base_w,
-                                       "nav_usd": snapshot.equity_usd},
+                                       "nav_usd": snapshot.equity_usd, "decision_ref": decision_id},
                                plan=plan, state="proposed", now=now, policy_sha=ctx.policy.sha256)
     ctx.ledger.insert_legs(decision_id, plan.legs)
     return decision_id
+
+
+def flatten_ref(now: datetime) -> str:
+    """G14: a watch flatten has no cycle; it is keyed `<minute>-flatten` (e.g.
+    `2026-10-01T1447Z-flatten`), carried as `decision_ref` into the execution report."""
+    return f"{now.astimezone(UTC).strftime('%Y-%m-%dT%H%MZ')}-flatten"
+
+
+# ------------------------------------------------------------------------ token expiry
+TOKEN_EXPIRY_KEY = "token_expiry_checked_day"
+TOKEN_EXPIRY_WARN = timedelta(days=14)
+
+
+def _token_expiry(ctx: CycleContext, now: datetime) -> list[str]:
+    """Once per UTC day: read the Agent Portfolio metadata and warn when a token expires within
+    TOKEN_EXPIRY_WARN (URGENT within 3 days). Read-only; a failure is one rate-limited alert."""
+    ledger, day = ctx.ledger, now.astimezone(UTC).date().isoformat()
+    if ledger.get_runtime(TOKEN_EXPIRY_KEY) == day:
+        return []
+    try:
+        meta = ctx.sources.broker.agent_portfolios()
+    except Exception as exc:  # noqa: BLE001 - retried next run; the alert is rate-limited
+        code = f"broker_error:{broker_error_kind(exc)}"
+        urgent.send_once(ctx, f"token_expiry:{code}", "council watch",
+                         f"token-expiry check failed ({code})", now)
+        return []
+    ledger.set_runtime(TOKEN_EXPIRY_KEY, day)        # only a completed check counts for the day
+    soonest = min(_expiries(meta), default=None)
+    if soonest is None:
+        return []
+    left = soonest - now
+    if left <= timedelta(days=3):
+        return [f"URGENT the Agent Portfolio token expires in {max(0, left.days)} day(s): renew it"]
+    if left <= TOKEN_EXPIRY_WARN:
+        return [f"the Agent Portfolio token expires in {left.days} days: plan its renewal"]
+    return []
+
+
+def _expiries(meta: Any) -> list[datetime]:
+    """Every parseable expiry timestamp in the metadata (keys containing 'expir'), as UTC."""
+    found: list[datetime] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if "expir" in str(key).lower() and isinstance(value, str):
+                    try:
+                        at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    found.append(at if at.tzinfo else at.replace(tzinfo=UTC))
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(meta)
+    return found

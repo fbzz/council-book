@@ -278,6 +278,24 @@ def events_slot(start: datetime, end: datetime) -> datetime:
     return slot if window(slot) == (start, end) else start
 
 
+ONBOARDED_REL = ("account", "onboarded.json")   # written by the operator's onboarding (M5-C)
+
+
+def is_onboarded(state_dir: Path) -> bool:
+    """True once the Agent Portfolio was onboarded (`<state dir>/account/onboarded.json`). From
+    then on a missing broker is a failure (`skipped_broker` + URGENT `keychain_unavailable`), never
+    AWAITING_ACCOUNT again."""
+    try:
+        return state_dir.joinpath(*ONBOARDED_REL).is_file()
+    except OSError:
+        return False
+
+
+def broker_expected(ctx: Any) -> bool:
+    """A live cycle/watch after onboarding must have a broker."""
+    return getattr(ctx.settings, "mode", "") == "live" and is_onboarded(ctx.state_dir)
+
+
 def read_broker(settings: Settings) -> Any | None:
     """The READ-only Agent Portfolio client, or None when the account is not connected yet."""
     from council.operator.keychain import API_KEY_SERVICE, READ_SERVICE, read_secret
@@ -290,8 +308,40 @@ def read_broker(settings: Settings) -> Any | None:
     if not api_key or not token:
         return None
     from council.broker.etoro_read import EtoroReadClient
+    from council.broker.http import BrokerConfigError
 
-    return EtoroReadClient(api_key, token, base_url=settings.etoro_base_url)
+    try:
+        return EtoroReadClient(api_key, token, base_url=settings.etoro_base_url)
+    except BrokerConfigError:
+        # the base URL is outside the pin: no client, no socket; every read fails with the same
+        # fixed error so the cycle records `skipped_broker` and alerts (never AWAITING_ACCOUNT)
+        return UnavailableBroker("config")
+    finally:
+        del api_key, token
+
+
+class UnavailableBroker:
+    """Stands in for a broker that must exist but cannot be built (e.g. a refused base URL).
+    Every read raises `BrokerConfigError` without any network access."""
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+    def __repr__(self) -> str:
+        return f"UnavailableBroker({self.kind!r})"
+
+    def close(self) -> None:
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        from council.broker.http import BrokerConfigError
+
+        def refuse(*_args: Any, **_kwargs: Any) -> Any:
+            raise BrokerConfigError(f"broker unavailable ({self.kind})")
+
+        return refuse
 
 
 def load_policy(root: Path, *, from_head: bool, fallback: bool = False,
@@ -447,6 +497,9 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
 
         clone = publisher_dir or (root / "publisher-clone")
         publisher = Publisher(clone, push=True, ssh_command=_ssh_command(clone.parent))
+        warning = deploy_key_warning(clone)
+        if warning:
+            print(warning, file=sys.stderr)     # fixed text: never the URL (it may carry a token)
 
     notifier = None
     if mode == "live" and settings.ntfy_topic:
@@ -465,7 +518,30 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
 
 
 def _ssh_command(root: Path) -> str | None:
+    """GIT_SSH_COMMAND for the deploy key (G24: the path is shell-quoted, since git runs it through
+    a shell and the state dir, `Application Support`, contains a space)."""
+    import shlex
+
     key = root / "deploy_key"
     if key.exists():
-        return f"ssh -i {key} -o IdentitiesOnly=yes"
+        return f"ssh -i {shlex.quote(str(key))} -o IdentitiesOnly=yes"
     return None
+
+
+DEPLOY_KEY_HTTPS_WARNING = ("warning: a deploy key exists but the publisher remote is HTTPS, so the "
+                            "key is unused; set the remote to the SSH URL (git@github.com:...)")
+
+
+def deploy_key_warning(clone: Path) -> str | None:
+    """G24: the fixed warning when a deploy key exists but the clone's `origin` is an HTTPS URL
+    (the key would silently be ignored). None otherwise, or when the remote cannot be read."""
+    import subprocess
+
+    if not (clone.parent / "deploy_key").exists() or not (clone / ".git").exists():
+        return None
+    try:
+        url = subprocess.run(["git", "-C", str(clone), "remote", "get-url", "origin"],
+                             capture_output=True, text=True, timeout=10, check=False).stdout.strip()
+    except Exception:  # noqa: BLE001 - a warning only
+        return None
+    return DEPLOY_KEY_HTTPS_WARNING if url.lower().startswith(("https://", "http://")) else None

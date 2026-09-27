@@ -1,10 +1,21 @@
 """`council` command line. Imports are lazy on purpose: the unattended runner must never import the
-broker writer, and only `approve`/`flatten` (operator terminal) can reach it."""
+broker writer, and only `approve` (operator terminal) can reach it.
+
+Operator commands (m5-readiness §9.1) carry `@operator_command(<path>, pinned=...)`: they refuse
+unless `guards.assert_current_process_is_operator` passes (COUNCIL_ROLE=operator, both TTYs, no
+agent or CI variable, no agent ancestor process, not under a council launchd job), and a pinned one
+also refuses unless the code is the installed release (`operator.release.assert_release_code`; a
+marked rehearsal sandbox also passes). Coding agents never run them; `ops assert-operator` lets the
+ops scripts ask the same question."""
 
 from __future__ import annotations
 
+import functools
 import json
+import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, NoReturn, TypeVar
 
 import typer
 
@@ -18,11 +29,79 @@ account = typer.Typer(add_completion=False, no_args_is_help=True,
 stocks = typer.Typer(add_completion=False, no_args_is_help=True,
                      help="Quarterly stock sleeve: rank, onboard, corporate actions (READ token only; "
                           "never writes policy/, commits or tags).")
+notify = typer.Typer(add_completion=False, no_args_is_help=True,
+                     help="Operator notifications (ntfy; the topic is private and never printed).")
 app.add_typer(keys, name="keys")
+app.add_typer(notify, name="notify")
 app.add_typer(site, name="site")
 app.add_typer(ops, name="ops")
 app.add_typer(account, name="account")
 app.add_typer(stocks, name="stocks")
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+# command path -> release-pinned: every operator command of §9.1 this CLI defines. Conditional ones
+# (`show` without --why, `doctor --live-read`, `stocks rank` without --no-eligibility) call
+# `require_operator` in their body and are listed here under that variant's path.
+OPERATOR_COMMANDS: dict[str, bool] = {
+    "show": False,
+    "doctor --live-read": True,
+    "stocks rank": True,
+    "purge-licensed": True,
+}
+
+
+def _refuse(message: str) -> NoReturn:
+    typer.echo(f"refused: {message}", err=True)
+    raise typer.Exit(2)
+
+
+def require_operator(path: str, *, pinned: bool) -> None:
+    """Refuse (exit 2) unless this is the human operator's terminal, and, when `pinned`, unless the
+    running code is the installed release (or a marked rehearsal sandbox). `path` names the command
+    in the refusal ("run it from the installed release: council-op <path> ...")."""
+    from council.operator import guards
+
+    try:
+        guards.assert_current_process_is_operator()
+    except guards.GuardError as exc:
+        problems = str(exc).removeprefix("operator command refused: ")
+        _refuse("operator command: COUNCIL_ROLE must be 'operator' in the operator's own terminal, "
+                f"never an agent, CI or launchd ({problems})")
+    if pinned:
+        from council.operator import release
+
+        try:
+            release.assert_release_code(argv=[path, "..."])
+        except release.ReleaseError as exc:
+            _refuse(str(exc))
+
+
+def operator_command(path: str, *, pinned: bool) -> Callable[[F], F]:
+    """Mark a command as operator-only (§9.1); `pinned` also requires the installed release."""
+
+    def decorate(fn: F) -> F:
+        OPERATOR_COMMANDS[path] = pinned
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            require_operator(path, pinned=pinned)
+            return fn(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorate
+
+
+def _refusable(fn: Callable[[], Any]) -> Any:
+    """Run an operator body: ApprovalRefused / ExecutionError -> "refused: ..." and exit 2."""
+    from council.execution.executor import ExecutionError
+    from council.operator.approve import ApprovalRefused
+
+    try:
+        return fn()
+    except (ApprovalRefused, ExecutionError) as exc:
+        _refuse(str(exc))
 
 
 def _register_private_views() -> None:
@@ -37,6 +116,16 @@ def _register_private_views() -> None:
 
 
 _register_private_views()
+
+
+def _pin_registered(name: str) -> None:
+    """Wrap a command another module registered (`purge-licensed`) in the operator decorator."""
+    for info in app.registered_commands:
+        if info.name == name and info.callback is not None:
+            info.callback = operator_command(name, pinned=OPERATOR_COMMANDS[name])(info.callback)
+
+
+_pin_registered("purge-licensed")
 
 
 def _register_why() -> None:
@@ -99,8 +188,9 @@ def watch() -> None:
 
 
 @app.command()
+@operator_command("inbox", pinned=False)
 def inbox() -> None:
-    """Pending proposals."""
+    """Pending proposals (operator terminal)."""
     _root, ledger = _ledger_only()
     for d in ledger.pending():
         typer.echo(f"{d.decision_id}  {d.kind:<10}  {d.state:<20}  {_deadline(d)}")
@@ -145,6 +235,7 @@ def show(
         from council.operator.why import run_why
 
         raise typer.Exit(run_why(decision_id, line=line, source=source, journal_dir=journal_dir))
+    require_operator("show", pinned=OPERATOR_COMMANDS["show"])        # ledger legs: operator terminal only
     from council.context import build_context
     from council.models.plan import Plan
     from council.operator.approve import ApprovalDeps, _screen
@@ -160,17 +251,15 @@ def show(
 
 
 @app.command()
+@operator_command("approve", pinned=True)
 def approve(decision_id: str) -> None:
-    """Approve and execute a proposal (operator terminal only)."""
+    """Approve and execute a proposal (operator terminal, installed release only)."""
     from council.context import build_context, read_broker
     from council.operator.approve import ApprovalDeps, write_client_factory
     from council.operator.approve import approve as do_approve
     from council.settings import Settings
 
     settings = Settings.from_env()
-    if settings.role != "operator":
-        typer.echo("refused: COUNCIL_ROLE must be 'operator' (use the operator terminal)", err=True)
-        raise typer.Exit(2)
     # a rebalance's policy SHA is compared with the policy live cycles run on: the snapshot of the
     # committed HEAD, never the working tree (flatten and compliance execute under it too)
     ctx = build_context(mode="stub", publish="none", settings=settings, policy_from_head=True)
@@ -185,6 +274,7 @@ def approve(decision_id: str) -> None:
 
 
 @app.command()
+@operator_command("reject", pinned=False)
 def reject(decision_id: str, reason: str = typer.Option(..., help="Published with the cycle.")) -> None:
     """Reject a proposal (the reason is published)."""
     from council.context import build_context
@@ -199,6 +289,7 @@ def reject(decision_id: str, reason: str = typer.Option(..., help="Published wit
 
 
 @ops.command("resolve")
+@operator_command("ops resolve", pinned=True)
 def ops_resolve(
     decision_id: str,
     filled: bool = typer.Option(False, "--filled", help="The held order(s) filled (checked in the broker)."),
@@ -206,26 +297,108 @@ def ops_resolve(
 ) -> None:
     """Record what happened to orders held for a closed market (operator terminal, ledger only)."""
     from council.operator.approve import ApprovalDeps, resolve_waiting
-    from council.settings import Settings
 
     if filled == cancelled:
-        typer.echo("refused: pass exactly one of --filled or --cancelled", err=True)
-        raise typer.Exit(2)
-    settings = Settings.from_env()
-    if settings.role != "operator":
-        typer.echo("refused: COUNCIL_ROLE must be 'operator' (use the operator terminal)", err=True)
-        raise typer.Exit(2)
+        _refuse("pass exactly one of --filled or --cancelled")
     root, ledger = _ledger_only()          # ledger only: no policy load, no broker, nothing sent
-    deps = ApprovalDeps(ledger=ledger, policy=None, read=None, write_factory=lambda: None,
+    deps = ApprovalDeps(ledger=ledger, policy=None, read=None, write_factory=_no_writer,
                         state_dir=root, print_fn=typer.echo)
-    resolve_waiting(decision_id, "filled" if filled else "cancelled", deps)
+    _refusable(lambda: resolve_waiting(decision_id, "filled" if filled else "cancelled", deps))
+
+
+@ops.command("review")
+@operator_command("ops review", pinned=True)
+def ops_review(
+    decision_id: str,
+    reason: str = typer.Option(..., "--reason", help="Why no action is needed (published: no amounts or ids)."),
+) -> None:
+    """Clear a blocked decision with no active or waiting leg, after checking the broker (ledger only)."""
+    from council.operator.approve import ApprovalDeps, review_blocked
+
+    root, ledger = _ledger_only()          # ledger only: no policy load, no broker, nothing sent
+    deps = ApprovalDeps(ledger=ledger, policy=None, read=None, write_factory=_no_writer,
+                        state_dir=root, print_fn=typer.echo)
+    _refusable(lambda: review_blocked(decision_id, reason, deps))
+
+
+@ops.command("assert-operator")
+def ops_assert_operator() -> None:
+    """Exit 0 in the operator's own terminal, else 2 with every failed rule (for ops scripts)."""
+    from council.operator import guards
+
+    try:
+        guards.assert_current_process_is_operator()
+    except guards.GuardError as exc:
+        _refuse(str(exc))
+    typer.echo("operator context: ok")
+
+
+@app.command("resume-exec")
+@operator_command("resume-exec", pinned=True)
+def resume_exec(decision_id: str) -> None:
+    """Recover an interrupted, unknown or blocked execution with broker LOOKUPS only (never sends)."""
+    from council.context import build_context, read_broker
+    from council.operator.approve import ApprovalDeps
+    from council.operator.approve import resume_exec as do_resume
+    from council.settings import Settings
+
+    settings = Settings.from_env()
+    ctx = build_context(mode="stub", publish="none", settings=settings, policy_from_head=True)
+    read = read_broker(settings)
+    if read is None:
+        _refuse("no READ token in the keychain")
+    deps = ApprovalDeps(ledger=ctx.ledger, policy=ctx.policy, read=read, write_factory=_no_writer,
+                        state_dir=ctx.state_dir, print_fn=typer.echo)
+    _refusable(lambda: do_resume(decision_id, deps))
+
+
+@app.command("resume")
+@operator_command("resume", pinned=True)
+def resume(reason: str = typer.Option(..., "--reason", help="Why trading may resume (the peak stays).")) -> None:
+    """Leave HALTED/FLAT after recovery. The lifetime peak is unchanged: the next check re-halts
+    while equity is still below the halt line."""
+    from council.operator.approve import ApprovalDeps, resume_kill_switch
+
+    root, ledger = _ledger_only()
+    deps = ApprovalDeps(ledger=ledger, policy=None, read=None, write_factory=_no_writer,
+                        state_dir=root, print_fn=typer.echo)
+    _refusable(lambda: resume_kill_switch(reason, deps))
+
+
+def _no_writer() -> NoReturn:
+    raise RuntimeError("this command never builds a broker writer")
 
 
 @app.command()
-def doctor(live_read: bool = typer.Option(False, "--live-read", help="Probe the broker with the READ token.")) -> None:
-    """Health checks: policy invariants, prompts, keychain entries, Ollama model, disk, jobs."""
+def doctor(
+    live_read: bool = typer.Option(False, "--live-read", help="Probe the broker with the READ token."),
+    ready: bool = typer.Option(False, "--ready", help="Readiness report: every M5 gate with its owner "
+                               "(agent, user, token). Read-only; agents may run it."),
+    track: str = typer.Option("core", "--track", help="With --ready: core (Track C) or stocks (Track S)."),
+    post_token: bool = typer.Option(False, "--post-token", help="With --ready: the token gates must be green."),
+    as_json: bool = typer.Option(False, "--json", help="With --ready: {id, owner, state, code, wp} per gate."),
+    network: bool = typer.Option(False, "--network", help="With --ready: read origin and CI (git ls-remote, gh)."),
+) -> None:
+    """Health checks: policy invariants, prompts, keychain entries, Ollama model, disk, jobs.
+    `--ready` prints the readiness gates instead (m5-readiness §6) and exits 0 ready, 1 not ready,
+    2 on an internal error."""
     import shutil
     import subprocess
+
+    if ready:                               # read-only, no broker or LLM import on this path
+        if live_read:
+            _refuse("--ready and --live-read are separate runs")
+        if track not in ("core", "stocks"):
+            _refuse("--track must be core or stocks")
+        from council.operator.readiness import run_ready
+
+        raise typer.Exit(run_ready(track=track, post_token=post_token, as_json=as_json, network=network,
+                                   echo=typer.echo))
+    if post_token or as_json or network or track != "core":
+        _refuse("--track, --post-token, --json and --network need --ready")
+
+    if live_read:                           # the READ token: operator terminal, installed release
+        require_operator("doctor --live-read", pinned=OPERATOR_COMMANDS["doctor --live-read"])
 
     from council import paths
     from council.invariants import check_policy
@@ -249,6 +422,8 @@ def doctor(live_read: bool = typer.Option(False, "--live-read", help="Probe the 
     line("prompts manifest", bool(reg.manifest()), reg.manifest_sha()[:12])
     free = shutil.disk_usage(paths.state_dir().parent).free / 1024**3
     line("free disk", free >= 3, f"{free:.1f} GiB")
+    power_good, power_detail = _power_check()
+    line("power: AC sleep", power_good, power_detail)
     for service in ("council-book.tiingo", "council-book.etoro.api-key", "council-book.etoro.read"):
         found = subprocess.run(["security", "find-generic-password", "-s", service, "-a", "council"],
                                capture_output=True).returncode == 0
@@ -288,6 +463,22 @@ def doctor(live_read: bool = typer.Option(False, "--live-read", help="Probe the 
     raise typer.Exit(0 if ok else 1)
 
 
+def _power_check() -> tuple[bool, str]:
+    """`pmset -g custom`: the Mac must not sleep on AC power (m5-readiness E2), unless the operator
+    attested `power-ok`. Read-only; the parser is the readiness probe's."""
+    from council.operator.readiness import Probes
+
+    probes = Probes.default()
+    sleep = probes.ac_sleep()
+    if sleep == 0:
+        return True, "AC sleep 0"
+    if probes.attested("power-ok"):
+        return True, "AC sleep on; accepted by the power-ok attestation"
+    if sleep is None:
+        return False, "pmset -g custom gave no AC sleep value"
+    return False, f"AC sleep {sleep} min: sudo pmset -c sleep 0, or council-op ops attest power-ok"
+
+
 @app.command()
 def verify(cycle_id: str, journal_dir: Path = typer.Option(Path("journal"))) -> None:
     """Re-hash a revealed cycle against its commitment."""
@@ -303,50 +494,124 @@ def verify(cycle_id: str, journal_dir: Path = typer.Option(Path("journal"))) -> 
 
 
 # --------------------------------------------------------------------------------- keys
-def _operator_only() -> None:
-    from council.settings import Settings
+SANDBOX_VARIABLES = ("COUNCIL_STATE_DIR", "COUNCIL_KEYCHAIN_FILE", "COUNCIL_ETORO_BASE_URL")
 
-    if Settings.from_env().role != "operator":
-        typer.echo("refused: COUNCIL_ROLE must be 'operator'", err=True)
-        raise typer.Exit(2)
+
+def _key_store_target() -> Path | None:
+    """Where eToro items go: None = the real keychains. Outside a marked rehearsal sandbox a
+    leftover rehearsal variable refuses (it could redirect the state dir, the keychain or the
+    broker); inside one, eToro items go ONLY to COUNCIL_KEYCHAIN_FILE (never the login keychain)."""
+    from council.operator import release
+
+    if release.is_marked_sandbox():
+        keychain_file = os.environ.get("COUNCIL_KEYCHAIN_FILE", "").strip()
+        if not keychain_file:
+            _refuse("rehearsal sandbox without COUNCIL_KEYCHAIN_FILE: eToro items are never stored in "
+                    "the login keychain under the REHEARSAL marker")
+        return Path(keychain_file).expanduser()
+    leftover = [name for name in SANDBOX_VARIABLES if name in os.environ]
+    if leftover:
+        _refuse(f"{', '.join(leftover)} set outside a marked rehearsal sandbox (a leftover rehearsal "
+                "variable?): unset it and run the command again")
+    return None
 
 
 @keys.command("init-write-keychain")
+@operator_command("keys init-write-keychain", pinned=True)
 def keys_init() -> None:
     """Create the separate, auto-locking keychain that holds only the WRITE token."""
-    _operator_only()
+    _key_store_target()
     from council.operator.keychain import create_write_keychain
 
     typer.echo(f"created {create_write_keychain()}")
 
 
 @keys.command("store-read")
+@operator_command("keys store-read", pinned=True)
 def keys_store_read() -> None:
     """Store the developer app key and the Agent Portfolio READ token (no echo)."""
-    _operator_only()
+    target = _key_store_target()
     from council.operator.keychain import API_KEY_SERVICE, READ_SERVICE, store_token_interactive
 
-    store_token_interactive(API_KEY_SERVICE, None)          # None: the login keychain
-    store_token_interactive(READ_SERVICE, None)
+    store_token_interactive(API_KEY_SERVICE, target)        # None: the login keychain
+    store_token_interactive(READ_SERVICE, target)
     typer.echo("stored")
 
 
 @keys.command("store-write")
+@operator_command("keys store-write", pinned=True)
 def keys_store_write() -> None:
     """Store the Agent Portfolio WRITE token in the separate write keychain (no echo)."""
-    _operator_only()
+    target = _key_store_target()
     from council.operator.keychain import (
         WRITE_SERVICE,
         store_token_interactive,
         write_keychain_path,
     )
 
-    store_token_interactive(WRITE_SERVICE, keychain=write_keychain_path())
+    store_token_interactive(WRITE_SERVICE, keychain=target if target is not None else write_keychain_path())
     typer.echo("stored")
+
+
+@keys.command("store")
+@operator_command("keys store", pinned=False)
+def keys_store(name: str = typer.Argument(..., help="tiingo, fred, alpaca (key id + secret), "
+                                          "alpaca-key-id, alpaca-secret, sec-user-agent, gov-user-agent, "
+                                          "ntfy-topic (ntfy), healthcheck-url (healthcheck), soak-probe")) -> None:
+    """Store one allow-listed non-broker Keychain item (no echo; the value never reaches argv)."""
+    from council.operator import keystore
+    from council.operator.keychain import KeychainError
+
+    try:
+        items = keystore.resolve(name)
+    except KeychainError as exc:
+        _refuse(str(exc))
+    target = _key_store_target()                             # None: the login keychain
+    for item in items:
+        try:
+            keystore.store_item(item, target)
+        except KeychainError as exc:
+            _refuse(str(exc))
+        typer.echo(f"stored {item.service}")
+
+
+# --------------------------------------------------------------------------------- notify
+NOTIFY_TEST_TITLE = "council-book: notification test"
+NOTIFY_TEST_BODY = ("If this reached your phone, ntfy works. Next: council-op ops attest ntfy-received")
+
+
+@notify.command("test")
+@operator_command("notify test", pinned=False)
+def notify_test() -> None:
+    """Send exactly one ntfy message to the configured topic (env, else the Keychain item
+    council-book.ntfy-topic). Prints neither the topic nor a delivery error's text."""
+    from datetime import time
+    from zoneinfo import ZoneInfo
+
+    from council.operator.notify import ApprovalWindow, Notifier
+    from council.settings import Settings
+
+    topic = Settings.from_env(keychain=True).ntfy_topic
+    if not topic:
+        typer.echo("no ntfy topic: council-op keys store ntfy-topic (council-book.ntfy-topic)", err=True)
+        raise typer.Exit(1)
+    always = ApprovalWindow(tz=ZoneInfo("UTC"), start=time(0), end=time.max)
+    notifier = Notifier(topic, window=always, macos=False)
+    del topic
+    try:
+        result = notifier.send(NOTIFY_TEST_TITLE, NOTIFY_TEST_BODY, priority="default")
+    except Exception as exc:              # the topic may sit in a transport error: the type only
+        typer.echo(f"ntfy delivery failed ({type(exc).__name__})", err=True)
+        raise typer.Exit(1) from None
+    if result.sent != ("ntfy",):
+        typer.echo(f"not sent ({result.reason or 'no channel'})", err=True)
+        raise typer.Exit(1)
+    typer.echo("sent one test message; if it arrived: council-op ops attest ntfy-received")
 
 
 # --------------------------------------------------------------------------------- account
 @account.command("set-mirror")
+@operator_command("account set-mirror", pinned=False)
 def account_set_mirror(
     ratio: float = typer.Option(None, "--ratio", help="Real funding / virtual NAV."),
     funding_usd: float = typer.Option(None, "--funding-usd", help="Real funding in USD (with --virtual-nav-usd)."),
@@ -354,7 +619,6 @@ def account_set_mirror(
 ) -> None:
     """Store the mirror ratio privately (state_dir/account/mirror.json, 0600). It prices the $1 fixed
     fee and the real-dollar trade floor as NAV shares; never published, never sent anywhere."""
-    _operator_only()
     from council import paths
     from council.operator.mirror import MirrorError, set_mirror
 
@@ -411,6 +675,9 @@ def stocks_rank(
     """Rank the universe and write a proposed stock-sleeve.yaml under the state dir (never policy/)."""
     from datetime import date
 
+    if not no_eligibility:                  # the broker gate reads the READ token
+        require_operator("stocks rank", pinned=OPERATOR_COMMANDS["stocks rank"])
+
     from council import paths
     from council.clock import utcnow
     from council.settings import Settings
@@ -430,6 +697,7 @@ def stocks_rank(
 
 
 @stocks.command("onboard")
+@operator_command("stocks onboard", pinned=True)
 def stocks_onboard() -> None:
     """After the sleeve is committed and tagged: resolve its instruments and re-run the broker gate."""
     from council import paths
@@ -442,6 +710,7 @@ def stocks_onboard() -> None:
 
 
 @stocks.command("adopt")
+@operator_command("stocks adopt", pinned=True)
 def stocks_adopt(
     instrument_id: int,
     kind: str = typer.Option(None, "--kind", help="credit | rename | delisted (when the facts fit several)."),
@@ -460,6 +729,7 @@ def stocks_adopt(
 
 
 @stocks.command("status")
+@operator_command("stocks status", pinned=True)
 def stocks_status(live_read: bool = typer.Option(False, "--live-read",
                                                  help="Check retiring lines against a READ snapshot.")) -> None:
     """Tag state, roles, unchecked lines, retiring flatness, corporate actions, budgets, fee drag."""
@@ -473,6 +743,7 @@ def stocks_status(live_read: bool = typer.Option(False, "--live-read",
 
 
 @stocks.command("prune")
+@operator_command("stocks prune", pinned=True)
 def stocks_prune() -> None:
     """Propose moving flat, untouched retiring lines to the retired registry."""
     from council import paths

@@ -5,7 +5,8 @@ Rules (all must hold, otherwise GuardError lists every failed rule):
 - stdin and stdout are both TTYs.
 - None of CI, GITHUB_ACTIONS, CLAUDECODE, COUNCIL_AGENT_CONTEXT or any CLAUDE_CODE_* variable is
   set (present with any value, even empty, counts as set).
-- XPC_SERVICE_NAME does not start with "com.fbzz.council" (the launchd jobs).
+- XPC_SERVICE_NAME does not start with "com.fbzz." (any of the user's launchd jobs: council, rehearsal,
+  soak; m5-readiness M5-B).
 - No ancestor process name contains claude, codex, hermes, ollama, node or openclaw.
 - A typed nonce shown on the confirmation screen (never sent in notifications) must match.
 """
@@ -21,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 FORBIDDEN_ENV = ("CI", "GITHUB_ACTIONS", "CLAUDECODE", "COUNCIL_AGENT_CONTEXT")
 FORBIDDEN_ENV_PREFIXES = ("CLAUDE_CODE_",)
-LAUNCHD_PREFIX = "com.fbzz.council"
+LAUNCHD_PREFIX = "com.fbzz."
 FORBIDDEN_ANCESTORS = ("claude", "codex", "hermes", "ollama", "node", "openclaw")
 NONCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O, 1/I
 MAX_ANCESTOR_DEPTH = 64

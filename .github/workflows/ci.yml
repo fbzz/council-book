@@ -1,6 +1,7 @@
 # Tests, lint, the public-record leak scan, gitleaks and the noreply-identity check.
-# Actions are pinned to major versions for now. TODO before go-live: pin every `uses:` to a full
-# commit SHA (with the version in a comment) and let Dependabot bump them.
+# Every `uses:` is pinned to a full commit SHA with its release in a comment; Dependabot
+# (.github/dependabot.yml) proposes the bumps weekly. tests/boundaries/test_ci_config.py fails on an
+# unpinned action.
 name: ci
 
 on:
@@ -20,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4          # TODO: SHA-pin before go-live
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6        # TODO: SHA-pin before go-live
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           python-version: "3.13"
           enable-cache: true
@@ -38,18 +39,53 @@ jobs:
       - name: Site builds and passes the leak scan
         run: uv run python site/build.py --out _site
 
+  m5-acceptance:
+    # The named acceptance tests of every landed M5 / transparency package (m5-readiness §6 R6):
+    # the node ids come from council.operator.readiness.ACCEPTANCE. `council doctor --ready
+    # --network` reads this job's result on the release commit (R3, R6, P1, LC2, LC3); a package
+    # whose tests do not exist yet is reported by R6 as "not built", not failed here.
+    name: m5-acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+      - name: Named acceptance tests (no network, no LLM, no broker)
+        run: |
+          set -euo pipefail
+          mapfile -t ids < <(uv run python -m council.operator.readiness acceptance-ids)
+          test "${#ids[@]}" -gt 0
+          printf '%s\n' "${ids[@]}"
+          uv run pytest -m "not live" "${ids[@]}"
+
   gitleaks:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4          # TODO: SHA-pin before go-live
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: gitleaks (full history)
-        # the binary directly: gitleaks-action cannot diff a repository's first push
+        # the binary directly: gitleaks-action cannot diff a repository's first push. The tarball
+        # is checked against the sha256 published in the release's gitleaks_<ver>_checksums.txt
+        # before it is unpacked; bump the version and the digest together.
+        env:
+          GITLEAKS_VERSION: "8.24.3"
+          GITLEAKS_SHA256: "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz | tar xz -C /tmp gitleaks
+          set -eu
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "/tmp/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
+          echo "${GITLEAKS_SHA256}  /tmp/$tarball" | sha256sum -c -
+          tar xzf "/tmp/$tarball" -C /tmp gitleaks
           /tmp/gitleaks git --redact --verbose --exit-code 1 --config .gitleaks.toml .
 
   identity:
@@ -57,13 +93,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4          # TODO: SHA-pin before go-live
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Every author and committer e-mail is a GitHub noreply address
+        # Authors must be @users.noreply.github.com addresses. A committer may also be GitHub's
+        # own web-flow identity (exactly noreply@github.com), which commits Dependabot's branches
+        # and web-UI merges; fetch-depth 0 brings those branches into `git log --all`.
         run: |
-          bad=$(git log --all --format='%ae%n%ce' | sort -u | grep -v -E '@users\.noreply\.github\.com$' || true)
+          bad=$( { git log --all --format='%ae'
+                   git log --all --format='%ce' | grep -v -x -F 'noreply@github.com' || true; } \
+                 | sort -u | grep -v -E '@users\.noreply\.github\.com$' || true)
           if [ -n "$bad" ]; then
             echo "::error::$(printf '%s\n' "$bad" | wc -l | tr -d ' ') commit identity(ies) are not noreply addresses"
             exit 1

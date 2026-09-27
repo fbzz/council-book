@@ -8,6 +8,9 @@ Rules:
   and unlocking it is interactive: the human types the password at the `security` prompt.
 - A password or token is never placed on a command line (visible to `ps`); tokens are stored by
   feeding `security -i` on stdin.
+- Any `council-book.etoro.*` item is refused in an agent context (CLAUDECODE, any CLAUDE_CODE_*
+  variable, or an agent ancestor from `guards.FORBIDDEN_ANCESTORS`) BEFORE `security` runs.
+  COUNCIL_AGENT_CONTEXT is deliberately NOT an agent signal here: the launchd runner sets it.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import os
 import re
 import shlex
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from council import paths
@@ -25,6 +28,9 @@ from council import paths
 READ_SERVICE = "council-book.etoro.read"
 WRITE_SERVICE = "council-book.etoro.write"
 API_KEY_SERVICE = "council-book.etoro.api-key"
+BROKER_SERVICE_PREFIX = "council-book.etoro."
+AGENT_ENV = ("CLAUDECODE",)
+AGENT_ENV_PREFIXES = ("CLAUDE_CODE_",)
 DEFAULT_ACCOUNT = "council"
 WRITE_KEYCHAIN_NAME = "council-write.keychain-db"
 AUTO_LOCK_SECONDS = 60
@@ -50,16 +56,69 @@ def _is_write_keychain(keychain: Path | str | None) -> bool:
     return Path(keychain).expanduser().resolve() == write_keychain_path().resolve()
 
 
+def _process_ancestors() -> list[str]:
+    from council.operator.guards import process_ancestors
+
+    return process_ancestors()
+
+
+def agent_context_signals(
+    env: Mapping[str, str], ancestors: Sequence[str]
+) -> list[str]:
+    """Why this process looks like an agent (empty = not an agent). Pure."""
+    from council.operator.guards import FORBIDDEN_ANCESTORS
+
+    found = [f"{name} is set" for name in AGENT_ENV if name in env]
+    found += [f"{name} is set" for name in sorted(env) if name.startswith(AGENT_ENV_PREFIXES)]
+    for proc in ancestors:
+        lowered = str(proc).lower()
+        hit = next((word for word in FORBIDDEN_ANCESTORS if word in lowered), None)
+        if hit:
+            found.append(f"ancestor process matches {hit!r}")
+    return found
+
+
+def assert_not_agent_for_broker(
+    service: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    ancestors: Sequence[str] | None = None,
+) -> None:
+    """Refuse a `council-book.etoro.*` lookup in an agent context. Fails closed: if the ancestors
+    cannot be inspected, the lookup is refused."""
+    if not service.startswith(BROKER_SERVICE_PREFIX):
+        return
+    environ = env if env is not None else os.environ
+    signals = agent_context_signals(environ, [])
+    if not signals:
+        if ancestors is None:
+            try:
+                ancestors = _process_ancestors()
+            except Exception as exc:  # GuardError or OSError: fail closed
+                raise KeychainError(
+                    "broker credentials refused: cannot inspect ancestor processes"
+                ) from exc
+        signals = agent_context_signals({}, ancestors)
+    if signals:
+        raise KeychainError(
+            "broker credentials are never readable from an agent context ("
+            + "; ".join(signals) + ")"
+        )
+
+
 def read_secret(
     service: str,
     account: str = DEFAULT_ACCOUNT,
     keychain: Path | str | None = None,
     *,
     runner: Runner = subprocess.run,
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
+    ancestors: Sequence[str] | None = None,
 ) -> str:
     """`security find-generic-password -s <service> -a <account> -w [keychain]`.
-    The write token (service or keychain) is readable only when COUNCIL_ROLE=operator."""
+    The write token (service or keychain) is readable only when COUNCIL_ROLE=operator, and no
+    broker item is readable from an agent context (checked before `security` runs)."""
+    assert_not_agent_for_broker(service, env=env, ancestors=ancestors)
     role = (env if env is not None else os.environ).get("COUNCIL_ROLE")
     if (service == WRITE_SERVICE or _is_write_keychain(keychain)) and role != "operator":
         raise KeychainError("the write token is readable only from the operator terminal")

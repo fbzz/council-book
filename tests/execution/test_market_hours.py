@@ -36,6 +36,7 @@ from council.operator.approve import (
 from council.operator.approve import approve as do_approve
 from council.policy import LineSpec, Signal, Vehicle, Vehicles
 from council.risk.exposure import snapshot_from_pnl
+from tests.cli.operator_sim import simulate_operator
 from tests.execution.helpers import INSTRUMENTS, NAV, plan_of
 
 # symbol -> (instrument id, bid, ask, settlement); INSTRUMENTS adds SPX500, NSDQ100, GOLD, EURUSD
@@ -822,7 +823,7 @@ def test_approve_runs_under_the_committed_head_policy(monkeypatch):
         raise RuntimeError("stop before the broker")
 
     monkeypatch.setattr(context, "build_context", fake_build_context)
-    monkeypatch.setenv("COUNCIL_ROLE", "operator")
+    simulate_operator(monkeypatch)                  # operator terminal, installed release (M5-B)
     result = CliRunner().invoke(app, ["approve", "d1"])
     assert isinstance(result.exception, RuntimeError)
     assert seen["policy_from_head"] is True and seen["mode"] == "stub"
@@ -842,7 +843,7 @@ def test_inbox_and_ops_resolve_need_only_the_ledger(market, make_executor, appro
 
     monkeypatch.setattr(context, "build_context", no_policy)
     monkeypatch.setenv("COUNCIL_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("COUNCIL_ROLE", "operator")
+    simulate_operator(monkeypatch)                  # operator terminal, installed release (M5-B)
     inbox = CliRunner().invoke(app, ["inbox"])
     assert inbox.exit_code == 0, inbox.output
     assert decision in inbox.output and "held until the market opens" in inbox.output

@@ -341,6 +341,9 @@ def test_an_unsafe_document_writes_nothing_and_echoes_nothing(env, monkeypatch):
 
 
 def _cli(monkeypatch, env: Env, args: list[str]):
+    from tests.cli.operator_sim import simulate_operator
+
+    simulate_operator(monkeypatch)       # `stocks rank` with the broker gate is an operator command (M5-B)
     monkeypatch.setattr(commands, "live_rank_services",
                         lambda root, settings, *, eligibility, prefetch=True: env.fakes.services())
     monkeypatch.setattr(commands, "default_repo", lambda: env.repo)

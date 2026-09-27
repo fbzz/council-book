@@ -44,8 +44,12 @@ Rules (each one has a chaos test against broker/fake.py):
   holds only the stock sleeve (the next cycle's start raises `satellite:corporate_action_pending`).
   A credited line's position without a stop is the warning `credited_no_sl:<line>`. Both are
   recorded as reasons; every other unknown position or missing stop still blocks.
-- `resume` does lookups and reconcile ONLY and never sends an order. A leg that provably never
-  reached the broker (clean not-found) is marked skipped: it needs a fresh proposal and approval.
+- `resume` does lookups and reconcile ONLY and never sends an order: for its duration the write
+  client is a `NoWriteClient` whatever the executor was built with, and `_submit` refuses before any
+  leg state changes (`WriteRefused`). A leg that provably never reached the broker (clean
+  not-found) is marked skipped: it needs a fresh proposal and approval. `resume` accepts an
+  executing, execution_unknown or blocked decision; a blocked one only gets its lookups and
+  reconcile noted (blocked is cleared only by an operator review, `council ops review`).
 - One executor at a time: an exclusive lock file in the private state dir.
 - Constructing an executor WITH a write client runs `operator.guards.assert_operator_context` on
   the real process context (env, TTYs, ancestor processes) and raises GuardError outside a human
@@ -68,7 +72,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, NoReturn, Protocol, TypeVar
 
 from pydantic import Field
 
@@ -124,6 +128,7 @@ CANCEL_ATTEMPT = 90          # request-id attempt number reserved for a leg's ca
 WAITING_GRACE_H = 1.0        # a held order unresolved 1 h after the next full session closes → blocked
 MARKET_CLOSED = "market_closed"
 CANCELLED_MARKET_CLOSED = "cancelled_market_closed"
+RESUMABLE_STATES = frozenset({"executing", "execution_unknown", "blocked"})
 
 T = TypeVar("T")
 
@@ -139,6 +144,30 @@ class ExecutionError(RuntimeError):
 
 class ExecutionLocked(ExecutionError):  # noqa: N818 - reads as a state
     pass
+
+
+class WriteRefused(ExecutionError):  # noqa: N818 - reads as a refusal
+    """A write was attempted while the executor runs lookups only (resume)."""
+
+
+class NoWriteClient:
+    """The write client `resume` runs with: every write raises `WriteRefused`, so a recovery path
+    that tried to send, modify or cancel an order fails closed instead. It never declares the
+    cancel route verified."""
+
+    CANCEL_ROUTE_VERIFIED = False
+
+    def open_order(self, *_args: Any, **_kwargs: Any) -> NoReturn:
+        raise WriteRefused("resume is lookups only: open_order refused, nothing was sent")
+
+    def close_position(self, *_args: Any, **_kwargs: Any) -> NoReturn:
+        raise WriteRefused("resume is lookups only: close_position refused, nothing was sent")
+
+    def patch_stop_loss(self, *_args: Any, **_kwargs: Any) -> NoReturn:
+        raise WriteRefused("resume is lookups only: patch_stop_loss refused, nothing was sent")
+
+    def cancel_order(self, *_args: Any, **_kwargs: Any) -> NoReturn:
+        raise WriteRefused("resume is lookups only: cancel_order refused, nothing was sent")
 
 
 class WriteClient(Protocol):
@@ -374,25 +403,29 @@ class Executor:
     def resume(self, decision_id: str) -> ExecutionReport:
         """Recover an interrupted or unknown execution with lookups and reconcile only."""
         decision = self.ledger.get_decision(decision_id)
-        if decision.state not in ("executing", "execution_unknown"):
+        if decision.state not in RESUMABLE_STATES:
             raise ExecutionError(f"{decision_id} is {decision.state}; nothing to resume")
         rows = self.ledger.legs(decision_id)
         legs = [_LegCtx.from_row(r) for r in rows]
-        with self._lock():
-            self._load_symbols(legs)
-            run = _Run(decision_id, legs, before=self._portfolio(), allow_cancel=False)
-            try:
-                for row, leg in zip(rows, legs, strict=True):
-                    if row.state in LEG_ACTIVE_STATES:
-                        self._recover(run, leg, row)
-                    else:
-                        self._account_existing(run, leg, row)
-                return self._finish(
-                    run, skip_reason="not sent before the interruption; needs a fresh approval"
-                )
-            except Exception as exc:
-                self._fail_closed(run, exc)
-                raise
+        writer, self.write = self.write, NoWriteClient()     # lookups only, whatever we were built with
+        try:
+            with self._lock():
+                self._load_symbols(legs)
+                run = _Run(decision_id, legs, before=self._portfolio(), allow_cancel=False)
+                try:
+                    for row, leg in zip(rows, legs, strict=True):
+                        if row.state in LEG_ACTIVE_STATES:
+                            self._recover(run, leg, row)
+                        else:
+                            self._account_existing(run, leg, row)
+                    return self._finish(
+                        run, skip_reason="not sent before the interruption; needs a fresh approval"
+                    )
+                except Exception as exc:
+                    self._fail_closed(run, exc)
+                    raise
+        finally:
+            self.write = writer
 
     # ================================================================== phases
     def _run_closes(self, run: _Run) -> None:
@@ -917,11 +950,14 @@ class Executor:
         except (BrokerError, ValueError) as exc:
             run.reason(f"post-execution reconcile unavailable ({type(exc).__name__})")
         final = self._final_state(run, rec)
-        if final == WAITING_STATE:
-            self.ledger.set_blocker_scope(run.decision_id, self._blocker_scope(run.decision_id), now=now)
         current = self.ledger.get_decision(run.decision_id).state
         reason = "; ".join(run.reasons) or final
         if current != final and can_transition(current, final):
+            # the scope is set only with the move to waiting: a resumed BLOCKED decision that stays
+            # blocked keeps its full blocker (a satellite scope would free the core cycle without
+            # the operator review that alone clears blocked)
+            if final == WAITING_STATE:
+                self.ledger.set_blocker_scope(run.decision_id, self._blocker_scope(run.decision_id), now=now)
             self.ledger.transition(run.decision_id, final, reason, actor=ACTOR, now=now)
         else:
             self.ledger.note(run.decision_id, f"resume: still {current}: {reason}", actor=ACTOR, now=now)
@@ -1027,6 +1063,8 @@ class Executor:
     ) -> _Sent:
         """Persist `submitting` + request id, then send exactly once per attempt. Only a definite
         429 earns another attempt (new request id), after the limiter pauses for Retry-After."""
+        if isinstance(self.write, NoWriteClient):
+            raise WriteRefused(f"{leg.symbol}: resume is lookups only; nothing was sent")
         attempt = 0
         while True:
             request_id = leg_request_id(run.decision_id, leg.seq, attempt)

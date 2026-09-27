@@ -3,7 +3,7 @@
 `store-read` used to raise a TypeError: the CLI called `store_token_interactive(service)` without its
 positional `keychain` argument, and the existing tests only called the function directly. Here the
 real CLI runs with a fake `getpass` and a fake `security` runner (no real Keychain is touched):
-- both commands exit 0 in a simulated operator context (COUNCIL_ROLE=operator);
+- both commands exit 0 in a simulated operator context (`tests.cli.operator_sim`);
 - no token is ever on a command line: every `security` call is exactly `security -i`, and the
   value travels on its stdin;
 - the READ items (the app key and the READ token) land in the default (login) keychain, the WRITE
@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from council.cli import app
 from council.operator import keychain
+from tests.cli.operator_sim import simulate_operator
 
 # built at runtime so no literal token-shaped string sits in the source (see .gitleaksignore)
 TOKENS = {
@@ -65,8 +66,14 @@ def security(monkeypatch) -> FakeSecurity:
 
 
 @pytest.fixture
-def operator(monkeypatch):
-    monkeypatch.setenv("COUNCIL_ROLE", "operator")
+def operator(monkeypatch, tmp_path):
+    """The simulated operator terminal from the installed release (M5-B): the real guard rules
+    pass, and no rehearsal variable is left over (keys store-* refuse one, see test_operator_commands).
+    HOME is a tmp dir, so the default state dir is never the real one."""
+    simulate_operator(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for name in ("COUNCIL_STATE_DIR", "COUNCIL_KEYCHAIN_FILE", "COUNCIL_ETORO_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _run(*args: str):

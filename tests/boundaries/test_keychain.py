@@ -30,7 +30,7 @@ class FakeSecurity:
 
 def test_read_secret_builds_the_find_command():
     fake = FakeSecurity(stdout=TOKEN + "\n")
-    assert keychain.read_secret(keychain.READ_SERVICE, runner=fake) == TOKEN
+    assert keychain.read_secret(keychain.READ_SERVICE, runner=fake, env={}, ancestors=[]) == TOKEN
     cmd = fake.calls[0][0]
     assert cmd == ["/usr/bin/security", "find-generic-password", "-s", "council-book.etoro.read", "-a", "council", "-w"]
 
@@ -38,19 +38,20 @@ def test_read_secret_builds_the_find_command():
 def test_missing_item_raises_without_leaking():
     fake = FakeSecurity(stdout=TOKEN, returncode=44)
     with pytest.raises(KeychainError) as err:
-        keychain.read_secret(keychain.READ_SERVICE, runner=fake)
+        keychain.read_secret(keychain.READ_SERVICE, runner=fake, env={}, ancestors=[])
     assert TOKEN not in str(err.value)
 
 
 def test_write_token_needs_the_operator_role():
     fake = FakeSecurity(stdout=TOKEN)
     with pytest.raises(KeychainError, match="operator"):
-        keychain.read_secret(keychain.WRITE_SERVICE, runner=fake, env={"COUNCIL_ROLE": "runner"})
+        keychain.read_secret(keychain.WRITE_SERVICE, runner=fake, env={"COUNCIL_ROLE": "runner"},
+                             ancestors=[])
     with pytest.raises(KeychainError, match="operator"):
         keychain.read_secret("anything", keychain=keychain.write_keychain_path(), runner=fake, env={})
     assert fake.calls == []
     assert keychain.read_secret(keychain.WRITE_SERVICE, keychain=keychain.write_keychain_path(), runner=fake,
-                                env={"COUNCIL_ROLE": "operator"}) == TOKEN
+                                env={"COUNCIL_ROLE": "operator"}, ancestors=[]) == TOKEN
     assert fake.calls[0][0][-1] == str(keychain.write_keychain_path())
 
 
