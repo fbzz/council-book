@@ -1,2 +1,6 @@
 # Synthetic test token committed before it was rewritten to a runtime-built fake (not a real secret).
 3b08922f16700159ebfd4dee4bec3c6e80403705:tests/boundaries/test_keychain.py:generic-api-key:13
+# False positives (2026-09-27): a ledger key name (variable ends in _KEY), a test healthcheck URL with a fake UUID, a test canary string.
+49dbff887927ef094a5d81bdff32b17026b81a81:src/council/cycle.py:generic-api-key:361
+c292840787e36ed42a41124719aec2c607aa1443:tests/unit/test_settings_keychain_fallback.py:council-healthcheck-ping-url:18
+c292840787e36ed42a41124719aec2c607aa1443:tests/operator/test_ops_hooks.py:generic-api-key:21
