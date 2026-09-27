@@ -38,6 +38,12 @@ Rules (each one has a chaos test against broker/fake.py):
   stop-loss, unknown position or a broken fill → blocked; a waiting leg → waiting_for_market;
   any rejected/skipped/partial leg → completed_partial; drift ≤ risk.reconcile.drift_max →
   completed; otherwise blocked.
+- Corporate actions at reconcile (design §3.6, `stocks.corporate.reconcile_corporate`): a position no
+  line owns that no open leg of ours created (spin-off shares before `council stocks adopt`) is not
+  an unknown position and its missing stop does not block: it is a pending corporate action, which
+  holds only the stock sleeve (the next cycle's start raises `satellite:corporate_action_pending`).
+  A credited line's position without a stop is the warning `credited_no_sl:<line>`. Both are
+  recorded as reasons; every other unknown position or missing stop still blocks.
 - `resume` does lookups and reconcile ONLY and never sends an order. A leg that provably never
   reached the broker (clean not-found) is marked skipped: it needs a fresh proposal and approval.
 - One executor at a time: an exclusive lock file in the private state dir.
@@ -905,6 +911,7 @@ class Executor:
             after = self._portfolio()
             snapshot = snapshot_from_portfolio(after, now)
             rec = reconcile(snapshot, self._targets(run.decision_id), run.expected, self.policy)
+            rec = self._corporate_reconcile(run, rec, after.positions)
             self.ledger.record_positions(now, after.positions, decision_id=run.decision_id, source="post_execution")
             self.ledger.add_equity_mark(now, after.equity_usd, credit_usd=after.credit_usd, source="post_execution")
         except (BrokerError, ValueError) as exc:
@@ -921,7 +928,36 @@ class Executor:
             final = current  # type: ignore[assignment]
         return self._report(run, final, rec, after)  # type: ignore[arg-type]
 
+    def _corporate_reconcile(self, run: _Run, rec: ReconcileResult, positions: Sequence[Any]) -> ReconcileResult:
+        """The reconcile `_final_state` judges, with corporate actions taken out
+        (`stocks.corporate.reconcile_corporate`): a pending action (a position no line owns that no
+        open leg of ours created) is not an unknown position and its missing stop does not block, and
+        a credited line without a stop is a warning. Both become reasons; the pending action holds
+        only the stock sleeve, at the next cycle's start. Every other problem stays. Without a stock
+        sleeve nothing changes (no cycle check would hold anything, so an unknown position blocks).
+        A failure of the corporate step keeps the plain reconcile (fail closed: an unknown position
+        still blocks) and records why; it never breaks the post-trade finish."""
+        from council.stocks import corporate
+
+        if not corporate.sleeve_active(self.policy):
+            return rec
+        try:
+            fixed, warnings, blockers = corporate.reconcile_corporate(
+                rec, list(positions), self.policy, opened=corporate.opened_position_ids(self.ledger))
+        except Exception as exc:  # noqa: BLE001 - after orders were sent, never crash the finish
+            run.reason(f"corporate-action reconcile unavailable ({type(exc).__name__}); the plain "
+                       "reconcile applies")
+            return rec
+        for warning in warnings:
+            run.reason(f"warning {warning}: a credited position without a stop-loss (sold at the next US session)")
+        if blockers:
+            run.reason("corporate action pending: an unknown position no leg of ours opened; the stock "
+                       "sleeve is held until `council stocks adopt`")
+        return fixed
+
     def _final_state(self, run: _Run, rec: ReconcileResult | None) -> str:
+        """The decision's final state from the run and the post-execution reconcile (after
+        `_corporate_reconcile`: pending corporate actions and credited positions do not block)."""
         if run.unknown:
             return "execution_unknown"
         if run.blocked:

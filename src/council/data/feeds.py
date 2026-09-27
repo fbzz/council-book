@@ -4,7 +4,13 @@ Rules:
 - Keep only: stable id, title, summary (summary, else aiSummary), created time, market symbols,
   and the earnings fields. Authors, handles, avatars, message bodies and links are never read.
 - Text is sanitised (sanitize.clean_text) before it can reach a prompt.
-- ID = "N:" + sha256(post id, else title + created)[:8], stable across fetches.
+- ID = "N:" + HMAC-SHA256(install key, post id, else title + created)[:8] (transparency-v2 T-D15):
+  stable across fetches under one install key, and not matchable back to a post from the public
+  record. The cycle always passes the key (`council.publish.install_key`); without one (offline
+  tests) the legacy unkeyed sha256 id is used.
+- The feed is eToro Licensed Content: the text may reach the news role's prompt (the operator's
+  personal use with their own account) but is never published, and its private copies are purged
+  within 7 days (docs/data-rights.md).
 - An item without a parseable created time is dropped (its availability cannot be proven); an
   item created after `now` + 5 min is dropped as clock-skewed. available_at = created.
 - Field nesting varies between feed versions, so every lookup tolerates the known shapes.
@@ -19,7 +25,7 @@ from typing import Any
 
 from council.data.bars import to_utc
 from council.data.sanitize import clean_text
-from council.facts.evidence_ids import news_id
+from council.facts.evidence_ids import feed_news_id
 from council.models.facts import NewsItem
 
 TITLE_MAX = 200
@@ -96,8 +102,9 @@ def _symbols(post: Mapping[str, Any], entry: Mapping[str, Any]) -> list[str]:
     return out[:SYMBOLS_MAX]
 
 
-def parse_item(entry: Mapping[str, Any], *, now: datetime) -> NewsItem | None:
-    """One feed entry -> NewsItem, or None when it cannot be admitted safely."""
+def parse_item(entry: Mapping[str, Any], *, now: datetime, install_key: bytes | None = None) -> NewsItem | None:
+    """One feed entry -> NewsItem, or None when it cannot be admitted safely. `install_key` keys
+    the `N:` id (see the module docstring)."""
     post = entry.get("post") if isinstance(entry.get("post"), Mapping) else entry
     created = _parse_time(
         _first(post.get("created"), entry.get("created"), post.get("createdAt"), entry.get("createdAt"))
@@ -119,7 +126,7 @@ def parse_item(entry: Mapping[str, Any], *, now: datetime) -> NewsItem | None:
     earnings = _parse_time(_dig(event, "earningsDate")) if event else None
     before_open = _dig(event, "isBeforeMarketOpen") if event else None
     return NewsItem(
-        id=news_id(key),
+        id=feed_news_id(key, install_key),
         title=title,
         summary=summary,
         symbols=_symbols(post, entry),
@@ -131,11 +138,11 @@ def parse_item(entry: Mapping[str, Any], *, now: datetime) -> NewsItem | None:
     )
 
 
-def parse_news_feed(payload: Any, *, now: datetime) -> list[NewsItem]:
+def parse_news_feed(payload: Any, *, now: datetime, install_key: bytes | None = None) -> list[NewsItem]:
     """All admissible items, de-duplicated by ID, newest first (ties broken by ID)."""
     seen: dict[str, NewsItem] = {}
     for entry in _entries(payload):
-        item = parse_item(entry, now=now)
+        item = parse_item(entry, now=now, install_key=install_key)
         if item is not None and item.id not in seen:
             seen[item.id] = item
     return sort_news(seen.values())

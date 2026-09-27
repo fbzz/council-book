@@ -17,6 +17,14 @@ STOCKS_REAL_LONG_1X = True      # single stocks: real shares, long only, never l
 STOCK_SLEEVE_LIVE = False       # a committed stock-sleeve.yaml stays OUT of every runtime policy
                                 # (live, dry run, rehearsal, approval) until the go-live commit
                                 # flips this with a CHANGELOG policy entry
+# eToro Licensed Content: the broker's news feed text (transparency-v2 §3.0; the user's decision of
+# 2026-09-26: the feed serves the operator's personal use with their own account). The news role may
+# read the feed whenever an Agent Portfolio is connected; `policy/council.yaml` `news.broker_feed:
+# false` can only turn it off. Feed text is NEVER published (the public record may carry item ids,
+# counts, times, instruments and the agents' own paraphrase only), and every private copy is purged
+# within LICENSED_RETENTION_DAYS (`council purge-licensed`; the first cycle of each UTC day runs it).
+BROKER_FEED_ENABLED = True      # the code ceiling: False stops every feed request, whatever the policy
+LICENSED_RETENTION_DAYS = 7     # private copies of licensed text are kept at most this many days
 
 
 class InvariantViolation(RuntimeError):

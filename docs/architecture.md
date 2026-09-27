@@ -61,6 +61,28 @@ Every fact carries the time it became available. A cycle may only use facts avai
 start, and only completed bars. A lookahead test mutates everything at or after the slot and checks
 that the pack's hash does not change.
 
+## News
+The news analyst reads public-domain items every cycle, in rehearsal and live: Federal Reserve Board,
+BLS, BEA, TreasuryDirect and EIA releases, and SEC 8-K / 6-K metadata for the held and shortlisted
+stocks (`data/gov_news.py`, `stocks/sec_news.py`). Each source has a 5 s / 10 s timeout, the whole
+fetch a 30 s budget, and a failing source is a flag, never a stopped cycle. Items are cleaned and
+leak-scanned when fetched, admitted only if available before the slot, and capped per source
+(`policy/council.yaml` `news`). When an Agent Portfolio is connected, the broker's feed (eToro
+Licensed Content) is added under a switch that is on by default (`invariants.BROKER_FEED_ENABLED`,
+`news.broker_feed`): its text may reach the news prompt but is never published, and private copies
+are purged within 7 days. A card that rests on 8-K metadata alone can never unlock a cut, because
+the model never sees the filing's content. With no news item the news analyst makes no call.
+
+## Transparency
+Every model call's exact input (the desk it read, the earlier turns, the news items, the instruction
+tail) is recorded privately before the call is sent, with every raw reply and any correction turn
+(`state_dir/calls/`, never inside the repository). The operator reads it in the operator terminal:
+`council inputs <cycle> [--role bear] [--html]` prints or renders what each agent saw and the news
+reading list (for every item: made into a card, cited, or not used), and `council inputs verify`
+re-checks every hash. These commands, and `council purge-licensed`, refuse any agent context,
+because their output can hold broker feed text. The public record publishes salted commitments,
+never the private text.
+
 ## Why so much code around the models
 The research that preceded this repo found that rules written only in prompts were overridden often,
 while the same rules enforced in code held; that averaging several agents was worse than one

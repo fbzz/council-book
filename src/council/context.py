@@ -18,8 +18,20 @@ the policy has stock lines, their history comes from Alpaca (keys `council-book.
 fundamentals facts from SEC EDGAR. The Alpaca Keychain items are read only when the policy has stock
 lines. Budgets, breakers and caches live in the context's state directory. With stock lines, the
 calendar also carries their earnings events (`council.stocks.earnings`: SEC 8-K Item 2.02 history,
-overridden by the broker's news feed when a broker is connected; the feed is fetched once per slot
-for both the news role and the earnings), computed at the slot the cycle's event window belongs to.
+overridden by the broker's news feed when the feed is on; the feed is fetched once per slot for both
+the news role and the earnings), computed at the slot the cycle's event window belongs to.
+
+News (`news_sources`, transparency-v2 §3; the user's decisions of 2026-09-26): every cycle reads the
+public-domain sources (`council.data.gov_news`: Federal Reserve Board, BLS, BEA, TreasuryDirect,
+EIA, and SEC 8-K / 6-K metadata for the held and shortlisted stock lines), in rehearsal and live.
+The broker's feed (eToro Licensed Content) is added whenever an Agent Portfolio is connected and the
+switch is on (`broker_feed_enabled`: `invariants.BROKER_FEED_ENABLED`, which is True, and
+`policy/council.yaml` `news.broker_feed`, which can only turn it off). Its text may reach the news
+role's prompt but is never published, and private copies are purged within 7 days. A broker that is
+connected while the switch is off sets `news_broker_feed:off` and sends no feed request (the
+earnings then keep the SEC estimate). `N:` ids are keyed by the private install key. A source that
+fails becomes `news_source_error:<source>:<type>` (a 401/403 from the feed is `auth`) and never costs
+another source's items: the news role still runs on what arrived.
 """
 
 from __future__ import annotations
@@ -27,7 +39,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -36,6 +48,7 @@ from council.policy import Policy, default_policy, install_default_policy
 from council.runtime import (
     POLICY_SNAPSHOTS,
     CycleContext,
+    PolicyBlocker,
     PolicySnapshot,
     PolicySnapshotError,
     Sources,
@@ -98,11 +111,111 @@ def make_gateway(policy: Policy, settings: Settings, *, stub: bool) -> Any:
                          num_ctx=int(c["num_ctx"]))
 
 
-def data_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path | None = None) -> Sources:
+BROKER_FEED_SOURCE = "broker_feed"        # the source name in flags and fetch reports
+FEED_TAKE = 50
+
+
+def broker_feed_enabled(policy: Policy, broker: Any | None) -> bool:
+    """May this cycle request the broker's news feed? Only with a connected broker, the code
+    ceiling `invariants.BROKER_FEED_ENABLED`, and `news.broker_feed` not set false in the policy."""
+    from council import invariants
+
+    if broker is None or not bool(getattr(invariants, "BROKER_FEED_ENABLED", False)):
+        return False
+    council = policy.council if isinstance(policy.council, dict) else {}
+    section = council.get("news")
+    if section is None:
+        return True
+    return isinstance(section, dict) and section.get("broker_feed", True) is True
+
+
+def feed_error_type(exc: BaseException) -> str:
+    """A fixed code for a broker feed failure (never a message): `auth` for 401/403."""
+    from council.broker.http import BrokerAuthError, BrokerHTTPError, BrokerUnavailable
+
+    if isinstance(exc, BrokerAuthError):
+        return "auth"
+    status = getattr(exc, "status", None)
+    if isinstance(exc, BrokerHTTPError) and isinstance(status, int):
+        return "auth" if status in (401, 403) else f"http_{status}"
+    if isinstance(exc, BrokerUnavailable):
+        return "unavailable"
+    return type(exc).__name__
+
+
+def news_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path | None = None,
+                 public: Any | None = None, clock: Any | None = None) -> tuple[Any, Any | None]:
+    """(news(slot) -> NewsFetch, broker_feed(slot) -> list[NewsItem] or None when the feed is off).
+
+    `public(policy, now, state_dir, slot=slot)` fetches the public-domain items (default
+    `gov_news.gather_public_news`; tests pass a fake); `clock()` is the fetch time for its skew rule
+    (default: the wall clock). The broker feed is fetched at most once per slot and shared with the
+    earnings override. `news` never raises: a failing source becomes a flag."""
+    from council.data import gov_news
+    from council.data.feeds import parse_news_feed, sort_news
+    from council.data.gov_news import NewsFetch, SourceReport
+
+    fetch_public = public or gov_news.gather_public_news
+    wall = clock or (lambda: datetime.now(UTC))
+    broker_feed = None
+    if broker_feed_enabled(policy, broker):
+        feed_memo: dict[datetime, list[Any] | Exception] = {}
+
+        def broker_feed(slot: datetime) -> list[Any]:  # type: ignore[no-redef]
+            # one feed request per slot, failure included: the earnings override (called first) and
+            # the news role share it
+            if slot not in feed_memo:
+                from council.publish import install_key
+
+                feed_memo.clear()
+                try:
+                    key = install_key.load_or_create(state_dir)
+                    feed_memo[slot] = parse_news_feed(broker.feeds_news(take=FEED_TAKE), now=slot,
+                                                      install_key=key)
+                except Exception as exc:
+                    feed_memo[slot] = exc
+            held = feed_memo[slot]
+            if isinstance(held, Exception):
+                raise held
+            return held
+
+    def news(slot: datetime) -> NewsFetch:
+        flags: list[str] = []
+        reports: dict[str, SourceReport] = {}
+        items: list[Any] = []
+        try:
+            fetched = fetch_public(policy, max(wall(), slot), state_dir, slot=slot)
+            items += list(fetched.items)
+            flags += list(fetched.flags)
+            reports.update(fetched.sources)
+        except Exception as exc:  # a public-news failure never stops the cycle
+            flags.append(f"news_source_error:public:{type(exc).__name__}")
+        if broker is not None and broker_feed is None:
+            flags.append("news_broker_feed:off")
+        elif broker_feed is not None:
+            try:
+                feed = broker_feed(slot)
+                items += feed
+                reports[BROKER_FEED_SOURCE] = SourceReport(source=BROKER_FEED_SOURCE, feeds_ok=1,
+                                                           entries=len(feed), kept=len(feed))
+            except Exception as exc:  # the news role still runs on the public items
+                kind = feed_error_type(exc)
+                flags.append(f"news_source_error:{BROKER_FEED_SOURCE}:{kind}")
+                reports[BROKER_FEED_SOURCE] = SourceReport(source=BROKER_FEED_SOURCE, feeds_failed=1,
+                                                           error=kind)
+        unique: dict[str, Any] = {}
+        for item in sort_news(items):
+            unique.setdefault(item.id, item)
+        return NewsFetch(items=list(unique.values()), flags=list(dict.fromkeys(flags)), sources=reports)
+
+    return news, broker_feed
+
+
+def data_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path | None = None,
+                 public_news: Any | None = None) -> Sources:
     from council.data.cache import FileCache
     from council.data.calendar import load_events
     from council.data.credentials import secret
-    from council.data.feeds import parse_news_feed
     from council.facts.market import gather_history, gather_macro
 
     token = secret("council-book.tiingo")
@@ -126,17 +239,7 @@ def data_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path |
 
             return gather_fundamentals(policy, now=slot, state_dir=state_dir)
 
-    news = None
-    if broker is not None:
-        feed_memo: dict[datetime, list[Any]] = {}
-
-        def news(slot):  # type: ignore[no-redef]
-            # one feed request per slot: the earnings override (called first) and the news role share it
-            if slot not in feed_memo:
-                items = parse_news_feed(broker.feeds_news(take=50), now=slot)
-                feed_memo.clear()
-                feed_memo[slot] = items
-            return feed_memo[slot]
+    news, broker_feed = news_sources(policy, broker=broker, state_dir=state_dir, public=public_news)
 
     earnings = None
     if has_stocks:
@@ -146,9 +249,9 @@ def data_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path |
             slot = events_slot(start, end)
             items: list[Any] = []
             feed_flags: list[str] = []
-            if news is not None:
+            if broker_feed is not None:          # the feed off: the SEC estimate alone
                 try:
-                    items = news(slot)
+                    items = broker_feed(slot)
                 except Exception as exc:  # the override is optional: the SEC estimate still applies
                     feed_flags = [f"earnings_feed_failed:{type(exc).__name__}"]
             found, flags = gather_earnings(policy, slot=slot, start=start, end=end, news=items,
@@ -275,6 +378,22 @@ def alert_policy_snapshot(root: Path, settings: Settings, kind: Literal["held", 
     return True
 
 
+def eligibility_blockers(policy: Policy) -> tuple[PolicyBlocker, ...]:
+    """The runtime refusal of stock lines never eligibility-checked (a rank run with
+    `--no-eligibility` stamps `eligibility_checked_at: null`; design §4.3): one satellite-scoped
+    `stock_eligibility_unchecked` blocker when any stock line is unchecked, so the stock sleeve is
+    held and the core keeps running. The line ids go only into the private `detail`; the code is what
+    reaches R20 and the public record (`cycle.engine_blockers`). Empty for a core-only policy."""
+    from council.stocks.eligibility import UNCHECKED, preflight_errors
+
+    unchecked = preflight_errors(policy)
+    if not unchecked:
+        return ()
+    lines = ", ".join(u.rsplit(":", 1)[-1] for u in unchecked)
+    return (PolicyBlocker(UNCHECKED, "satellite",
+                          f"stock lines never eligibility-checked: {lines}; re-rank with the broker gate"),)
+
+
 def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = False,
                   publish: PublishMode = "preview", sources: Sources | None = None,
                   state_dir: Path | None = None, settings: Settings | None = None,
@@ -288,7 +407,8 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
     policy_blockers`; a live context also sends an URGENT alert, and before refusing to start when
     no verified snapshot exists. Once the sleeve is live (`invariants.STOCK_SLEEVE_LIVE`), a sleeve
     that is not the blob at its `stocks-<quarter>` tag yields a satellite-scoped
-    `sleeve_policy_untagged` blocker."""
+    `sleeve_policy_untagged` blocker, and a stock line whose eligibility was never checked a
+    satellite-scoped `stock_eligibility_unchecked` one (`eligibility_blockers`, every mode)."""
     from council.ledger.db import Ledger
     from council.llm.prompts import PromptRegistry
 
@@ -340,7 +460,8 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
                         notifier=notifier, state_dir=root,
                         run_single_agent=bool(policy.council["roles"]["single_agent_control"]["enabled"]),
                         policy_commit=snapshot.commit if snapshot is not None else "",
-                        policy_blockers=snapshot.blockers if snapshot is not None else ())
+                        policy_blockers=(*(snapshot.blockers if snapshot is not None else ()),
+                                         *eligibility_blockers(policy)))
 
 
 def _ssh_command(root: Path) -> str | None:

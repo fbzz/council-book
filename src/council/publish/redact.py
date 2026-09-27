@@ -7,14 +7,28 @@ Rules:
   error strings) are never read.
 - Model text is untrusted: control/bidi characters, URLs, @handles, e-mails, paths, money amounts
   and long numbers are removed, and any text sharing an 8-word n-gram with a licensed feed item
-  is withheld.
-- Evidence ids become typed refs: N: -> broker_feed id only; M: -> FRED series (value only when
-  the series is in `council.data.fred.PUBLISHABLE`, the single publishability list, and the
-  pack's fact is not marked unpublishable); F:/V:/C:/E:/S:/K: -> ids.
+  is withheld. Licensed means every news item except a `P:` item that passes the public test
+  (`public_news_ok`: a `P:` id, a public publisher and a public-domain licence).
+- Evidence ids become typed refs: N: -> broker_feed id only; P: -> public_news id with its
+  publisher (a `P:` id whose pack item fails the public test is dropped and counted in
+  `news_licence_mismatch:<n>`); M: -> FRED series (value only when the series is in
+  `council.data.fred.PUBLISHABLE`, the single publishability list, and the pack's fact is not
+  marked unpublishable); F:/V:/C:/E:/S:/K: -> ids.
+- Risk-engine notes go through `trace_rules` (one closed table): every R11 variant publishes as
+  `R11` alone, an R15 hold or check shows its SR_be only when the line's cost came from the policy
+  floors and its volatility from Tiingo / Binance history, fee codes never carry a value, and a
+  note the table does not list publishes as its bare code (transparency-v2 §4.2).
+- Source labels come from each item's own source: a news row is `broker_feed` for an `N:` item
+  and its publisher for a public `P:` item; an event is `calendar` (policy calendar, FRED release
+  dates), `sec` (SEC-derived earnings), `broker_feed` (the broker feed) or `unknown`.
 - Symbols are published only as exposure LINES; unknown symbols are dropped and counted, and
   `UNMAPPED_<instrument id>` is scrubbed to `UNMAPPED` in any published text.
 - Approval timestamps are rounded down to their slot; the material-change fingerprint is
-  published as a short hash only.
+  published as a short hash only, keyed by the private install key when the caller passes it
+  (`public_cycle(..., install_key=...)`; an unkeyed hash of low-entropy content could be
+  brute-forced).
+- `literal_ok(text)` is the check for a literal run of a structured prompt section: True only when
+  none of the cleaner's value substitutions would fire (whitespace and length are left alone).
 - The execution record (`public_execution`) carries weights (x NAV), slippage and cost in bp,
   and leg states: never amounts, units, prices or ids.
 - Model text is published whole up to its public cap; a text that must be cut (a cleaner
@@ -45,8 +59,10 @@ from council.models.facts import Fact, FactPack, MarketState
 from council.models.plan import Leg, Plan
 from council.models.risk import RiskDecision
 from council.policy import LineSpec, Universe, default_policy
-from council.publish import labels, leakscan
+from council.publish import labels, leakscan, trace_rules
+from council.publish.install_key import keyed_hex
 from council.publish.public_models import (
+    PUBLIC_NEWS_SOURCES,
     CallStatus,
     CycleStatus,
     DecisionState,
@@ -100,7 +116,7 @@ _MONEY = re.compile(
     r"|\b(?:USD|EUR|GBP)\s?\d[\d,]*(?:\.\d+)?"
     r"|\d[\d,]*(?:\.\d+)?\s?(?:USD|EUR|GBP|dollars?)\b"
 )
-_LONG_NUMBER = re.compile(r"(?<![\w.])(?<!\b[NSMECFVK]:)\d{7,}(?!\w)")
+_LONG_NUMBER = re.compile(r"(?<![\w.])(?<!\b[NPSMECFVK]:)\d{7,}(?!\w)")
 _UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 # Positions on symbols outside the universe are keyed UNMAPPED_<instrument id>; the id is private.
 _UNMAPPED = re.compile(r"(?i)UNMAPPED_[0-9A-Za-z]+")
@@ -157,6 +173,23 @@ def clean_text(value: str | None, max_len: int = 200) -> str:
     return _clip(text, max_len)
 
 
+# The value substitutions of `clean_text`, in its order (whitespace collapsing and clipping aside).
+_VALUE_SUBS: tuple[re.Pattern[str], ...] = (
+    _ANSI, _CONTROL, _EMAIL, _URL, _PATH, _HANDLE, _UUID, _UNMAPPED, _MONEY, _LONG_NUMBER, _LEVEL,
+)
+
+
+def literal_ok(text: str | None) -> bool:
+    """True when a literal run (code text and policy numbers of a structured prompt section) is
+    publishable as written: none of `clean_text`'s value substitutions (control or escape
+    characters, e-mail, URL, path, handle, UUID, UNMAPPED id, money, long number, level) would
+    change it. Unlike `clean_text(text) == text` it neither collapses whitespace nor clips, so
+    newlines and indentation pass. `literal_ok("\n  LINES\n")` is True; `literal_ok("$5 fee")`
+    is False."""
+    value = str(text or "")
+    return not any(pattern.search(value) for pattern in _VALUE_SUBS)
+
+
 class _Text:
     """Text cleaner bound to one cycle's licensed texts (broker feed titles and summaries)."""
 
@@ -177,6 +210,16 @@ class _Text:
 
 def _code(value: str, max_len: int = 120) -> str:
     return clean_text(value, max_len)
+
+
+# Record flags that stay private: `size_floor_binding:<line>` says the size floor exceeds the public
+# deadband share at the current NAV (m5-readiness M5-N gate P2), which bounds the NAV.
+PRIVATE_FLAG_PREFIXES: tuple[str, ...] = ("size_floor_binding",)
+
+
+def public_flags(flags: Iterable[str]) -> list[str]:
+    """Record flags as public codes, without the private ones."""
+    return [_code(f) for f in flags if not str(f).strip().startswith(PRIVATE_FLAG_PREFIXES)]
 
 
 # ------------------------------------------------------------------------------ numbers
@@ -270,13 +313,36 @@ class LineMap:
 
 
 # ------------------------------------------------------------------------------ evidence
-_ID_KIND = {"F": "market", "V": "vol", "C": "cost", "E": "event", "S": "filing", "K": "card"}
+_ID_KIND = {"F": "market", "V": "vol", "C": "cost", "E": "event", "S": "filing", "K": "card",
+            "N": "broker_feed", "P": "public_news"}
 _ID_OK = re.compile(r"^[FVCESK]:[A-Za-z0-9_.:@#+-]{1,80}$")
-_NEWS_OK = re.compile(r"^N:[0-9a-f]{8}$")
+_NEWS_OK = re.compile(r"^N:[0-9a-f]{8}$")                # a broker feed item (licensed)
+_PUBLIC_NEWS_OK = re.compile(r"^P:[0-9a-f]{8}$")         # a public-domain news item
+# Licences under which a public item's title and link may be republished (Treasury's site carries
+# no explicit statement: a federal work, title and link only; see docs/data-rights.md).
+PUBLIC_LICENCES = frozenset({"public_domain", "federal_work_unverified"})
 # M:<SERIES>[.<measure>][@YYYY-MM-DD], e.g. M:DGS10@2026-09-24 or M:DGS10.chg20@2026-09-24.
 _MACRO = re.compile(r"^M:([A-Z0-9_]{1,32})(?:\.([a-z0-9_]{1,16}))?(?:@(\d{4}-\d{2}-\d{2}))?$")
 _FRED_UNITS = frozenset({"pct", "bps", "x", "ratio"})
 _NO_PUBLISH_SOURCES = frozenset({"fred:no_publish"})
+
+
+def public_news_ok(item: Any) -> bool:
+    """The public test of a news item (transparency-v2 T-D6), decided by three facts and never by
+    the id prefix alone: a `P:` id, a publisher in the public set and a public-domain licence. An
+    item without a licence fails (fail closed); every item that fails is treated as licensed."""
+    return bool(
+        _PUBLIC_NEWS_OK.match(str(getattr(item, "id", "") or ""))
+        and getattr(item, "source", None) in PUBLIC_NEWS_SOURCES
+        and getattr(item, "licence", None) in PUBLIC_LICENCES
+    )
+
+
+def licensed_texts(pack: FactPack | None) -> list[str]:
+    """The texts the licensed-overlap check guards: every news item that fails the public test."""
+    if pack is None:
+        return []
+    return [f"{n.title} {n.summary}" for n in pack.news if not public_news_ok(n)]
 
 
 def _fred_publishable(series: str, fact: Fact | None) -> bool:
@@ -289,14 +355,26 @@ def _fred_publishable(series: str, fact: Fact | None) -> bool:
 class _Evidence:
     def __init__(self, pack: FactPack | None):
         self.facts: dict[str, Fact] = {}
+        self.news: dict[str, Any] = {}
         if pack is not None:
             self.facts = {f.id: f for f in pack.facts if f.id.startswith("M:")}
+            self.news = {str(n.id): n for n in pack.news}
         self.dropped = 0
+        self.mismatch: set[str] = set()
 
     def ref(self, evidence_id: str | None) -> dict[str, Any] | None:
         eid = (evidence_id or "").strip()
         if _NEWS_OK.match(eid):
             return {"kind": "broker_feed", "id": eid}
+        if _PUBLIC_NEWS_OK.match(eid):
+            item = self.news.get(eid)
+            if item is None:                  # not checkable here: the id alone (a public hash)
+                return {"kind": "public_news", "id": eid}
+            if not public_news_ok(item):      # a P: id on a licensed or unknown item: fail closed
+                self.mismatch.add(eid)
+                self.dropped += 1
+                return None
+            return {"kind": "public_news", "id": eid, "source": item.source}
         macro = _MACRO.match(eid)
         if macro:
             series, measure, as_of = macro.group(1), macro.group(2), macro.group(3)
@@ -573,14 +651,38 @@ def _withheld(fact: Fact, source: str) -> str | None:
     return "unknown_source"
 
 
-def _facts(pack: FactPack | None, lm: LineMap) -> tuple[list[PublicFact], int]:
+def event_source(source: str | None) -> str:
+    """An event's public source label from its own source: the policy calendar and FRED release
+    dates are `calendar`, SEC-derived earnings (`sec_8k`, `sec_periodic`, `sec_estimate`) are
+    `sec`, the broker feed is `broker_feed`, anything else `unknown`."""
+    src = (source or "").strip().lower()
+    if src.startswith(("policy", "fred_release")):
+        return "calendar"
+    if src == "sec" or src.startswith("sec_"):
+        return "sec"
+    if src.startswith(("etoro", "broker")):
+        return "broker_feed"
+    return "unknown"
+
+
+def news_source(item: Any) -> str:
+    """A news item's public source label: `broker_feed` for an `N:` id, its publisher for a `P:`
+    item that passes the public test, else `unknown`."""
+    eid = str(getattr(item, "id", "") or "")
+    if _NEWS_OK.match(eid):
+        return "broker_feed"
+    return str(item.source) if public_news_ok(item) else "unknown"
+
+
+def _facts(pack: FactPack | None, lm: LineMap) -> tuple[list[PublicFact], int, set[str]]:
     """The evidence table: one entry per fact, event, news item and filing sentence of the pack.
     Returns (entries, count dropped: a symbol that is not a line, or an id or kind the table
-    does not know)."""
+    does not know, and the `P:` ids whose item failed the public test)."""
     if pack is None:
-        return [], 0
+        return [], 0, set()
     rows: list[tuple[tuple[int, int, int, str], PublicFact]] = []
     dropped = 0
+    mismatch: set[str] = set()
 
     def order(kind: str, line: str | None, eid: str) -> tuple[int, int, int, str]:
         pos = lm.order.index(line) if line in lm.order else len(lm.order)
@@ -611,15 +713,21 @@ def _facts(pack: FactPack | None, lm: LineMap) -> tuple[list[PublicFact], int]:
             dropped += 1
             continue
         line = next(iter(lines)) if len(lines) == 1 else None
-        source = "calendar" if event.source.startswith(("policy_calendar", "fred_release")) else "broker_feed"
+        source = event_source(event.source)
         rows.append((order("event", line, event.id), PublicFact(
             id=event.id, kind="event", label=labels.fact_label(event.id), line=line, source=source,
         )))
     for item in pack.news:
+        if not (_NEWS_OK.match(item.id) or _PUBLIC_NEWS_OK.match(item.id)):
+            dropped += 1
+            continue
+        source = news_source(item)
+        if _PUBLIC_NEWS_OK.match(item.id) and source == "unknown":
+            mismatch.add(item.id)
         mapped = {m for m in (lm.lookup(s) for s in item.symbols) if m is not None}
         line = next(iter(mapped)) if len(mapped) == 1 else None
         rows.append((order("news", line, item.id), PublicFact(
-            id=item.id, kind="news", label=labels.NEWS_LABEL, line=line, source="broker_feed",
+            id=item.id, kind="news", label=labels.news_label(item.id, source), line=line, source=source,
         )))
     for filing in pack.filings:
         line = lm.lookup(filing.symbol)
@@ -633,7 +741,7 @@ def _facts(pack: FactPack | None, lm: LineMap) -> tuple[list[PublicFact], int]:
     unique: dict[str, tuple[tuple[int, int, int, str], PublicFact]] = {}
     for key, row in rows:
         unique.setdefault(row.id, (key, row))
-    return [row for _, row in sorted(unique.values(), key=lambda kr: kr[0])], dropped
+    return [row for _, row in sorted(unique.values(), key=lambda kr: kr[0])], dropped, mismatch
 
 
 def _check_value(v: float | str | None) -> float | str | None:
@@ -649,9 +757,45 @@ def _rule_id(v: str) -> str:
     return rid if rid and rid[0].isupper() else "R_unknown"
 
 
-def _risk(risk: RiskDecision | None, unit_w: dict[str, float], lm: LineMap) -> PublicRisk | None:
+def value_lines(pack: FactPack | None, lm: LineMap) -> tuple[frozenset[str], bool]:
+    """(the lines whose R15 SR_be may be published, whether the largest SR_be of any change may be)
+    from the pack (the strictest source wins, `trace_rules`): a line qualifies when every cost
+    fact of the pack is a pure policy quote (`costs:floor`; a broker what-if anywhere may price any
+    leg, the pack carries only each line's 1x long quote) and its state's history is Tiingo or
+    Binance (sigma is an input of SR_be). The second answer needs every line state of the pack to
+    qualify too. Without a pack, nothing qualifies."""
+    if pack is None:
+        return frozenset(), False
+    costs = [f for f in pack.facts if f.kind == "cost" or f.id.startswith("C:")]
+    if not costs or any((f.source or "").strip().lower() != "costs:floor" for f in costs):
+        return frozenset(), False
+    priced = {line for f in costs if f.symbol is not None and (line := lm.lookup(f.symbol)) is not None}
+    open_lines: set[str] = set()
+    every_open = True
+    for sym, state in pack.states.items():
+        line = lm.lookup(sym)
+        if line is None:
+            continue
+        if _history_source(state.history_source) in _OPEN_HISTORY:
+            open_lines.add(line)
+        else:
+            every_open = False
+    lines = frozenset(priced & open_lines)
+    return lines, bool(lines) and every_open and bool(open_lines)
+
+
+def _risk(risk: RiskDecision | None, unit_w: dict[str, float], lm: LineMap,
+          pack: FactPack | None = None) -> PublicRisk | None:
     if risk is None:
         return None
+    shown, r15_public = value_lines(pack, lm)
+    # The R15 check is the largest SR_be over the changed lines: public only when each of them is
+    # a value line itself (a changed line the pack does not price may have been priced by a broker
+    # quote the pack never saw). A symbol that is no line has no quote, so it never adds an SR_be.
+    changed = {line for s in set(risk.final_w) | set(risk.base_w)
+               if abs(risk.final_w.get(s, 0.0) - risk.base_w.get(s, 0.0)) > 1e-12
+               and (line := lm.lookup(s)) is not None}
+    r15_public = r15_public and changed <= shown
     raw_levels = lm.first_by_line(risk.raw_levels)
     banded_levels = lm.first_by_line(risk.banded_levels)
     return PublicRisk(
@@ -665,7 +809,8 @@ def _risk(risk: RiskDecision | None, unit_w: dict[str, float], lm: LineMap) -> P
         checks=[
             PublicCheck(
                 rule_id=_rule_id(c.rule_id), name=clean_text(c.name, 80), passed=c.passed,
-                value=_check_value(c.value), limit=_check_value(c.limit), kind=c.kind,
+                value=_check_value(trace_rules.public_check_value(c.rule_id, c.value, r15_public=r15_public)),
+                limit=_check_value(c.limit), kind=c.kind,
             )
             for c in risk.checks
         ],
@@ -675,7 +820,7 @@ def _risk(risk: RiskDecision | None, unit_w: dict[str, float], lm: LineMap) -> P
         stop_at_risk_pct=_pct(risk.stop_budget_used),
         carry_bp_day=_bp(risk.carry_bps_day),
         ex_ante_vol_pct=_pct(risk.ex_ante_vol),
-        hold_reasons=[_code(r) for r in risk.hold_reasons],
+        hold_reasons=[_code(trace_rules.public_hold_reason(r, value_lines=shown)) for r in risk.hold_reasons],
         compliance=[_code(r) for r in risk.compliance],
     )
 
@@ -761,12 +906,17 @@ _HEX_DIGEST = re.compile(r"^[0-9a-f]{16,}$")
 FINGERPRINT_CHARS = 16
 
 
-def short_fingerprint(value: str | None) -> str:
-    """The material-change fingerprint as a short hash: a hex digest is truncated, anything else
-    is hashed first, so the fingerprint's contents are never published."""
+def short_fingerprint(value: str | None, key: bytes | None = None) -> str:
+    """The material-change fingerprint as a short hash. With the install `key` (the default for a
+    cycle once the orchestrator passes it) it is HMAC-SHA256(key, fingerprint) truncated: equal
+    fingerprints still give equal hashes across cycles, but low-entropy contents (a rounded
+    fundamentals value) cannot be brute-forced from the record. Without a key (older callers): a
+    hex digest is truncated, anything else is hashed first. Contents are never published."""
     raw = (value or "").strip()
     if not raw:
         return ""
+    if key is not None:
+        return keyed_hex(key, raw, FINGERPRINT_CHARS)
     v = raw.lower().removeprefix("sha256:")
     if _HEX_DIGEST.match(v):
         return v[:FINGERPRINT_CHARS]
@@ -836,14 +986,16 @@ def public_cycle(
     pack: FactPack | None,
     *,
     lines: Iterable[LineSpec] | Universe | Mapping[str, LineSpec] | None,
+    install_key: bytes | None = None,
 ) -> PublicCycleV1:
-    """Build the public cycle document from the private record (and the pack, for licensed-text
-    and FRED checks). Raises pydantic.ValidationError if anything falls outside the allow-list."""
+    """Build the public cycle document from the private record (and the pack, for licensed-text,
+    FRED, news-source and cost-source checks). `install_key` (`council.publish.install_key`) keys
+    the material-change fingerprint. Raises pydantic.ValidationError if anything falls outside
+    the allow-list."""
     lm = LineMap(lines)
-    licensed = [f"{n.title} {n.summary}" for n in pack.news] if pack is not None else []
-    text = _Text(licensed)
+    text = _Text(licensed_texts(pack))
     ev = _Evidence(pack)
-    flags = [_code(f) for f in rec.flags]
+    flags = public_flags(rec.flags)
 
     ref_levels: dict[str, float] = {}
     unit_w: dict[str, float] = {}
@@ -859,7 +1011,7 @@ def public_cycle(
         flags.append("kill_state_unrecognised")
         kill = "NORMAL"
     single_agent = _single_agent(rec, ref_levels, lm, text, ev)
-    facts, facts_dropped = _facts(pack, lm)
+    facts, facts_dropped, news_mismatch = _facts(pack, lm)
     fields: dict[str, Any] = {
         "cycle_id": rec.cycle_id,
         "slot": rec.slot,
@@ -886,7 +1038,7 @@ def public_cycle(
                         levels=rec.risk.raw_levels if rec.risk is not None else {},
                         agreement=rec.agreement),
         "single_agent": single_agent,
-        "material_fingerprint": short_fingerprint(rec.material_fingerprint),
+        "material_fingerprint": short_fingerprint(rec.material_fingerprint, install_key),
         "basis": rec.risk.basis if rec.risk is not None else None,
         "bands": {
             line: PublicBand(
@@ -897,7 +1049,7 @@ def public_cycle(
             for sym, b in rec.bands.items()
             if (line := lm.line(sym)) is not None
         },
-        "risk": _risk(rec.risk, unit_w, lm),
+        "risk": _risk(rec.risk, unit_w, lm, pack),
         "plan": _plan(rec.plan, lm),
         "decision": _decision(rec),
         "calls": _calls(rec),
@@ -910,6 +1062,8 @@ def public_cycle(
         flags.append(f"evidence_ids_dropped:{ev.dropped}")
     if facts_dropped:
         flags.append(f"facts_dropped:{facts_dropped}")
+    if news_mismatch or ev.mismatch:
+        flags.append(f"news_licence_mismatch:{len(news_mismatch | ev.mismatch)}")
     if text.withheld:
         flags.append(f"licensed_overlap_withheld:{text.withheld}")
     if pack is None:
@@ -942,7 +1096,7 @@ def public_ops_row(rec: CycleRecord) -> PublicOpsRow:
         approved_slot=_slot_of(rec.approved_at),
         model=_model_name(rec.model),
         model_digest=_model_name(rec.model_digest),
-        flags=[_code(f) for f in rec.flags],
+        flags=public_flags(rec.flags),
     )
 
 

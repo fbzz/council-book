@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Treasury Offering Announcements</title>
+    <link>https://www.treasurydirect.gov</link>
+    <description>Treasury Offering Announcements</description>
+    <language>en-us</language>
+    <managingEditor>FSInternet@fiscal.treasury.gov (Bureau of the Fiscal Service)</managingEditor>
+    <webMaster>FSInternet@fiscal.treasury.gov (Bureau of the Fiscal Service)</webMaster>
+    <image>
+      <title>Bureau of the Fiscal Service</title>
+      <url>https://www.treasurydirect.gov/images/td_logo.gif</url>
+      <link>https://www.treasurydirect.gov</link>
+      <width>232</width>
+      <height>50</height>
+    </image>
+    <item>
+      <title>7-Year Note Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 91282CRM5&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 7-Year Note&lt;br /&gt;&lt;strong&gt;Series:&lt;/strong&gt; Q-2033&lt;br /&gt;&lt;strong&gt;Reopening:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;Interest Rate:&lt;/strong&gt; 5.000%&lt;br /&gt;&lt;strong&gt;High Yield:&lt;/strong&gt; 5.085%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.504596&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 91.11%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $113,215,981,000&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $50,624,250,500&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/24/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/30/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 09/30/2033&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260924_3.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260924_3.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Note">Note</category>
+      <pubDate>Thu, 24 Sep 2026 17:03:20 GMT</pubDate>
+    </item>
+    <item>
+      <title>8-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797VY0&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 8-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 3.990%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 4.071%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.379333&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 23.84%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $241,527,849,800&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $92,026,009,800&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/24/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/29/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 11/24/2026&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260924_1.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260924_1.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Thu, 24 Sep 2026 15:33:21 GMT</pubDate>
+    </item>
+    <item>
+      <title>4-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797VN4&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 4-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 3.850%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 3.915%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.700556&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 54.97%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $242,512,404,700&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $97,439,704,700&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/24/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/29/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 10/27/2026&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260924_2.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260924_2.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Thu, 24 Sep 2026 15:33:20 GMT</pubDate>
+    </item>
+    <item>
+      <title>5-Year Note Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 91282CRN3&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 5-Year Note&lt;br /&gt;&lt;strong&gt;Series:&lt;/strong&gt; AD-2031&lt;br /&gt;&lt;strong&gt;Reopening:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;Interest Rate:&lt;/strong&gt; 5.000%&lt;br /&gt;&lt;strong&gt;High Yield:&lt;/strong&gt; 5.033%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.855714&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 30.34%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $165,388,603,000&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $80,538,513,000&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/23/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/30/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 09/30/2031&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260923_3.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260923_3.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Note">Note</category>
+      <pubDate>Wed, 23 Sep 2026 17:03:32 GMT</pubDate>
+    </item>
+    <item>
+      <title>1-Year 10-Month FRN Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 91282CRD5&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 1-Year 10-Month FRN&lt;br /&gt;&lt;strong&gt;Series:&lt;/strong&gt; BF-2028&lt;br /&gt;&lt;strong&gt;Reopening:&lt;/strong&gt; Yes&lt;br /&gt;&lt;strong&gt;Spread:&lt;/strong&gt; 0.050%&lt;br /&gt;&lt;strong&gt;High Discount Margin:&lt;/strong&gt; 0.040%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $100.015499&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 42.15%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $73,508,324,500&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $28,000,087,000&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/23/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/25/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 07/31/2028&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260923_2.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260923_2.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="FRN">FRN</category>
+      <pubDate>Wed, 23 Sep 2026 15:33:22 GMT</pubDate>
+    </item>
+    <item>
+      <title>17-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797WR4&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 17-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 4.135%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 4.251%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $98.633153&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 40.67%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $208,245,773,100&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $77,951,525,600&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/23/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/29/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 01/26/2027&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260923_1.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260923_1.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Wed, 23 Sep 2026 15:33:21 GMT</pubDate>
+    </item>
+    <item>
+      <title>2-Year Note Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 91282CRP8&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 2-Year Note&lt;br /&gt;&lt;strong&gt;Series:&lt;/strong&gt; BH-2028&lt;br /&gt;&lt;strong&gt;Reopening:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;Interest Rate:&lt;/strong&gt; 4.750%&lt;br /&gt;&lt;strong&gt;High Yield:&lt;/strong&gt; 4.787%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.930225&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 33.42%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $191,651,805,600&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $79,388,014,800&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/22/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/30/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 09/30/2028&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260922_2.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260922_2.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Note">Note</category>
+      <pubDate>Tue, 22 Sep 2026 17:03:25 GMT</pubDate>
+    </item>
+    <item>
+      <title>6-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797UM7&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 6-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 3.870%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 3.942%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.548500&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 83.32%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $232,536,898,800&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $80,066,009,100&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/22/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/24/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 11/05/2026&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260922_1.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260922_1.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Tue, 22 Sep 2026 15:33:37 GMT</pubDate>
+    </item>
+    <item>
+      <title>26-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797WL7&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 26-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 4.155%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 4.303%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $97.899417&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 48.01%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $212,036,825,200&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $84,336,142,700&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/21/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/24/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 03/25/2027&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260921_1.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260921_1.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Mon, 21 Sep 2026 15:33:44 GMT</pubDate>
+    </item>
+    <item>
+      <title>13-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797TC1&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 13-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 4.015%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 4.113%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $98.985097&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 36.66%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $260,775,531,200&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $98,214,282,200&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/21/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/24/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 12/24/2026&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260921_2.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260921_2.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Mon, 21 Sep 2026 15:33:43 GMT</pubDate>
+    </item>
+    <item>
+      <title>9-Year 10-Month TIPS Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 91282CRE3&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 9-Year 10-Month TIPS&lt;br /&gt;&lt;strong&gt;Series:&lt;/strong&gt; D-2036&lt;br /&gt;&lt;strong&gt;Reopening:&lt;/strong&gt; Yes&lt;br /&gt;&lt;strong&gt;Interest Rate:&lt;/strong&gt; 2.375%&lt;br /&gt;&lt;strong&gt;High Yield:&lt;/strong&gt; 2.653%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $97.598142&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 93.14%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $45,346,430,000&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $21,860,454,000&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/17/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/30/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 07/15/2036&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260917_3.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260917_3.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="TIPS">TIPS</category>
+      <pubDate>Thu, 17 Sep 2026 17:03:18 GMT</pubDate>
+    </item>
+    <item>
+      <title>8-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797VX2&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 8-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 3.920%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 3.999%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.390222&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 2.93%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $256,995,401,800&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $92,222,446,800&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/17/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/22/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 11/17/2026&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260917_2.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260917_2.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Thu, 17 Sep 2026 15:33:31 GMT</pubDate>
+    </item>
+    <item>
+      <title>4-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797VM6&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 4-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 3.820%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 3.885%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.702889&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 69.59%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $279,448,148,200&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $97,647,910,200&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/17/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/22/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 10/20/2026&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260917_1.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260917_1.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Thu, 17 Sep 2026 15:33:30 GMT</pubDate>
+    </item>
+    <item>
+      <title>17-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797WQ6&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 17-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 4.030%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 4.141%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $98.667861&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 23.62%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $201,892,022,000&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $78,117,957,000&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/16/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/22/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 01/19/2027&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260916_1.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260916_1.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Wed, 16 Sep 2026 15:33:24 GMT</pubDate>
+    </item>
+    <item>
+      <title>19-Year 11-Month Bond Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912810UX4&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 19-Year 11-Month Bond&lt;br /&gt;&lt;strong&gt;Series:&lt;/strong&gt; Bonds of August 2046&lt;br /&gt;&lt;strong&gt;Reopening:&lt;/strong&gt; Yes&lt;br /&gt;&lt;strong&gt;Interest Rate:&lt;/strong&gt; 5.125%&lt;br /&gt;&lt;strong&gt;High Yield:&lt;/strong&gt; 5.420%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $96.423840&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 30.14%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $33,383,545,400&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $13,000,008,600&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/15/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/18/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 08/15/2046&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260915_2.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260915_2.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bond">Bond</category>
+      <pubDate>Tue, 15 Sep 2026 17:03:35 GMT</pubDate>
+    </item>
+    <item>
+      <title>6-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797SK4&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 6-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 3.850%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 3.921%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $99.550833&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 35.19%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $244,059,266,400&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $81,696,653,900&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/15/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/17/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 10/29/2026&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260915_1.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260915_1.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Tue, 15 Sep 2026 15:33:24 GMT</pubDate>
+    </item>
+    <item>
+      <title>26-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797UD7&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 26-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 4.060%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 4.203%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $97.947444&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 82.50%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $223,857,560,400&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $86,053,185,400&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/14/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/17/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 03/18/2027&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260914_1.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260914_1.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Mon, 14 Sep 2026 15:33:37 GMT</pubDate>
+    </item>
+    <item>
+      <title>13-Week Bill Treasury Auction Results</title>
+      <link>https://www.treasurydirect.gov/instit/annceresult/press/press_secannpr.htm</link>
+      <description>&lt;strong&gt;CUSIP:&lt;/strong&gt; 912797VH7&lt;br /&gt;&lt;strong&gt;Term and Type:&lt;/strong&gt; 13-Week Bill&lt;br /&gt;&lt;strong&gt;CMB:&lt;/strong&gt; No&lt;br /&gt;&lt;strong&gt;High Rate:&lt;/strong&gt; 3.970%&lt;br /&gt;&lt;strong&gt;Investment Rate:&lt;/strong&gt; 4.066%&lt;br /&gt;&lt;strong&gt;Price:&lt;/strong&gt; $98.996472&lt;br /&gt;&lt;strong&gt;Allotted at High:&lt;/strong&gt; 13.86%&lt;br /&gt;&lt;strong&gt;Total Tendered:&lt;/strong&gt; $251,080,978,100&lt;br /&gt;&lt;strong&gt;Total Accepted:&lt;/strong&gt; $100,214,352,100&lt;br /&gt;&lt;strong&gt;Auction Date:&lt;/strong&gt; 09/14/2026&lt;br /&gt;&lt;strong&gt;Issue Date:&lt;/strong&gt; 09/17/2026&lt;br /&gt;&lt;strong&gt;Maturity Date:&lt;/strong&gt; 12/17/2026&lt;br /&gt;&lt;a href="https://www.treasurydirect.gov/instit/annceresult/press/preanre/2026/R_20260914_2.pdf"&gt;PDF&lt;/a&gt; | &lt;a href="https://www.treasurydirect.gov/xml/R_20260914_2.xml"&gt;XML&lt;/a&gt;&lt;br /&gt;</description>
+      <category domain="Bill">Bill</category>
+      <pubDate>Mon, 14 Sep 2026 15:33:36 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

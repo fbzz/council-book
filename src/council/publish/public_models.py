@@ -5,8 +5,10 @@ Rules (each one is tested):
 - Units live in the field name: `_x` (multiple of NAV), `_pct` (percent), `_bp` (basis points).
   No field holds a dollar amount, a unit count, a price, or a broker/account/order/position id.
 - `cycle_id` (e.g. `2026-10-01T1440Z`) is the only key. Timestamps are UTC.
-- Evidence is referenced by typed refs. Broker feed items are ids only: licensed text is never
-  republished. FRED values appear only for series flagged publishable.
+- Evidence is referenced by typed refs. Broker feed items (`N:`) are ids only: licensed text is
+  never republished. Public-domain news items (`P:`: SEC filing notices, Federal Reserve Board,
+  BLS, BEA, Treasury and EIA releases) are cited by id with their publisher. FRED values appear
+  only for series flagged publishable.
 - Additive evolution: a field added after documents were first sealed is optional and listed in
   the model's `OMIT_WHEN_DEFAULT`; it is left out of the output while it holds its default, so a
   document sealed before the field existed still re-serialises to exactly its sealed bytes.
@@ -15,7 +17,7 @@ Rules (each one is tested):
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, get_args
 
 from pydantic import (
     AfterValidator,
@@ -53,9 +55,12 @@ Concession = Annotated[str, Field(max_length=300)]
 ReasonText = Annotated[str, Field(max_length=180)]      # PM deviation reason, dismissal "why"
 FactText = Annotated[str, Field(max_length=220)]        # decisive fact, card claim, macro driver
 CardId = Annotated[str, Field(pattern=r"^K:[a-z_]+:\d+$")]
-# Every evidence-id form: F/V/C/E/S/K ids, broker feed items (N:<8 hex>) and FRED series (M:...).
+BROKER_NEWS_ID_PATTERN = r"^N:[0-9a-f]{8}$"    # a broker feed item: licensed, id only
+PUBLIC_NEWS_ID_PATTERN = r"^P:[0-9a-f]{8}$"    # a public-domain news item (sha256 of public inputs)
+# Every evidence-id form: F/V/C/E/S/K ids, broker feed items (N:<8 hex>), public-domain news items
+# (P:<8 hex>) and FRED series (M:...).
 EVIDENCE_ID_PATTERN = (
-    r"^(?:[FVCESK]:[A-Za-z0-9_.:@#+-]{1,80}|N:[0-9a-f]{8}"
+    r"^(?:[FVCESK]:[A-Za-z0-9_.:@#+-]{1,80}|N:[0-9a-f]{8}|P:[0-9a-f]{8}"
     r"|M:[A-Z0-9_]{1,32}(?:\.[a-z0-9_]{1,16})?(?:@\d{4}-\d{2}-\d{2})?)$"
 )
 EvidenceId = Annotated[str, Field(pattern=EVIDENCE_ID_PATTERN)]
@@ -121,9 +126,13 @@ ErrorKind = Literal[
 ]
 FactKind = Literal["market", "vol", "cost", "macro", "event", "news", "filing", "fundamental"]
 FactUnit = Literal["pct", "x", "ratio", "bps", "bps_day", "days", "hours", "sigma", "state"]
+# The U.S. federal public-domain publishers whose items the record may cite (docs/data-rights.md):
+# SEC filing metadata, the Federal Reserve Board, BLS, BEA, Treasury and EIA.
+PublicNewsSource = Literal["sec", "fed_board", "bls", "bea", "treasury", "eia"]
+PUBLIC_NEWS_SOURCES: frozenset[str] = frozenset(get_args(PublicNewsSource))
 FactSource = Literal[
     "tiingo", "binance", "broker", "fred", "clock", "policy", "calendar", "broker_feed", "filing",
-    "unknown",
+    "unknown", "sec", "fed_board", "bls", "bea", "treasury", "eia",
 ]
 # Why a fact's value is not shown (docs/data-rights.md): a licensed FRED-hosted series, a value
 # derived from broker data beyond the coarse states the record may show, or an unknown source.
@@ -155,7 +164,20 @@ class BrokerFeedRef(PublicModel):
     """A broker news/feed item. Id only: the licensed text is never republished."""
 
     kind: Literal["broker_feed"] = "broker_feed"
-    id: str = Field(pattern=r"^N:[0-9a-f]{8}$")
+    id: str = Field(pattern=BROKER_NEWS_ID_PATTERN)
+
+
+class PublicNewsRef(PublicModel):
+    """A public-domain news item, cited by its `P:` id (a hash of the publisher and the item's
+    public key, so it hides nothing). `source` names the publisher when the item passed the public
+    test (a `P:` id, a public publisher and a public-domain licence); it is absent when the cited
+    id could not be checked against the cycle's pack."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"source"})
+
+    kind: Literal["public_news"] = "public_news"
+    id: str = Field(pattern=PUBLIC_NEWS_ID_PATTERN)
+    source: PublicNewsSource | None = None
 
 
 class FredRef(PublicModel):
@@ -186,7 +208,7 @@ class IdRef(PublicModel):
     id: str = Field(pattern=r"^[FVCESK]:[A-Za-z0-9_.:@#+-]{1,80}$")
 
 
-EvidenceRef = Annotated[BrokerFeedRef | FredRef | IdRef, Field(discriminator="kind")]
+EvidenceRef = Annotated[BrokerFeedRef | FredRef | IdRef | PublicNewsRef, Field(discriminator="kind")]
 
 
 # ------------------------------------------------------------------------------------ cycle parts
@@ -313,6 +335,9 @@ class PublicFact(PublicModel):
     states from Tiingo / Binance history, the clock and the public cost policy; FRED values only
     for publishable series; broker-candle facts only as coarse states (trend, market open) and
     volatility ratios. Otherwise `withheld` says why. News and filing items are ids only.
+    A news row's `source` is its publisher: `broker_feed` for an `N:` item (and never for a `P:`
+    item), a public publisher (sec, fed_board, ...) for a `P:` item that passed the public test,
+    else `unknown`.
     `as_of`: when the value became available to the council (always at or before the slot).
     Rounding by unit: pct / sigma 0.01, ratio / x 0.001, bps / hours 0.1, bps_day 0.01."""
 
@@ -334,6 +359,10 @@ class PublicFact(PublicModel):
             raise ValueError("a withheld fact may not carry a value")
         if self.kind in ("news", "filing") and self.value is not None:
             raise ValueError("news and filing items are ids only")
+        if self.id.startswith("N:") and self.source not in (None, "broker_feed"):
+            raise ValueError("a broker feed item is labelled broker_feed")
+        if self.id.startswith("P:") and self.source not in (None, "unknown", *PUBLIC_NEWS_SOURCES):
+            raise ValueError("a public news item is labelled with its public publisher")
         if isinstance(self.value, float) and abs(self.value) > 1_000_000:
             raise ValueError("fact value out of range")
         return self

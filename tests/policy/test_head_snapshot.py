@@ -17,7 +17,12 @@ import yaml
 from council import invariants, paths
 from council import policy as policy_module
 from council.clock import utcnow
-from council.context import POLICY_ALERT_EVERY, alert_policy_snapshot, build_context
+from council.context import (
+    POLICY_ALERT_EVERY,
+    alert_policy_snapshot,
+    build_context,
+    eligibility_blockers,
+)
 from council.cycle import engine_blockers
 from council.invariants import check_policy
 from council.operator import notify
@@ -41,6 +46,7 @@ from council.runtime import (
     last_verified_snapshot,
 )
 from council.settings import Settings
+from council.stocks.eligibility import UNCHECKED
 from tests.conftest import make_sleeve_policy_dir
 
 
@@ -67,12 +73,31 @@ def repo(tmp_path) -> Path:
     return root
 
 
+UNCHECKED_STAMP = "    eligibility_checked_at: null\n"
+CHECKED_STAMP = '    eligibility_checked_at: "2026-11-20T15:02:00Z"\n'
+
+
 @pytest.fixture
 def sleeve_repo(tmp_path) -> Path:
+    """The fixture sleeve with every line eligibility-checked (TSTE stamped like the others), so
+    only the tag decides the snapshot's blockers."""
     root = tmp_path / "checkout"
     make_sleeve_policy_dir(root / "policy")
+    _bump(root / "policy" / SLEEVE_FILE, UNCHECKED_STAMP, CHECKED_STAMP)
     _git(root, "init", "-q")
     _commit(root, "policy with a stock sleeve")
+    return root
+
+
+@pytest.fixture
+def unchecked_sleeve_repo(tmp_path) -> Path:
+    """The fixture sleeve as it is: TSTE was never eligibility-checked (a `--no-eligibility` rank)."""
+    root = tmp_path / "checkout"
+    make_sleeve_policy_dir(root / "policy")
+    assert UNCHECKED_STAMP in (root / "policy" / SLEEVE_FILE).read_text()
+    _git(root, "init", "-q")
+    _commit(root, "policy with an unchecked stock line")
+    _git(root, "tag", "stocks-2026Q4")
     return root
 
 
@@ -304,6 +329,46 @@ def test_a_committed_tagged_sleeve_stays_out_of_live_dry_run_and_approval(sleeve
     assert [ln.symbol for ln in _dry_ctx(state).policy.universe.stock_lines()][:3] == ["TSTA", "TSTB", "TSTC_B"]
     for ctx in (_live_ctx(state), _approve_ctx(state)):
         assert ctx.policy.universe.stock_lines() and ctx.policy_blockers == ()
+
+
+# ------------------------------------------------- live refusal of never-checked stock lines (WP-D)
+def test_a_live_context_holds_the_satellite_for_an_unchecked_stock_line(unchecked_sleeve_repo, state, monkeypatch,
+                                                                        sleeve_live):
+    monkeypatch.setattr(paths, "REPO_ROOT", unchecked_sleeve_repo)
+    snap = head_policy_snapshot(state, repo=unchecked_sleeve_repo)
+    assert snap.blockers == ()                                          # tagged: the snapshot itself is fine
+    for ctx in (_live_ctx(state), _approve_ctx(state)):
+        assert ctx.policy.universe.stock_lines()
+        (blocker,) = ctx.policy_blockers
+        assert (blocker.code, blocker.scope) == (UNCHECKED, "satellite") and "TSTE" in blocker.detail
+        # R20 gets the code only (no line id in a blocker string), scoped to the satellite
+        assert engine_blockers(ctx) == [f"satellite:{UNCHECKED}"]
+
+
+def test_an_unchecked_line_and_an_untagged_sleeve_are_two_satellite_blockers(tmp_path, state, monkeypatch,
+                                                                            sleeve_live):
+    root = tmp_path / "checkout"
+    make_sleeve_policy_dir(root / "policy")
+    _git(root, "init", "-q")
+    _commit(root, "untagged, with an unchecked line")
+    monkeypatch.setattr(paths, "REPO_ROOT", root)
+    ctx = _live_ctx(state)
+    assert [(b.code, b.scope) for b in ctx.policy_blockers] == [(SLEEVE_POLICY_UNTAGGED, "satellite"),
+                                                                (UNCHECKED, "satellite")]
+    assert engine_blockers(ctx) == [f"satellite:{SLEEVE_POLICY_UNTAGGED}", f"satellite:{UNCHECKED}"]
+
+
+def test_the_eligibility_blocker_needs_a_stock_line(policy, sleeve_policy):
+    assert eligibility_blockers(policy) == ()                           # core-only: nothing to check
+    (blocker,) = eligibility_blockers(sleeve_policy)
+    assert blocker == PolicyBlocker(UNCHECKED, "satellite",
+                                    "stock lines never eligibility-checked: TSTE; re-rank with the broker gate")
+
+
+def test_before_the_switch_an_unchecked_line_raises_no_blocker(unchecked_sleeve_repo, state, monkeypatch):
+    monkeypatch.setattr(paths, "REPO_ROOT", unchecked_sleeve_repo)
+    ctx = _live_ctx(state)
+    assert ctx.policy.universe.stock_lines() == [] and ctx.policy_blockers == ()
 
 
 def test_before_the_switch_an_untagged_sleeve_raises_no_blocker(sleeve_repo, state):

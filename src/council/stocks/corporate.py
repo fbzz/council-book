@@ -2,8 +2,8 @@
 vanished-position classification, and the credited-position reconcile rule. Read-only toward the
 broker; nothing here writes `policy/` (adopt proposes a sleeve-file edit under the state dir).
 
-Detection (for the watch and the cycle start; `detect` = `pending_actions` + `blockers` +
-`retired_held` + `alerts`):
+Detection (run by the cycle start, `cycle.corporate_actions`, and `council stocks status`; `detect` =
+`pending_actions` + `blockers` + `retired_held` + `alerts`; only while `sleeve_active`):
 - A broker position whose instrument maps to no line (`UNMAPPED_<id>`, or a symbol no line owns)
   and that no open leg of ours created is a pending corporate action (a spin-off or stock-for-stock
   credit). It raises ONE satellite-scoped blocker, `satellite:corporate_action_pending`: the stock
@@ -99,6 +99,13 @@ def opened_position_ids(ledger: Any) -> set[int]:
 
 def _owner(policy: Policy) -> dict[str, str]:
     return policy.universe.vehicle_map()
+
+
+def sleeve_active(policy: Policy) -> bool:
+    """The policy has a stock sleeve (stock lines or a sleeve file): only then do the cycle start, the
+    watch and the reconciles apply the corporate-action rules. A core-only book keeps today's rules:
+    an unknown position blocks, a vanished position is a stop hit."""
+    return policy.universe.stock_sleeve is not None or bool(policy.universe.stock_lines())
 
 
 def pending_actions(positions: Iterable[Position], policy: Policy, *, opened: Iterable[int]) -> list[PendingAction]:
@@ -265,8 +272,9 @@ def reconcile_corporate(result: Any, positions: Sequence[Position], policy: Poli
       `corporate_action_pending` blocker instead, so a credit holds the stock sleeve, never the whole
       book. A symbol one of OUR positions also carries stays a problem, and so does every other
       unknown position or missing stop.
-    Nothing calls this yet: `execution/executor.py::_final_state` and the watch's reconcile adopt it
-    (WP-F)."""
+    Called by the executor's post-execution reconcile (`Executor._corporate_reconcile`, which
+    `_final_state` judges) and by the watch's reconcile of held orders (`watch._final_after_wait`),
+    both only while `sleeve_active`."""
     result, warnings = reconcile_credited(result, positions, policy)
     pending = pending_actions(positions, policy, opened=opened)
     if not pending:

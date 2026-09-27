@@ -6,13 +6,24 @@ Admission rules (nothing later than the slot is admissible):
   `bar_available_at`; the `bar_available_at` keyword is a fallback for states without one, and
   the last resort is slot - data_age_h.
 - News: available_at strictly before the slot (an item stamped at the slot instant can only have
-  been read during the cycle) and at most 48 h old; newest 40, de-duplicated by ID.
+  been read during the cycle) and at most `news.lookback_h` (48 h) old, de-duplicated by ID. With
+  the policy's `news.quotas` (policy/council.yaml; transparency-v2 §3.3) each source keeps at most
+  its quota, newest first (the broker feed counts as `broker_feed`; a source with no quota keeps
+  nothing; unused quota is not reassigned, so one source's silence never changes another's items),
+  then the whole list is cut to `news.max_items` (40), newest first. Quotas are applied AFTER the
+  time filter, so an item stamped at or after the slot never takes a place. Without a policy (or
+  without quotas): the newest 40.
 - Macro: an observation is used only once fred.available_at(D) <= slot; the newest such value.
   Licensed series (fred.READ_ONLY) and unknown series get `Fact.publishable = False`: agents
   read them, public documents never show their values.
 - Events: scheduled events in [slot - 24 h, slot + 7 d] (upcoming events are public by schedule,
-  and the event block needs them). An event whose schedule became known after the slot (per
-  `EventItem.known_at`, else the `event_known_at` keyword) is dropped.
+  and the event block needs them), plus every event whose R16 no-add window
+  (`council.risk.churn.event_window`) contains the slot: a confirmed earnings report stays in the
+  pack until its reaction bar is usable (a report after Friday's close, until Monday evening) and an
+  estimated report date from the start to the end of its +/- N trading-day window, so the pack never
+  cuts an earnings window short (macro windows end 2 h after the event, inside the 24 h look-back).
+  An event whose schedule became known after the slot (per `EventItem.known_at`, else the
+  `event_known_at` keyword) is dropped.
 - Cost facts: available_at <= slot, and each must be a C: fact of kind "cost"
   (`cost_facts_from_quotes` builds them from the cycle's floored quotes).
 - Fundamentals (stock lines, design §11.2; `council.stocks.fundamentals`): available_at <= slot
@@ -50,6 +61,7 @@ from council.data.feeds import sort_news
 from council.facts.evidence_ids import FUNDAMENTAL_FIELDS, cost_id, fact_id, macro_id, vol_id
 from council.models.facts import EventItem, Fact, FactPack, MarketState, NewsItem
 from council.policy import Policy
+from council.risk.churn import event_window
 
 NEWS_LOOKBACK = timedelta(hours=48)
 NEWS_MAX = 40
@@ -189,32 +201,76 @@ def macro_facts(macro: Mapping[str, pd.Series], *, slot: datetime) -> tuple[list
 
 
 # ------------------------------------------------------------------------------------ admission
-def admissible_news(news: Iterable[NewsItem], slot: datetime) -> list[NewsItem]:
-    """News available strictly before the slot and at most 48 h old: newest 40, unique by ID."""
-    lo = slot - NEWS_LOOKBACK
+BROKER_QUOTA_KEY = "broker_feed"          # the quota key of `etoro_feed` items
+
+
+def news_quota_key(item: NewsItem) -> str:
+    """The `news.quotas` key an item counts against: its source, the broker feed as `broker_feed`."""
+    return BROKER_QUOTA_KEY if item.source == "etoro_feed" else str(item.source)
+
+
+def news_settings(policy: Policy | None) -> tuple[int, timedelta, dict[str, int] | None]:
+    """(max items, look-back, quotas or None) from `policy.council["news"]`; the defaults (40, 48 h,
+    no quotas) without a policy or a `news` section."""
+    council = getattr(policy, "council", None)
+    section = council.get("news") if isinstance(council, Mapping) else None
+    cfg: Mapping[str, object] = section if isinstance(section, Mapping) else {}
+    max_items = int(cfg.get("max_items", NEWS_MAX))  # type: ignore[call-overload]
+    lookback = timedelta(hours=float(cfg.get("lookback_h", NEWS_LOOKBACK.total_seconds() / 3600.0)))  # type: ignore[arg-type]
+    raw = cfg.get("quotas")
+    quotas = {str(k): max(0, int(v)) for k, v in raw.items()} if isinstance(raw, Mapping) else None
+    return max(0, max_items), lookback, quotas
+
+
+def admissible_news(news: Iterable[NewsItem], slot: datetime, policy: Policy | None = None) -> list[NewsItem]:
+    """News available strictly before the slot and inside the look-back, unique by ID, newest
+    first; per-source quotas when the policy sets them, then at most `max_items` (see the module
+    docstring)."""
+    max_items, lookback, quotas = news_settings(policy)
+    lo = slot - lookback
     unique: dict[str, NewsItem] = {}
     for item in sort_news(n for n in news if lo <= to_utc(n.available_at) < slot):
         unique.setdefault(item.id, item)
-    return list(unique.values())[:NEWS_MAX]
+    ordered = list(unique.values())
+    if quotas is None:
+        return ordered[:max_items]
+    used: dict[str, int] = {}
+    kept: list[NewsItem] = []
+    for item in ordered:
+        key = news_quota_key(item)
+        if used.get(key, 0) < quotas.get(key, 0):
+            used[key] = used.get(key, 0) + 1
+            kept.append(item)
+    return kept[:max_items]
 
 
 def admissible_events(
-    events: Iterable[EventItem], slot: datetime, known_at: Mapping[str, datetime] | None = None
+    events: Iterable[EventItem], slot: datetime, known_at: Mapping[str, datetime] | None = None,
+    *, policy: Policy | None = None,
 ) -> list[EventItem]:
-    """Scheduled events inside [slot - 24 h, slot + 7 d] whose schedule was known by the slot
-    (the event's own `known_at` first, else `known_at[event.id]`; unknown = public in advance)."""
+    """Scheduled events inside [slot - 24 h, slot + 7 d], or (with `policy`) whose R16 no-add window
+    contains the slot (`council.risk.churn.event_window`: an earnings window outlives the 24 h
+    look-back, an estimated one can start before the 7 d horizon), and whose schedule was known by
+    the slot (the event's own `known_at` first, else `known_at[event.id]`; unknown = public in
+    advance). Without `policy`, only the time range applies."""
     lo, hi = slot - EVENT_LOOKBACK, slot + EVENT_HORIZON
     known = known_at or {}
     unique: dict[str, EventItem] = {}
     for event in sorted(events, key=lambda e: (to_utc(e.at_utc), e.id)):
         when = to_utc(event.at_utc)
-        if not lo <= when <= hi:
+        if not (lo <= when <= hi or (policy is not None and _window_contains(event, slot, policy))):
             continue
         seen = event.known_at if event.known_at is not None else known.get(event.id)
         if seen is not None and to_utc(seen) > slot:
             continue
         unique.setdefault(event.id, event)
     return list(unique.values())
+
+
+def _window_contains(event: EventItem, slot: datetime, policy: Policy) -> bool:
+    """R16's window of `event` (None for a kind R16 ignores) contains the slot."""
+    window = event_window(event, policy)
+    return window is not None and window[0] <= to_utc(slot) <= window[1]
 
 
 def admissible_costs(cost_facts: Iterable[Fact], slot: datetime) -> list[Fact]:
@@ -397,8 +453,8 @@ def build_fact_pack(
         admitted=admitted,
         states=out_states,
         facts=sorted(facts, key=lambda f: f.id),
-        news=admissible_news(news, slot_t),
-        events=admissible_events(events, slot_t, event_known_at),
+        news=admissible_news(news, slot_t, policy),
+        events=admissible_events(events, slot_t, event_known_at, policy=policy),
         quality_flags=sorted(flags),
         frozen=frozen,
     )

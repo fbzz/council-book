@@ -1,5 +1,128 @@
 # Changelog
 
+## transparency v2, stage 2: public-domain news for the news role, the broker feed switch, input capture wired — policy change (2026-09-26)
+- **Policy change**: `policy/council.yaml` gains `news:` (`max_items: 40`, `lookback_h: 48`,
+  `quotas: {broker_feed: 25, sec: 8, fed_board: 5, bls: 2, bea: 2, treasury: 2, eia: 2}`,
+  `broker_feed: true`). The policy hash changes. What the agents read changes (the user's decisions of
+  2026-09-26):
+  - **Wider (public-domain news):** every cycle, in rehearsal and live, the news role reads
+    public-domain items (Federal Reserve Board, BLS, BEA, TreasuryDirect, EIA, and SEC 8-K / 6-K
+    metadata for the held and shortlisted stock lines, which exist only once
+    `invariants.STOCK_SLEEVE_LIVE` flips). Before, it read the broker feed only, i.e. nothing until the
+    token: from 0 items to up to 21. Items are cleaned and leak-scanned at fetch time, a failing or slow
+    source is the flag `news_source_error:<source>:<type>` (30 s budget), and news flags stay out of the
+    fact pack (a skew drop depends on an item dated after the slot).
+  - **Narrower (quotas):** each source keeps at most its quota of the newest items available before the
+    slot, then at most 40 in all; unused quota is not reassigned. The broker feed alone now gives at most
+    25 items (was 40). Quotas apply after the time filter, so nothing at or after the slot takes a place
+    (lookahead test).
+  - **The broker feed switch (eToro Licensed Content):** the news role reads the feed whenever an Agent
+    Portfolio is connected, as before (the feed serves the operator's personal use with their own
+    account). New: `invariants.BROKER_FEED_ENABLED = True` is the code ceiling and `news.broker_feed:
+    false` turns the feed off; off means zero feed requests, the flag `news_broker_feed:off`, and
+    earnings from the SEC estimate alone. Feed text is never published (ids, counts, times, instruments
+    and the agents' own paraphrase only) and its private copies are purged within 7 days
+    (`invariants.LICENSED_RETENTION_DAYS`). A 401/403 from the feed is `news_source_error:broker_feed:auth`
+    and the news role still runs on the public items. `N:` ids are now an HMAC of the post id under the
+    private install key (`state_dir/keys/install.key`), no longer a plain sha256 (no `N:` id had been
+    published).
+  - **Stricter (T-D17):** a `news_material` card whose cited news items are all SEC filing items is kept
+    but never qualifying (note `filing_metadata_only`): the model sees the form and item codes, never the
+    filing's content, so 8-K metadata alone can never unlock a cut.
+  - **No call without news:** with no admissible news item the news role is recorded `skipped`
+    (`no_news_items`) and makes no model call. No prompt changed.
+- Private capture wired (T1, T1v): every cycle records each model call's exact input before it is sent
+  (`state_dir/calls/`, broker-licensed texts apart in `state_dir/licensed/calls/`, 0600 files in 0700
+  folders), and the council keeps the inputs of calls that ran before a timeout. The ledger's
+  `extras.news_fetch` records, privately, each source's counts and each public item's link and times
+  (broker items are only counted). The first cycle of each UTC day purges licensed copies that would pass
+  7 days before the next daily run (`purge_error:*` on failure). CLI: `council inputs <cycle> [--html]`,
+  `council inputs verify|prune` and `council purge-licensed` are registered; each refuses outside the
+  operator's interactive terminal (always under `CLAUDECODE=1`).
+  The reading list in `council inputs` prints each public-domain item's link (from `extras.news_fetch`;
+  a broker item never has one). The capture is written as soon as the council returns, so a later
+  failure in the cycle does not lose what the agents saw.
+- Publication safety (T0 handoffs): the cycle passes the install key, so the published material-change
+  fingerprint is an HMAC (a key that cannot be loaded gives a one-cycle random key and
+  `install_key_error:<type>`). The final leak scan before every publish now checks the pack's broker feed
+  texts and the private canaries (`COUNCIL_LEAK_CANARIES`, and the NAV and mirror figures of at least
+  10,000; smaller figures would match years, slot times and digests, so they stay with the redaction
+  layer). Still open (M5-N): a planner skip `below_broker_minimum` is published as written.
+- Docs: `docs/data-rights.md` rows for each public-domain source (fields, attribution, archived licence
+  hash), the broker feed row, the evidence table and the Licences clause; `docs/architecture.md` News and
+  Transparency sections; `docs/news-sources.md` status.
+
+## transparency v2, stage 1: publication safety, private input capture, public-domain news parsers (2026-09-26)
+- No policy file changes, no prompt change and no change to what any model reads: a golden test pins
+  every desk, news list, debate transcript, instruction tail and every call's system and user message
+  byte for byte against the code before this change (ten fixture packs, every call of a stub
+  council run on each).
+- Public record (T0): risk-engine hold reasons go through one closed table
+  (`publish/trace_rules.py`). Every R11 variant (deadband, reference rule, size floor) publishes as
+  the bare `LINE: R11`, so a size-floor hold, which bounds the NAV, reads like a deadband hold; an
+  R15 hold keeps its SR_be only when the line's cost came from the policy floors and its history from
+  Tiingo / Binance, otherwise `LINE: R15`; `R15_fee` and `R14_fee` never carry a number; an unknown
+  note publishes as its bare code (or `held`). The R15 check value follows the same rule. News rows
+  and events are labelled by their own source (SEC-derived earnings are `sec`, no longer
+  `broker_feed`); `P:` public-domain news ids are accepted as evidence (`public_news` refs with their
+  publisher), and a `P:` id whose item is not public-domain is dropped and counted
+  (`news_licence_mismatch:<n>`). The private flag `size_floor_binding:*` is never published. The
+  material-change fingerprint can be keyed by a private install key (`state_dir/keys/install.key`,
+  0600); the cycle does not pass it yet. Known open channel (M5-N, before token day): a planner skip
+  (`below_broker_minimum`) is still published as written; a strict xfail test tracks it.
+- Private (T1, T1v): every model call's exact input is recorded from structured sections before it
+  is sent (`state_dir/calls/`, 0600 files in 0700 folders, never inside the repository), with every
+  raw reply, the correction turn and salted commitments (32 random bytes per call and section).
+  Broker-licensed texts are held apart in `state_dir/licensed/calls/`; `council purge-licensed`
+  (operator only; at most 7 days) filters model output against them, then deletes them. Viewer:
+  `council inputs <cycle> [--html]` (operator only). None of this is wired into the cycle or the CLI
+  yet.
+- News parsers (T3a): Federal Reserve Board, BLS, BEA, TreasuryDirect auctions, EIA and SEC 8-K / 6-K
+  metadata (`data/gov_news.py`, `stocks/sec_news.py`) produce `P:` items, cleaned and leak-scanned at
+  fetch time, with per-source timeouts, a 30 s budget and SEC requests through the shared limiter;
+  licence pages archived under `tests/fixtures/news/licences/`, register in `docs/news-sources.md`.
+  Not wired into any cycle.
+
+## stock-sleeve follow-ups: earnings windows in the pack, unchecked lines, corporate actions at runtime, `keys store-read` (2026-09-26)
+- No policy file changes and no stock line anywhere: `invariants.STOCK_SLEEVE_LIVE` stays False, so
+  the stock-only items below have no live effect until the go-live commit. The core-only book is
+  unchanged (each item says why).
+- Fact pack (resolves the WP-H known limit): an event also stays in the pack while its R16 no-add
+  window contains the slot, besides the [slot - 24 h, slot + 7 d] range. A confirmed earnings report
+  stays until the later of 30 h after it and its reaction bar (a report after Friday's close, until
+  Monday evening's bar); an estimated date from 24 h before the 5th US trading day before it to the
+  end of its window, even while the date itself lies beyond the 7-day horizon. An event whose
+  schedule became known only after the slot is still dropped. Stricter for stock lines only (R16 now
+  sees the whole window WP-H specified); core-only: macro windows end 2 h after the event, inside the
+  24 h look-back, so the pack's events are unchanged.
+- Stricter (stock-only): every context `build_context` makes (live, dry-run and stub) whose policy
+  has a stock line that was never eligibility-checked (a `--no-eligibility` rank stamps it null)
+  carries the satellite-scoped blocker `stock_eligibility_unchecked`: R20 holds the stock sleeve,
+  the core runs. The blocker string names no line; `council stocks status`, `onboard` and `doctor` name them.
+- Stricter (stock-only): corporate actions at runtime (design §3.6). The cycle start checks the broker
+  snapshot: a position no line owns that no open leg of ours created raises
+  `satellite:corporate_action_pending`, a position on a retired vehicle
+  `satellite:retired_line_held:<line>`, a check that fails `satellite:corporate_action_check_failed`.
+  Each holds only the stock sleeve and sends the operator an URGENT alert naming the instrument and
+  `council stocks adopt` (private; if the notifier's leak scan refuses it, a fixed text goes instead).
+  Only when the policy has a stock sleeve.
+- Looser (stock-only, design §17.2 #10): the executor's post-execution reconcile and the watch's
+  reconcile of held orders no longer block the whole book on a pending corporate action. The position
+  is taken out of the unknown positions and the missing stops and recorded as a reason; the next
+  cycle start holds the stock sleeve. A credited line's position without a stop is the warning
+  `credited_no_sl:<line>`. Every other unknown position or missing stop still blocks, and a
+  core-only book keeps today's rule (an unknown position blocks).
+- Changed (stock-only): the watch records a vanished stock position as a stop hit (R4d cool-off)
+  only when its last observed bid was at or below its stop, or above it by at most 2 x the line's
+  4-hour sigma (the daily sigma x sqrt(4 / 6.5), stored privately by each cycle); otherwise an URGENT
+  `vanished_not_stop:<line>` and no cool-off. Missing data counts as a stop hit. The watch now keeps
+  each position's stop rate and last bid in its private state (a state written before reads as
+  before). Core lines: unchanged, a vanished position is a stop hit.
+- Fixed: `council keys store-read` crashed with a TypeError (the CLI called the keychain helper
+  without its keychain argument); it stores the app key and the READ token in the login keychain
+  again. A CLI test now covers `store-read` and `store-write` (no token on a command line; the WRITE
+  item only in the write keychain).
+
 ## `council stocks` commands, the stock eligibility gate and corporate actions (WP-D) (2026-09-26)
 - No policy file changes and no stock line anywhere: `invariants.STOCK_SLEEVE_LIVE` stays False, so
   nothing below changes a live cycle. The commands read the COMMITTED policy (a snapshot of the
@@ -227,6 +350,39 @@
   more than 2.5 daily σ from the pack's last close (`gap_guard`). The reference backtest charges
   `stock_real` plus the fixed fee, and `live_commission_nav` matches its per-leg fee to the live
   scalar.
+
+## SEC data layer and the live rank engine (WP-C) (2026-09-26)
+- No policy file changes and no stock line anywhere; nothing here runs in a cycle. (This entry was
+  added afterwards: WP-C landed in the same commit as WP-B...H without one.)
+- `council.stocks.sec`: an SEC EDGAR client (ticker to CIK, filer submissions, XBRL companyfacts; US
+  public domain). The user agent (Keychain item `council-book.sec-user-agent`, override
+  `COUNCIL_SEC_USER_AGENT`) is required: missing or malformed, the client raises before any request,
+  and the value travels only in the request header, never in a log line, a repr or an error. Fair
+  access: a token bucket paces every attempt, retries included, at no more than 7 requests a second
+  with no burst (SEC's published limit is 10); a faster rate is refused. Retries honour
+  Retry-After; a filer without XBRL facts is a normal empty answer. Documents are trimmed to what the
+  frozen rule module reads (a test pins the rule's output as unchanged) and cached as gzip JSON in
+  the private state directory with a TTL (tickers 24 h, submissions and companyfacts 20 h). The rank
+  always forces a refresh of companyfacts, so a stale copy is never ranked.
+- `council.stocks.universe`: the S&P 500 and Nasdaq-100 members from Wikipedia's constituents tables
+  through the MediaWiki API (the current page, or the revision as of a date for a historical rank;
+  CC BY-SA: the lists are used, never republished), plus the AI-adjacent list (spec L9); the optional
+  `index_constitution` cross-check; one line id per ticker (`BRK.B`, `BF-B`, `BRK/B` become
+  `BRK_B`); one company per CIK (the higher 63-session median dollar volume wins, as in the study);
+  SEC SIC to Fama-French 12 through the frozen sector map with no overrides (the rank excludes
+  Money); 20-F/40-F filers flagged as foreign. Price facts come from the history source; the module
+  fetches none.
+- `council.stocks.rank`: a pure function (no network, files or clock) that reproduces the study's
+  universe filters step by step on filings available strictly before the rank date, then scores and
+  selects with the frozen rule modules, which it imports and never copies (a test monkeypatches
+  `score.select_rule`; another checks that no stock module holds a copy). Its constants come from the
+  adoption record (SQ-8). Live-only additions, none of which changes the selection: an 8-name
+  shortlist chosen by the same rule, the full order for eligibility replacements, a reason for each
+  excluded name, and a membership source older than 120 days or dated after the rank date is
+  refused. Parity tests pin the eligible set, the funnel and the selections to the tagged study script
+  on its seeded fixture, and on the study's frozen input bundle when that is on the machine.
+- `council.data.cache` gains the `json.gz` format and a forced refresh that never reads the entry;
+  `council.data.credentials` gains the SEC user agent.
 
 ## stock-sleeve study result and recorded override (WP-I) — policy change (2026-09-26)
 - **Policy change (a record only)**: new `policy/variants/stock-sleeve-adopted.yaml`. It sits in

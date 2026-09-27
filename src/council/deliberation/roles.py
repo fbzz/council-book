@@ -10,7 +10,17 @@ Rules:
     within the last 24h; `corroborated_by` lists those vol cards. `news_context` never qualifies.
     The council passes only THIS cycle's vol cards (card IDs are per cycle; no carry-forward in
     v1), so in practice the vol card must be live at the slot.
+  - Filing metadata never unlocks a cut (transparency-v2 T-D17): the model sees an SEC 8-K / 6-K
+    item's form and item codes only, never the filing's content, so a `news_material` card whose
+    cited news items are all SEC filing items is kept but never qualifying, whatever corroborates
+    it; the note `filing_metadata_only` records why. One non-SEC news item among its evidence (a
+    Federal Reserve release, a broker feed item) lets the usual corroboration rule decide.
   - Macro drivers citing unknown IDs are dropped; sleeve tilts for unknown sleeves are dropped.
+  - Every drop is recorded twice: as the old free-text note (`dropped`, unchanged wording) and as a
+    structured `models.drops.Drop` (`drops`: role, what, index, code, ids, lines, the draft), which
+    the per-line decision trail shows next to the line it concerned (transparency-v2 §4.3).
+  - Inputs (transparency-v2 §2.3): news reads `desk.code.*`, `sep.news`, `news_detail`,
+    `tail.news`; macro reads `desk.code.*`, `tail.macro`. `sink` records each exact input.
 """
 
 from __future__ import annotations
@@ -19,18 +29,25 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any, NamedTuple
 
+from council.deliberation.capture import InputSink
 from council.deliberation.common import admissible_ids, call_role
-from council.deliberation.desk import news_detail
+from council.deliberation.desk import news_detail_section
+from council.deliberation.segments import Segmented, literal, raw
 from council.llm.gateway import Gateway
 from council.llm.prompts import PromptRegistry
 from council.models.cards import CardDraft, EvidenceCard, MacroAnalystOutput, NewsAnalystOutput
 from council.models.cycle import RoleCall
+from council.models.drops import Drop, drop_from_problem
 from council.models.facts import FactPack
 from council.policy import LineSpec, Policy
 
 NEWS_TYPES = frozenset({"news_material", "news_context"})
 MACRO_TYPES = frozenset({"macro_context"})
 CORROBORATION_WINDOW = timedelta(hours=24)
+FILING_SOURCE = "sec"
+FILING_ONLY_NOTE = "filing_metadata_only (cannot unlock a cut)"
+TAIL_NEWS = "\nWrite the news cards now. Reply with the JSON object only."
+TAIL_MACRO = "\nDescribe the regime now. Reply with the JSON object only."
 
 
 class NewsRun(NamedTuple):
@@ -38,6 +55,7 @@ class NewsRun(NamedTuple):
     calls: list[RoleCall]
     dropped: list[str]
     raw: str
+    drops: tuple[Drop, ...] = ()
 
 
 class MacroRun(NamedTuple):
@@ -46,6 +64,17 @@ class MacroRun(NamedTuple):
     calls: list[RoleCall]
     dropped: list[str]
     raw: str
+    drops: tuple[Drop, ...] = ()
+
+
+class DraftCheck(NamedTuple):
+    cards: list[EvidenceCard]
+    dropped: list[str]             # the free-text notes (unchanged wording)
+    drops: list[Drop]              # the same drops, structured
+
+
+def _desk(desk_text: str | None, desk_sections: Sequence[Segmented] | None) -> list[Segmented]:
+    return list(desk_sections) if desk_sections is not None else [raw("desk", desk_text or "")]
 
 
 def admitted_lines(pack: FactPack, lines: Sequence[LineSpec]) -> set[str]:
@@ -85,6 +114,60 @@ def corroborating_vol_cards(
     return out
 
 
+def filing_metadata_only(draft: CardDraft, pack: FactPack) -> bool:
+    """True when every news item the draft cites is an SEC filing item (8-K / 6-K metadata), i.e.
+    the card's news evidence is metadata whose content the model never saw (T-D17)."""
+    by_id = {n.id: n for n in pack.news}
+    cited = [by_id[e] for e in draft.evidence_ids if e in by_id]
+    return bool(cited) and all(n.source == FILING_SOURCE for n in cited)
+
+
+def check_drafts(
+    drafts: Sequence[CardDraft],
+    *,
+    role: str,
+    pack: FactPack,
+    lines: Sequence[LineSpec],
+    allowed_types: frozenset[str],
+    qualifying_types: Sequence[str],
+    corroborators: Sequence[tuple[EvidenceCard, datetime]],
+    now: datetime,
+) -> DraftCheck:
+    """Check drafts, assign IDs, set corroboration/qualifying. Returns the kept cards, the drop
+    notes (with the filing-metadata labels, as before) and the structured drops."""
+    pack_ids = admissible_ids(pack)
+    scope_ok = admitted_lines(pack, lines)
+    cards: list[EvidenceCard] = []
+    dropped: list[str] = []
+    drops: list[Drop] = []
+    for i, draft in enumerate(drafts, start=1):
+        problem = draft_problem(
+            draft, pack_ids=pack_ids, scope_ok=scope_ok, allowed_types=allowed_types
+        )
+        if problem is not None:
+            dropped.append(f"{role} draft {i}: {problem}")
+            drops.append(drop_from_problem(problem, role=role, index=i, draft=draft))
+            continue
+        corroborated: list[str] = []
+        qualifying = False
+        if draft.card_type == "news_material":
+            corroborated = corroborating_vol_cards(draft, corroborators, now)
+            filing_only = filing_metadata_only(draft, pack)
+            qualifying = bool(corroborated) and "news_material" in qualifying_types and not filing_only
+            if filing_only:
+                dropped.append(f"{role} card K:{role}:{len(cards) + 1}: {FILING_ONLY_NOTE}")
+        cards.append(
+            EvidenceCard(
+                **draft.model_dump(),
+                card_id=f"K:{role}:{len(cards) + 1}",
+                role=role,
+                corroborated_by=corroborated,
+                qualifying=qualifying,
+            )
+        )
+    return DraftCheck(cards, dropped, drops)
+
+
 def accept_drafts(
     drafts: Sequence[CardDraft],
     *,
@@ -97,32 +180,9 @@ def accept_drafts(
     now: datetime,
 ) -> tuple[list[EvidenceCard], list[str]]:
     """Check drafts, assign IDs, set corroboration/qualifying. Returns (cards, drop reasons)."""
-    pack_ids = admissible_ids(pack)
-    scope_ok = admitted_lines(pack, lines)
-    cards: list[EvidenceCard] = []
-    dropped: list[str] = []
-    for i, draft in enumerate(drafts, start=1):
-        problem = draft_problem(
-            draft, pack_ids=pack_ids, scope_ok=scope_ok, allowed_types=allowed_types
-        )
-        if problem is not None:
-            dropped.append(f"{role} draft {i}: {problem}")
-            continue
-        corroborated: list[str] = []
-        qualifying = False
-        if draft.card_type == "news_material":
-            corroborated = corroborating_vol_cards(draft, corroborators, now)
-            qualifying = bool(corroborated) and "news_material" in qualifying_types
-        cards.append(
-            EvidenceCard(
-                **draft.model_dump(),
-                card_id=f"K:{role}:{len(cards) + 1}",
-                role=role,
-                corroborated_by=corroborated,
-                qualifying=qualifying,
-            )
-        )
-    return cards, dropped
+    checked = check_drafts(drafts, role=role, pack=pack, lines=lines, allowed_types=allowed_types,
+                           qualifying_types=qualifying_types, corroborators=corroborators, now=now)
+    return checked.cards, checked.dropped
 
 
 async def run_news(
@@ -130,7 +190,7 @@ async def run_news(
     gw: Gateway,
     reg: PromptRegistry,
     pack: FactPack,
-    desk_text: str,
+    desk_text: str | None = None,
     ctx: Mapping[str, Any],
     lines: Sequence[LineSpec],
     policy: Policy,
@@ -138,19 +198,20 @@ async def run_news(
     now: datetime,
     seed: int = 42,
     num_predict: int = 1200,
+    desk_sections: Sequence[Segmented] | None = None,
+    sink: InputSink | None = None,
+    attempt: int = 0,
 ) -> NewsRun:
     """One news-analyst call -> checked evidence cards."""
-    user = (
-        f"{desk_text}\n{news_detail(pack)}\n"
-        "Write the news cards now. Reply with the JSON object only."
-    )
+    sections = [*_desk(desk_text, desk_sections), literal("sep.news", "\n"),
+                news_detail_section(pack), literal("tail.news", TAIL_NEWS, "tail")]
     res = await call_role(
-        gw, reg, role="news", ctx=ctx, user=user, schema=NewsAnalystOutput,
-        seed=seed, num_predict=num_predict,
+        gw, reg, role="news", ctx=ctx, sections=sections, schema=NewsAnalystOutput,
+        seed=seed, num_predict=num_predict, sink=sink, attempt=attempt,
     )
     if not isinstance(res.parsed, NewsAnalystOutput):
         return NewsRun([], [res.call], [], res.raw)
-    cards, dropped = accept_drafts(
+    checked = check_drafts(
         res.parsed.cards,
         role="news",
         pack=pack,
@@ -160,7 +221,7 @@ async def run_news(
         corroborators=corroborators,
         now=now,
     )
-    return NewsRun(cards, [res.call], dropped, res.raw)
+    return NewsRun(checked.cards, [res.call], checked.dropped, res.raw, tuple(checked.drops))
 
 
 async def run_macro(
@@ -168,40 +229,48 @@ async def run_macro(
     gw: Gateway,
     reg: PromptRegistry,
     pack: FactPack,
-    desk_text: str,
+    desk_text: str | None = None,
     ctx: Mapping[str, Any],
     lines: Sequence[LineSpec],
     policy: Policy,
     now: datetime,
     seed: int = 42,
     num_predict: int = 700,
+    desk_sections: Sequence[Segmented] | None = None,
+    sink: InputSink | None = None,
+    attempt: int = 0,
 ) -> MacroRun:
     """One macro-analyst call -> a cleaned MacroAnalystOutput plus its checked cards."""
-    user = f"{desk_text}\nDescribe the regime now. Reply with the JSON object only."
+    sections = [*_desk(desk_text, desk_sections), literal("tail.macro", TAIL_MACRO, "tail")]
     res = await call_role(
-        gw, reg, role="macro", ctx=ctx, user=user, schema=MacroAnalystOutput,
-        seed=seed, num_predict=num_predict,
+        gw, reg, role="macro", ctx=ctx, sections=sections, schema=MacroAnalystOutput,
+        seed=seed, num_predict=num_predict, sink=sink, attempt=attempt,
     )
     if not isinstance(res.parsed, MacroAnalystOutput):
         return MacroRun(None, [], [res.call], [], res.raw)
     out = res.parsed
     pack_ids = admissible_ids(pack)
     dropped: list[str] = []
+    drops: list[Drop] = []
     drivers = []
     for i, drv in enumerate(out.drivers, start=1):
         unknown = [e for e in drv.evidence_ids if e not in pack_ids]
         if unknown:
             dropped.append(f"macro driver {i}: unknown_evidence {','.join(unknown)}")
+            drops.append(Drop(role="macro", what="macro_driver", index=i, code="unknown_evidence",
+                              ids=unknown))
         else:
             drivers.append(drv)
     sleeves = {ln.sleeve for ln in lines}
     tilts = {}
-    for sleeve, tilt in out.sleeve_tilts.items():
+    for i, (sleeve, tilt) in enumerate(out.sleeve_tilts.items(), start=1):
         if sleeve in sleeves:
             tilts[sleeve] = tilt
         else:
             dropped.append(f"macro tilt: unknown_sleeve {sleeve}")
-    cards, card_drops = accept_drafts(
+            drops.append(Drop(role="macro", what="macro_tilt", index=i, code="unknown_sleeve",
+                              target=str(sleeve)))
+    checked = check_drafts(
         out.cards,
         role="macro",
         pack=pack,
@@ -211,7 +280,9 @@ async def run_macro(
         corroborators=(),
         now=now,
     )
-    dropped += card_drops
+    cards = checked.cards
+    dropped += checked.dropped
+    drops += checked.drops
     kept_drafts = [CardDraft(**c.model_dump(include=set(CardDraft.model_fields))) for c in cards]
     clean = out.model_copy(update={"drivers": drivers, "sleeve_tilts": tilts, "cards": kept_drafts})
-    return MacroRun(clean, cards, [res.call], dropped, res.raw)
+    return MacroRun(clean, cards, [res.call], dropped, res.raw, tuple(drops))

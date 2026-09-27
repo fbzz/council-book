@@ -25,6 +25,32 @@ floor and discretionary-only trailing budgets, stamps each leg with its origin, 
 and fee, arms the planner's gap guard on stock lines, and feeds the kill switch the real account's
 cumulative extra fee drag. None of these numbers is published or shown to the council.
 
+Corporate actions (design §3.6): with a stock sleeve, the cycle start checks the broker snapshot for
+positions no line owns that no open leg of ours created (a spin-off or stock-for-stock credit) and
+for positions on retired vehicles (`stocks.corporate.detect`). Each raises a satellite-scoped R20
+blocker (public-safe codes: the stock sleeve is held, the core trades) and an URGENT alert to the
+operator naming the instrument and the command (private: the alert is never published). A failing
+check holds the satellite too (`corporate_action_check_failed`).
+
+What each agent saw (transparency-v2 §2.2, T1/T1v): the council gets a private input sink, so every
+model call's exact input (its sections, earlier turns, news items, instruction tail) is recorded
+before it is sent, and a call that times out keeps its input; the capture is written to
+`state_dir/calls/` (broker-licensed item texts apart in `state_dir/licensed/calls/`), never inside the
+repository, and read only from the operator terminal (`council inputs <cycle>`). Capture never stops
+a cycle (`inputs_capture_error:<type>`). The first cycle of each UTC day purges licensed copies that
+would pass 7 days before the next daily run (`council.operator.purge`; a failure is `purge_error:*`).
+
+Why each line moved (transparency-v2 §4, T5a): the record keeps the structured drops, the medoid's
+fall-back lines, the bands before the analysts' cards, the lines with new evidence, the claim-to-line
+tags and the publishable values of the cited evidence (`record_trail`), so `council why <cycle>`
+can walk every line from the reference to execution. It never stops a cycle (`trail_record_error:*`).
+
+News (T3b): the news role reads the public-domain items and, with a connected Agent Portfolio and the
+switch on, the broker's feed (`council.context.news_sources`); their flags (`news_source_error:*`,
+`news_broker_feed:off`, ...) join the record, and the private record keeps each public item's link.
+The final leak scan before a publish also guards the pack's licensed texts (feed text) and the
+private NAV figures; the material-change fingerprint is keyed by the private install key.
+
 Live data path (WP-G, design §11): stock lines take their history from the dedicated stock source
 (`facts.market.history_source`; their states use its availability rule and label); returns are
 aligned on the core lines' calendar, so a short-history stock never shortens the core's covariance
@@ -41,6 +67,7 @@ import gzip
 import json
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -142,12 +169,15 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     expired = ledger.expire_stale(now)
     if expired:
         flags.append(f"expired:{len(expired)}")
+    flags += daily_purge(ctx, now)
 
     # ---- broker snapshot, NAV and kill switch (only once the Agent Portfolio is connected)
     snapshot, kill_state, nav = None, "NORMAL", None
+    corporate_blockers: list[str] = []
     if ctx.sources.broker is not None:
         _settle_held_orders(ctx, now)       # before the snapshot, so a filled hold is not counted twice
         snapshot, kill_state, nav = _snapshot_and_kill(ctx, now)
+        corporate_blockers = corporate_actions(ctx, snapshot, cycle_id)
     # PRIVATE: the fixed fee and the real trade floor as NAV shares (never published or prompted)
     econ = cycle_trade_economics(policy, ctx.state_dir, snapshot.equity_usd if snapshot is not None else None)
 
@@ -159,7 +189,9 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     ev_start, ev_end = window(slot)
     events, ev_flags = ctx.sources.events(ev_start, ev_end)
     flags += ev_flags
-    news = ctx.sources.news(slot) if ctx.sources.news is not None else []
+    # news flags stay out of the pack: a skew drop depends on an item dated after the slot
+    news_flags: list[str] = []
+    news, news_extras = gather_news(ctx, slot, news_flags)
     run_macro = first_cycle_of_utc_day(ledger.get_runtime("last_macro_day"), slot)
     macro: dict[str, Any] = {}
     if ctx.sources.macro is not None:
@@ -178,6 +210,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
                            news=news, events=events, macro=macro, cost_facts=cost_facts,
                            quality_flags=flags, fundamental_facts=fundamentals)
     states = pack.states
+    flags += record_stock_sigma_4h(ledger, policy, states)
 
     # ---- reference book
     ref_flags: list[str] = []
@@ -218,15 +251,22 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         late_by_s=int(info.late_by.total_seconds()), input_hash=pack.input_hash,
         policy_sha=policy.sha256, prompt_manifest_sha=_manifest_sha(ctx), model=ctx.settings.ollama_model,
         kill_state=kill_state if kill_state in ("NORMAL", "WARN", "HALTED", "FLAT") else "NORMAL",
-        reference=ref, bands=bands, cards=list(code_cards), flags=list(flags) + ref_flags,
+        reference=ref, bands=bands, cards=list(code_cards), flags=list(flags) + ref_flags + news_flags,
     )
     if snapshot is not None:            # connected: say when the fee uses an assumed mirror ratio
         rec.flags += [f for f in econ.flags if f.startswith("mirror_ratio")]
+    try:                                # PRIVATE (ledger): counts and public items only; never stops a cycle
+        rec.extras["news_fetch"] = news_record(pack, news_extras)
+    except Exception as exc:
+        rec.flags.append(f"news_record_error:{type(exc).__name__}")
     rec.model_digest = await _digest(ctx)
+    sink = _input_sink()
     basis, levels, raw = await _council(ctx, rec, pack=pack, ref=ref, bands=bands, bands_fn=bands_fn,
                                    code_cards=code_cards, current_levels=current_levels,
                                    quotes=quotes, run_macro=run_macro, kill_state=kill_state,
-                                   ref_levels=ref_levels, now=now, started=started)
+                                   ref_levels=ref_levels, now=now, started=started, sink=sink)
+    # write what each agent saw right away: a later failure in this cycle must not lose it
+    rec.flags += _write_calls(ctx, cycle_id, raw, sink)
     if run_macro and ctx.sources.macro is not None:
         ledger.set_runtime("last_macro_day", slot.date().isoformat())
 
@@ -236,7 +276,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     decision = _evaluate(ctx, rec, levels=levels, ref_levels=ref_levels, bands=rec.bands or bands,
                          states=states, snapshot=snapshot, unit=unit, kill_state=kill_state,
                          quotes=quotes, pack=pack, material_changed=material_changed, basis=basis,
-                         slot=slot, returns=returns, nav=nav, econ=econ)
+                         slot=slot, returns=returns, nav=nav, econ=econ, extra_blockers=corporate_blockers)
     rec.risk = decision
 
     # ---- plan (connected account only)
@@ -272,10 +312,10 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         rec.decision_id, rec.decision_state = decision_id, "awaiting_publication"
     else:
         rec.decision_state = "reviewed_no_action"
+    rec.flags += record_trail(rec, pack, code_bands=bands, material_changed=material_changed, lines=lines)
     ledger.record_cycle(rec)
     for call in rec.calls:
         ledger.record_role_call(cycle_id, call)
-    _write_transcript(ctx, cycle_id, raw)
 
     # ---- seal + publish
     published, sha = _seal_and_publish(ctx, rec, pack, reveal_now=decision_id is None, snapshot=snapshot)
@@ -290,7 +330,8 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
                 ledger.set_published_commit(decision_id, sha)
             # evidence is consumed when a proposal issues, only by the lines that could act on it
             ledger.set_material_fingerprints(consume_fingerprints(
-                fps, ledger.get_material_fingerprints(), evidence_lines(policy, pack, engine_blockers(ctx))))
+                fps, ledger.get_material_fingerprints(),
+                evidence_lines(policy, pack, engine_blockers(ctx, corporate_blockers))))
             _notify_proposal(ctx, rec, plan, urgent=kill_state in ("HALTED", "FLAT"),
                              valid_until=valid_until)
         else:
@@ -314,6 +355,84 @@ def _settle_held_orders(ctx: CycleContext, now: datetime) -> None:
         alerts = [f"waiting_check_error:{type(exc).__name__}"]
     for alert in alerts:
         watch._alert(ctx, alert)
+
+
+CORPORATE_CHECK_FAILED = "corporate_action_check_failed"
+STOCK_SIGMA_4H_KEY = "stock_sigma_4h"     # ledger runtime, PRIVATE: {stock line: 4-hour sigma}
+US_SESSION_HOURS = 6.5
+
+
+def stock_sigma_4h(policy: Any, states: Any) -> dict[str, float]:
+    """{stock line: its 4-hour sigma, relative}: the daily sigma (`risk.stops.sigma_daily_of`)
+    scaled by sqrt(4 / 6.5), four of the US session's six and a half hours (design §3.6's band for a
+    vanished stock position). A line without volatility is left out: the watch then counts a vanished
+    position on it as a stop hit (ambiguous -> conservative)."""
+    import math
+
+    from council.risk.stops import sigma_daily_of
+
+    out: dict[str, float] = {}
+    for line in policy.universe.stock_lines():
+        state = states.get(line.symbol)
+        sigma = sigma_daily_of(state, line.asset_class) if state is not None else None
+        if sigma is not None and math.isfinite(sigma) and sigma > 0:
+            out[line.symbol] = round(float(sigma) * math.sqrt(4.0 / US_SESSION_HOURS), 6)
+    return out
+
+
+def record_stock_sigma_4h(ledger: Any, policy: Any, states: Any) -> list[str]:
+    """Store `stock_sigma_4h` for the watch (only when the policy has stock lines). Never raises: a
+    failure costs only the watch's stop-hit band (without a stored sigma a vanished stock position
+    counts as a stop hit, the conservative reading) and returns the flag
+    `stock_sigma_record_error:<type>` for the cycle record."""
+    try:
+        if policy.universe.stock_lines():
+            ledger.set_runtime(STOCK_SIGMA_4H_KEY, stock_sigma_4h(policy, states))
+    except Exception as exc:  # stock-only bookkeeping: its failure never stops the core's cycle
+        return [f"stock_sigma_record_error:{type(exc).__name__}"]
+    return []
+
+
+def corporate_actions(ctx: CycleContext, snapshot: Any, cycle_id: str) -> list[str]:
+    """Design §3.6 detection at the cycle start, on the broker snapshot: positions no line owns that
+    no open leg of ours created (pending corporate actions) and positions on retired vehicles. Returns
+    their satellite-scoped R20 blockers (codes only, no identifier: blocker strings reach the public
+    record) and sends each URGENT alert (which names the instrument and the command) through the
+    notifier. Runs only when the policy has a stock sleeve. A check that fails holds the satellite
+    (`satellite:corporate_action_check_failed`) and alerts; it never stops the cycle."""
+    from council.ledger.states import SATELLITE_BLOCKER_PREFIX
+    from council.stocks import corporate
+
+    if not corporate.sleeve_active(ctx.policy):
+        return []
+    try:
+        found = corporate.detect(list(snapshot.positions), ctx.policy,
+                                 opened=corporate.opened_position_ids(ctx.ledger))
+    except Exception as exc:  # fail closed: hold the satellite, keep the core cycle
+        _urgent(ctx, cycle_id, f"URGENT {CORPORATE_CHECK_FAILED}: the corporate-action check failed "
+                               f"({type(exc).__name__}); the stock sleeve is held. Run `council stocks status`")
+        return [f"{SATELLITE_BLOCKER_PREFIX}{CORPORATE_CHECK_FAILED}"]
+    for alert in found.alerts:
+        _urgent(ctx, cycle_id, alert, fallback="URGENT corporate action pending: the stock sleeve is held. "
+                                               "Run `council stocks status`")
+    return list(found.blockers)
+
+
+def _urgent(ctx: CycleContext, cycle_id: str, message: str, *, fallback: str | None = None) -> None:
+    """One URGENT operator alert (private ntfy; never published). The notifier refuses a message its
+    leak scan flags (e.g. a 7+ digit instrument id): then the fixed `fallback` text goes instead.
+    Never raises."""
+    if ctx.notifier is None:
+        return
+    body = message.removeprefix("URGENT ").strip()
+    for text in (body, (fallback or "").removeprefix("URGENT ").strip()):
+        if not text:
+            continue
+        try:
+            ctx.notifier.send(f"council {cycle_id}", text, priority="urgent")
+            return
+        except Exception:  # try the fallback; an alert failure never stops the cycle
+            continue
 
 
 def core_lines(policy: Any) -> list[str]:
@@ -486,7 +605,8 @@ def _snapshot_and_kill(ctx: CycleContext, now: datetime) -> tuple[Any, str, Any]
 
 # -------------------------------------------------------------------------------- council
 async def _council(ctx: CycleContext, rec: CycleRecord, *, pack, ref, bands, bands_fn, code_cards,
-                   current_levels, quotes, run_macro, kill_state, ref_levels, now, started) -> tuple[str, dict[str, float], dict[str, str]]:
+                   current_levels, quotes, run_macro, kill_state, ref_levels, now, started,
+                   sink=None) -> tuple[str, dict[str, float], dict[str, str]]:
     from council.deliberation.council import run_council
     from council.risk.authority import enforce_authority
 
@@ -509,7 +629,7 @@ async def _council(ctx: CycleContext, rec: CycleRecord, *, pack, ref, bands, ban
                         current_levels=current_levels, cost_hints=cost_hints(quotes),
                         lines=list(policy.universe.lines), policy=policy, enforce=enforce_authority,
                         now=pack.slot, run_single_agent=ctx.run_single_agent, run_macro=run_macro,
-                        **_council_extras(code_cards, bands_fn, call_log)),
+                        **_council_extras(code_cards, bands_fn, call_log, sink)),
             timeout=remaining)
     except TimeoutError:
         rec.flags.append("council_timeout")
@@ -527,6 +647,8 @@ async def _council(ctx: CycleContext, rec: CycleRecord, *, pack, ref, bands, ban
         rec.single_agent_levels = dict(result.single_agent_aggregate.levels)
     rec.calls = list(result.calls)
     rec.dropped_cards = list(result.dropped)
+    rec.drops = list(getattr(result, "drops", None) or [])           # the trail's structured drops
+    rec.fallback_lines = list(result.aggregate.per_line_fallback)    # medoid lines back at the reference
     rec.desk_sha = result.desk_sha
     rec.flags += list(result.flags)
     if getattr(result, "bands", None):
@@ -537,7 +659,7 @@ async def _council(ctx: CycleContext, rec: CycleRecord, *, pack, ref, bands, ban
     return result.basis, dict(result.aggregate.levels), raw
 
 
-def _council_extras(code_cards, bands_fn, call_log: list | None = None) -> dict[str, Any]:
+def _council_extras(code_cards, bands_fn, call_log: list | None = None, sink: Any = None) -> dict[str, Any]:
     """Pass the new run_council parameters only when the installed council supports them."""
     import inspect
 
@@ -551,13 +673,15 @@ def _council_extras(code_cards, bands_fn, call_log: list | None = None) -> dict[
         out["bands_fn"] = bands_fn
     if "call_log" in params and call_log is not None:
         out["call_log"] = call_log
+    if "input_sink" in params and sink is not None:
+        out["input_sink"] = sink
     return out
 
 
 # ------------------------------------------------------------------------------- risk
 def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands, states, snapshot, unit,
               kill_state, quotes, pack, material_changed, basis, slot, returns, nav,
-              econ=None) -> RiskDecision:
+              econ=None, extra_blockers=()) -> RiskDecision:
     from council.risk.engine import RiskEngine
     from council.risk.held_levels import ledger_held_levels
 
@@ -581,7 +705,7 @@ def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands,
         last_change=last_change, turnover_7d=float(turnover_7d), material_changed=material_changed,
         basis=basis, now=slot, ex_ante_vol_fn=vol_fn,
         turnover_30d=float(turnover_30d), cost_30d_bps=float(cost_30d),
-        stop_hits=stop_hits, blockers=engine_blockers(ctx),
+        stop_hits=stop_hits, blockers=engine_blockers(ctx, extra_blockers),
         nav_drawdown=nav.drawdown if nav is not None else None,
         pending_w=pending, held_levels=held,
         copy_min_share=econ.copy_floor_share if econ is not None else 0.0,
@@ -589,10 +713,11 @@ def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands,
     )
 
 
-def engine_blockers(ctx: CycleContext) -> list[str]:
-    """R20 inputs: the ledger's blockers plus those found while loading policy (e.g.
-    `sleeve_policy_untagged`). A satellite-scoped one is passed as "satellite:<code>" and holds only
-    the stock sleeve; anything else holds every line."""
+def engine_blockers(ctx: CycleContext, extra: Iterable[str] = ()) -> list[str]:
+    """R20 inputs: the ledger's blockers, those found while loading policy (e.g.
+    `sleeve_policy_untagged`, `stock_eligibility_unchecked`) and `extra` (the cycle start's
+    corporate-action blockers, already "satellite:<code>"), without repeats. A satellite-scoped one is
+    passed as "satellite:<code>" and holds only the stock sleeve; anything else holds every line."""
     from council.ledger.states import SATELLITE_BLOCKER_PREFIX
 
     out = list(ctx.ledger.blockers())
@@ -600,7 +725,8 @@ def engine_blockers(ctx: CycleContext) -> list[str]:
         code = str(getattr(blocker, "code", blocker))
         satellite = getattr(blocker, "scope", "all") == "satellite"
         out.append(f"{SATELLITE_BLOCKER_PREFIX}{code}" if satellite else code)
-    return out
+    out += [str(b) for b in extra]
+    return list(dict.fromkeys(out))
 
 
 def _vol_fn(policy, returns, states):
@@ -704,13 +830,190 @@ def _line_of(policy, vehicle_symbol: str) -> str:
     return vehicle_to_line(policy.universe)[vehicle_symbol]
 
 
+# ------------------------------------------------------------------------------ news
+def gather_news(ctx: CycleContext, slot: datetime, flags: list[str]) -> tuple[list[Any], dict[str, Any]]:
+    """The cycle's news items and the private fetch report. `ctx.sources.news(slot)` returns a
+    `NewsFetch` (items, flags, per-source reports; `council.context.news_sources`) or, from an older
+    or test source, a bare list. Its flags are appended to `flags` (the caller keeps them out of the
+    fact pack: a skew drop depends on an item dated after the slot). Never raises: a source function
+    that raises becomes `news_source_error:sources:<type>` and the cycle runs without news."""
+    if ctx.sources.news is None:
+        return [], {}
+    try:
+        fetched = ctx.sources.news(slot)
+    except Exception as exc:  # news never stops the cycle
+        flags.append(f"news_source_error:sources:{type(exc).__name__}")
+        return [], {}
+    if isinstance(fetched, list | tuple):
+        return list(fetched), {}
+    flags += [f for f in getattr(fetched, "flags", ()) if f not in flags]
+    reports = {name: rep.model_dump(mode="json") if hasattr(rep, "model_dump") else dict(rep)
+               for name, rep in (getattr(fetched, "sources", None) or {}).items()}
+    return list(getattr(fetched, "items", ()) or ()), {"sources": reports}
+
+
+def news_record(pack: Any, extras: dict[str, Any]) -> dict[str, Any]:
+    """PRIVATE (the ledger's `extras["news_fetch"]`): what each source did (counts, error codes) and,
+    for every PUBLIC-DOMAIN item the pack admitted, its source, link, times, form and item codes, so
+    the operator's reading list can show where an item came from. Broker feed items are only
+    counted: the ledger never holds feed text or feed metadata (eToro Licensed Content)."""
+    public, broker = [], 0
+    for item in pack.news:
+        if item.source == "etoro_feed" or not str(item.id).startswith("P:"):
+            broker += 1
+            continue
+        row: dict[str, Any] = {"id": item.id, "source": item.source, "licence": item.licence,
+                               "published_at": item.published_at.isoformat(),
+                               "available_at": item.available_at.isoformat()}
+        if item.link:
+            row["link"] = item.link
+        if item.form:
+            row["form"], row["items"] = item.form, list(item.items)
+        public.append(row)
+    return {"sources": dict(extras.get("sources") or {}), "public_items": public, "broker_items": broker}
+
+
+# ------------------------------------------------------------------- the decision trail
+def record_trail(rec: CycleRecord, pack: Any, *, code_bands: dict[str, Band],
+                 material_changed: dict[str, bool] | None, lines: list[LineSpec]) -> list[str]:
+    """Keep, in the private record, what the per-line decision trail needs and the record did not
+    hold (transparency-v2 §4, T5a): the bands before the analysts' cards where they differ from the
+    final bands, the lines with new material evidence, the claim-to-line tags, the publishable
+    values of the evidence ids the trail cites (`publish.trail.evidence_values`: never a licensed or
+    broker-derived value), the lines whose R15 value may be shown, and a summary of the trail itself
+    (`extras["trail"]`: outcome, where it stopped, who asked, per line). `council why` rebuilds the
+    full trail from the record and the ledger's later decision and execution state. Never raises:
+    a failure is the flag `trail_record_error:<type>`."""
+    try:
+        from council.deliberation.debate import claim_lines, pack_item_lines
+        from council.publish import trail
+
+        final = rec.bands or code_bands
+        rec.code_bands = {s: b for s, b in code_bands.items()
+                          if s in final and (abs(b.lo - final[s].lo) > 1e-9 or abs(b.hi - final[s].hi) > 1e-9)}
+        rec.material_lines = sorted(s for s, changed in (material_changed or {}).items() if changed)
+        rec.claim_lines = claim_lines(rec.debate, lines={ln.symbol for ln in lines},
+                                      item_lines=pack_item_lines(pack),
+                                      card_scope={c.card_id: list(c.scope) for c in rec.cards})
+        rec.evidence_values = trail.evidence_values(pack, lines, trail.cited_ids(rec))
+        rec.value_lines = trail.value_lines(pack, lines)
+        rec.extras["trail"] = trail.summary(trail.record_trails(rec))
+    except Exception as exc:  # the trail is a record of the decision, never a condition for it
+        return [f"trail_record_error:{type(exc).__name__}"]
+    return []
+
+
+# ----------------------------------------------------------------------- private capture
+def daily_purge(ctx: CycleContext, now: datetime) -> list[str]:
+    """The once-a-day purge of licensed private copies (first cycle of each UTC day; transparency
+    T1v, `council.operator.purge.maybe_daily_purge`). Never raises; returns flags."""
+    try:
+        from council.operator.purge import maybe_daily_purge
+
+        return list(maybe_daily_purge(ctx.state_dir, now))
+    except Exception as exc:  # best effort: the cycle goes on
+        return [f"purge_error:{type(exc).__name__}"]
+
+
+def _input_sink() -> Any:
+    """A fresh private input sink for the council (None when capture cannot even start)."""
+    try:
+        from council.deliberation.capture import InputSink
+
+        return InputSink()
+    except Exception:  # capture never stops a cycle
+        return None
+
+
+def _write_calls(ctx: CycleContext, cycle_id: str, raw: dict[str, str], sink: Any) -> list[str]:
+    """Write the private capture of every model call (`state_dir/calls/`, licensed item texts in
+    `state_dir/licensed/calls/`) and, for one release, the old raw transcript. Returns flags
+    (`inputs_capture_error:<type>`); never raises."""
+    flags: list[str] = []
+    if sink is not None and (sink.calls or sink.flags):
+        try:
+            from council.deliberation.capture import write_cycle_inputs
+
+            flags += write_cycle_inputs(ctx.state_dir, sink, cycle_id=cycle_id, captured_at=ctx.clock())
+        except Exception as exc:
+            flags.append(f"inputs_capture_error:{type(exc).__name__}")
+    try:
+        _write_transcript(ctx, cycle_id, raw)
+    except Exception as exc:  # the raw transcript is a private convenience
+        flags.append(f"transcript_error:{type(exc).__name__}")
+    return list(dict.fromkeys(flags))
+
+
 # ----------------------------------------------------------------------------- publish
 def _write_transcript(ctx: CycleContext, cycle_id: str, raw: dict[str, str]) -> None:
     """Private, gzipped: raw model output never reaches the ledger record, journal/ or the site."""
-    d = ctx.state_dir / "transcripts"
-    d.mkdir(parents=True, exist_ok=True)
-    with gzip.open(d / f"{cycle_id}.json.gz", "wt") as fh:
-        json.dump({"cycle_id": cycle_id, "raw": raw}, fh)
+    from council.deliberation.capture import write_private
+
+    path = ctx.state_dir / "transcripts" / f"{cycle_id}.json.gz"
+    write_private(ctx.state_dir, path, gzip.compress(json.dumps({"cycle_id": cycle_id, "raw": raw}).encode(),
+                                                     mtime=0))
+
+
+NAV_CANARY_MIN = 10_000.0     # smaller figures collide with years, slot times and hex digests
+
+
+def publish_canaries(ctx: CycleContext, snapshot: Any) -> list[str | float]:
+    """Private values the final leak scan refuses in any published byte: the context's canaries,
+    `COUNCIL_LEAK_CANARIES`, and the NAV and mirror figures (snapshot equity, real funding, virtual
+    NAV) of at least NAV_CANARY_MIN. Smaller figures are left to the redaction layer: as 4-digit
+    whole numbers they would match years, slot times (1440) and digest hex, and block every publish."""
+    import math
+
+    from council.publish.leakscan import env_canaries
+
+    values: list[Any] = [getattr(snapshot, "equity_usd", None)]
+    try:
+        from council.operator.mirror import load_mirror
+
+        mirror = load_mirror(ctx.state_dir)
+        if mirror is not None:
+            values += [mirror.funding_usd, mirror.virtual_nav_usd]
+    except Exception:  # no mirror file (or unreadable): only the other canaries
+        pass
+    out: list[str | float] = [*ctx.canaries, *env_canaries()]
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number >= NAV_CANARY_MIN:
+            out.append(round(number, 2))
+    return out
+
+
+def arm_leak_scan(publisher: Any, *, licensed: list[str], canaries: list[str | float]) -> None:
+    """Give the publisher's final (git-level) leak scan this cycle's licensed texts (the pack's
+    broker feed items) and private canaries, on top of whatever it was built with."""
+    base = getattr(publisher, "_council_base_scan", None)
+    if base is None:
+        base = (list(getattr(publisher, "canaries", None) or []),
+                list(getattr(publisher, "licensed_texts", None) or []))
+        try:
+            publisher._council_base_scan = base
+        except (AttributeError, TypeError):  # a publisher that refuses new attributes keeps its lists
+            return
+    publisher.canaries = [*base[0], *canaries]
+    publisher.licensed_texts = [*base[1], *licensed]
+
+
+def cycle_install_key(ctx: CycleContext, rec: CycleRecord) -> bytes:
+    """The private install key (keys the material-change fingerprint). If it cannot be loaded or
+    created, a random key for this cycle only (flag `install_key_error:<type>`): the fingerprint then
+    matches no other cycle's, which is safe; an unkeyed one could be brute-forced."""
+    try:
+        from council.publish import install_key
+
+        return install_key.load_or_create(ctx.state_dir)
+    except Exception as exc:
+        import secrets
+
+        rec.flags.append(f"install_key_error:{type(exc).__name__}")
+        return secrets.token_bytes(32)
 
 
 def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: bool, snapshot) -> tuple[bool, str | None]:
@@ -721,7 +1024,9 @@ def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: 
     if ctx.publisher is None:
         return False, None
     lines = ctx.policy.universe
-    public = redact.public_cycle(rec, pack, lines=lines)
+    public = redact.public_cycle(rec, pack, lines=lines, install_key=cycle_install_key(ctx, rec))
+    arm_leak_scan(ctx.publisher, licensed=redact.licensed_texts(pack),
+                  canaries=publish_canaries(ctx, snapshot))
     commitment, salt, sealed = _seal(commit_reveal, public, rec, ctx)
     # private, 0600; a forced re-run may replace a seal only outside live mode (a published live
     # commitment is never re-sealed)

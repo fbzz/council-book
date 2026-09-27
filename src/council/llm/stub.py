@@ -4,8 +4,11 @@ Responses come from a mapping `{role: response}` where a response is:
   - a dict (the JSON object the model would return),
   - a str (raw model text, to exercise the decoder),
   - a `StubFailure` (simulates timeout / transport),
+  - a `StubTurns(first, second)`: the first reply, then (only when the first fails the checker) the
+    reply to the correction turn, exactly as the real gateway's single correction retry,
   - or a callable `(user_text, replicate) -> any of the above`.
-The reply goes through the same decode -> sanitize -> strict validation path as the real gateway.
+The reply goes through the same decode -> sanitize -> strict validation path as the real gateway,
+and the result carries the same capture fields (`turns`, `errors`, `correction`, `sent_assistant`).
 A role with no entry returns `parse_fail` ("no stub response"). Calls are recorded in `.log`.
 """
 
@@ -18,7 +21,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from council.llm.gateway import LLMResult, decode_reply
+from council.llm.gateway import LLMResult, correction_message, decode_reply
 from council.models.cycle import CallStatus, RoleCall
 
 
@@ -30,7 +33,15 @@ class StubFailure:
     error: str = "stub failure"
 
 
-type StubResponse = dict[str, Any] | str | StubFailure
+@dataclass(frozen=True)
+class StubTurns:
+    """A first reply and the reply to the correction turn (used only if the first fails)."""
+
+    first: dict[str, Any] | str | StubFailure
+    second: dict[str, Any] | str | StubFailure
+
+
+type StubResponse = dict[str, Any] | str | StubFailure | StubTurns
 type StubEntry = StubResponse | Callable[[str, int], StubResponse]
 
 
@@ -40,6 +51,7 @@ class StubCall:
     replicate: int
     seed: int
     user: str
+    system: str = ""
 
 
 @dataclass
@@ -63,7 +75,9 @@ class StubGateway:
         replicate: int = 0,
     ) -> LLMResult:
         """Same contract as `OllamaGateway.complete`: never raises, latency 0."""
-        self.log.append(StubCall(role=role, replicate=replicate, seed=seed, user=user))
+        self.log.append(StubCall(role=role, replicate=replicate, seed=seed, user=user, system=system))
+        turns: list[str] = []
+        extra: dict[str, Any] = {}
 
         def result(parsed: BaseModel | None, status: CallStatus, raw: str, error: str = "") -> LLMResult:
             call = RoleCall(
@@ -77,20 +91,41 @@ class StubGateway:
                 status=status,
                 error=error[:300],
             )
-            return LLMResult(parsed=parsed, call=call, raw=raw)
+            return LLMResult(parsed=parsed, call=call, raw=raw, turns=tuple(turns), **extra)
+
+        def text_of(response: dict[str, Any] | str) -> str:
+            return response if isinstance(response, str) else json.dumps(response, sort_keys=True)
 
         try:
             entry = self.responses.get(role)
             if entry is None:
                 return result(None, "parse_fail", "", "no stub response")
             response = entry(user, replicate) if callable(entry) else entry
+            second: dict[str, Any] | str | StubFailure | None = None
+            if isinstance(response, StubTurns):
+                response, second = response.first, response.second
             if isinstance(response, StubFailure):
                 return result(None, response.status, "", response.error)
-            raw = response if isinstance(response, str) else json.dumps(response, sort_keys=True)
+            raw = text_of(response)
+            turns.append(raw)
             parsed, errors = decode_reply(raw, schema)
-            if parsed is None:
+            if parsed is not None:
+                return result(parsed, "ok", raw)
+            if second is None:
                 return result(None, "parse_fail", raw, "; ".join(errors))
-            return result(parsed, "ok", raw)
+            first_errors = "; ".join(errors)
+            extra.update(correction=correction_message(errors), sent_assistant=raw[:8000],
+                         errors=tuple(errors))
+            if isinstance(second, StubFailure):
+                return result(None, "parse_fail", raw,
+                              f"{first_errors} | correction {second.status}: {second.error}")
+            raw2 = text_of(second)
+            turns.append(raw2)
+            parsed, errors2 = decode_reply(raw2, schema)
+            if parsed is not None:
+                return result(parsed, "ok", raw2, f"corrected: {first_errors}")
+            return result(None, "parse_fail", raw2,
+                          f"{first_errors} | after correction: {'; '.join(errors2)}")
         except Exception as exc:
             return result(None, "transport", "", f"stub raised {type(exc).__name__}")
 

@@ -19,6 +19,11 @@ roles:
   pm:       {enabled: true,  replicates: 3, max_num_predict: 1200}
   single_agent_control: {enabled: true, replicates: 3, max_num_predict: 1200}   # opted in (control C10)
   # v1.1 (with single stocks): filings, sector
+news:                          # what the news role reads (transparency v2, T3b; policy change 2026-09-26)
+  max_items: 40                # the whole reading list, newest first
+  lookback_h: 48               # an item is read only if it became available in [slot - 48 h, slot)
+  quotas: {broker_feed: 25, sec: 8, fed_board: 5, bls: 2, bea: 2, treasury: 2, eia: 2}   # per source, newest first; unused quota is not reassigned
+  broker_feed: true            # read the eToro feed when an Agent Portfolio is connected (never published; private copies purged within 7 days); false turns it off
 outage_guard: {stage_retry_wait_s: 120, stage_retries: 3}
 slots_utc_hours: [2, 6, 10, 14, 18, 22]
 slot_minute: 40

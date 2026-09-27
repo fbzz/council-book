@@ -25,6 +25,32 @@ app.add_typer(account, name="account")
 app.add_typer(stocks, name="stocks")
 
 
+def _register_private_views() -> None:
+    """`council inputs <cycle> [--html]`, `council inputs verify|prune` and `council purge-licensed`
+    (transparency-v2 T1v): exactly what each agent saw, and the licensed-content purge. Every one of
+    them refuses outside the operator's interactive terminal (`guards.assert_current_process_is_
+    operator`: COUNCIL_ROLE=operator, TTYs, no CLAUDECODE / CLAUDE_CODE_* / CI / agent ancestor),
+    because their output can hold eToro Licensed Content. Neither module imports the broker writer."""
+    from council.operator.inputs_cli import register
+
+    register(app)
+
+
+_register_private_views()
+
+
+def _register_why() -> None:
+    """`council why <cycle> [<line>]` (transparency-v2 T5a): the per-line decision trail. The
+    revealed public record is agent-safe; the private ledger source runs only in the operator's
+    terminal, and an unrevealed cycle is refused elsewhere (`council.operator.why`)."""
+    from council.operator.why import register
+
+    register(app)
+
+
+_register_why()
+
+
 def _ctx(*, mode: str, stub_llm: bool = False, publish: str = "preview"):
     from council.context import build_context
 
@@ -107,8 +133,18 @@ def _deadline(d) -> str:
 
 
 @app.command()
-def show(decision_id: str) -> None:
-    """Show a proposal's legs in percent and x."""
+def show(
+    decision_id: str = typer.Argument(..., help="Decision id (or, with --why, a cycle id)."),
+    why: bool = typer.Option(False, "--why", help="Print why each line moved, or did not (the trail)."),
+    line: str = typer.Option(None, "--line", help="With --why: only this line."),
+    source: str = typer.Option("auto", "--source", help="With --why: auto | journal | ledger."),
+    journal_dir: Path = typer.Option(None, "--journal", help="With --why: the journal/ directory."),
+) -> None:
+    """Show a proposal's legs in percent and x (with --why: the per-line decision trail)."""
+    if why:
+        from council.operator.why import run_why
+
+        raise typer.Exit(run_why(decision_id, line=line, source=source, journal_dir=journal_dir))
     from council.context import build_context
     from council.models.plan import Plan
     from council.operator.approve import ApprovalDeps, _screen
@@ -290,8 +326,8 @@ def keys_store_read() -> None:
     _operator_only()
     from council.operator.keychain import API_KEY_SERVICE, READ_SERVICE, store_token_interactive
 
-    store_token_interactive(API_KEY_SERVICE)
-    store_token_interactive(READ_SERVICE)
+    store_token_interactive(API_KEY_SERVICE, None)          # None: the login keychain
+    store_token_interactive(READ_SERVICE, None)
     typer.echo("stored")
 
 

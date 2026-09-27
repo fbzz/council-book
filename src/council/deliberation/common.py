@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from council.deliberation.segments import Segmented, joined, raw
 from council.llm.gateway import Gateway, LLMResult, input_hash_of
 from council.llm.prompts import PromptRegistry
 from council.models.common import LEVEL_GRID
 from council.models.facts import FactPack
 from council.models.reference import ReferenceBook
 from council.policy import LineSpec, Policy
+
+if TYPE_CHECKING:
+    from council.deliberation.capture import InputSink
 
 
 def late_ids(pack: FactPack) -> set[str]:
@@ -111,23 +115,43 @@ async def call_role(
     *,
     role: str,
     ctx: Mapping[str, Any],
-    user: str,
     schema: type[BaseModel],
     seed: int,
     num_predict: int,
     replicate: int = 0,
+    user: str | None = None,
+    sections: Sequence[Segmented] | None = None,
+    sink: InputSink | None = None,
+    attempt: int = 0,
 ) -> LLMResult:
-    """Render the role's system prompt, hash the exact input, and make one gateway call."""
+    """Render the role's system prompt, build the user message from `sections` (or a caller's
+    finished `user` string), hash the exact input, record it in `sink` BEFORE the call (a call that
+    times out or is cancelled keeps its input) and make one gateway call."""
+    if sections is None:
+        sections = [raw("user", user or "")]
+    text = joined(sections)
     system = reg.render(role, **ctx)
-    return await gw.complete(
+    input_hash = input_hash_of(system, text)
+    prompt_id, prompt_sha = reg.prompt_id(role), reg.sha256(role)
+    index = None
+    if sink is not None:
+        index = sink.begin(
+            role=role, replicate=replicate, attempt=attempt, seed=seed, num_predict=num_predict,
+            prompt_id=prompt_id, prompt_sha=prompt_sha, ctx=ctx, system=system, sections=sections,
+            input_hash=input_hash,
+        )
+    result = await gw.complete(
         role=role,
         system=system,
-        user=user,
+        user=text,
         schema=schema,
         seed=seed,
         num_predict=num_predict,
-        prompt_id=reg.prompt_id(role),
-        prompt_sha=reg.sha256(role),
-        input_hash=input_hash_of(system, user),
+        prompt_id=prompt_id,
+        prompt_sha=prompt_sha,
+        input_hash=input_hash,
         replicate=replicate,
     )
+    if sink is not None:
+        sink.finish(index, result)
+    return result

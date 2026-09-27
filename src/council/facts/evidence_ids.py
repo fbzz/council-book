@@ -3,14 +3,26 @@
 Formats (models/common.py): F:<line>:<field> market (and fundamental, kind "fundamental", with a
 field from FUNDAMENTAL_FIELDS) · V:<line>:<field> volatility ·
 C:<line>:<field> cost · M:<series>@<YYYY-MM-DD> macro · E:<kind>[:<symbol>]@<YYYY-MM-DD> event ·
-N:<sha256[:8]> news. Rule: every component is non-empty and uses [A-Za-z0-9_.-] only, so an ID
-can never smuggle a separator, whitespace or markup into a prompt or the journal."""
+N:<8 hex> broker feed news · P:<8 hex> public-domain news. Rule: every component is non-empty and
+uses [A-Za-z0-9_.-] only, so an ID can never smuggle a separator, whitespace or markup into a prompt
+or the journal.
+
+News ids (transparency-v2 §3.2, T-D15):
+- `P:` (public-domain items: SEC, Federal Reserve Board, BLS, BEA, Treasury, EIA) =
+  "P:" + sha256(source NUL stable key)[:8] (`public_news_id`); the inputs are public, so anyone can
+  recompute the id.
+- `N:` (the broker's feed, eToro Licensed Content) = "N:" + HMAC-SHA256(install key, post id)[:8]
+  (`broker_news_id`), keyed by the private install key (`council.publish.install_key`), so a
+  published id cannot be matched back to a post by brute force. The cycle always passes the key;
+  `news_id` (an unkeyed sha256) remains only for offline tests and old records."""
 
 from __future__ import annotations
 
 import hashlib
 import re
 from datetime import date, datetime
+
+from council.models.facts import broker_news_id, public_news_id
 
 _PART = re.compile(r"^[A-Za-z0-9_.\-]{1,40}$")
 
@@ -85,7 +97,23 @@ def event_id(kind: str, at: date | datetime | str, symbol: str | None = None) ->
 
 
 def news_id(key: str) -> str:
-    """News item, e.g. N:1a2b3c4d — first 8 hex chars of SHA-256 of the item's stable key."""
+    """LEGACY unkeyed broker news id, e.g. N:1a2b3c4d — first 8 hex chars of SHA-256 of the item's
+    stable key. Offline tests and old records only: a cycle keys `N:` ids (`feed_news_id`)."""
     if not key:
         raise ValueError("news id needs a non-empty key")
     return "N:" + hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+
+
+def feed_news_id(post_key: str, install_key: bytes | None = None) -> str:
+    """A broker feed item's id: the keyed `broker_news_id` under the install key, or the legacy
+    unkeyed `news_id` when no key is given (offline tests)."""
+    if install_key is None:
+        return news_id(post_key)
+    return broker_news_id(post_key, install_key)
+
+
+__all__ = [
+    "FUNDAMENTAL_FIELDS", "FUNDAMENTAL_NOT_MATERIAL", "MARKET_FIELDS", "VOL_FIELDS", "broker_news_id",
+    "cost_id", "event_id", "fact_id", "feed_news_id", "fundamental_id", "macro_id", "news_id",
+    "public_news_id", "vol_id",
+]

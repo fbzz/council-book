@@ -16,6 +16,9 @@ Rules:
     dropped in `council.drop_order_when_over_budget` order (single-agent control, macro, news).
     The debate and the PM always run. Dropped stages are recorded as `skipped` calls.
   - Macro runs only when asked (`run_macro`, set by the caller on the first cycle of the UTC day).
+  - News runs only when the pack has news to read (transparency-v2 §3.3): with no item the news
+    analyst's reading list would say "none", so the role is recorded `skipped` (`no_news_items`) and
+    makes no model call.
   - Outage guard: when EVERY call of a stage fails with transport/timeout, wait
     `council.outage_guard.stage_retry_wait_s` and rerun the stage, up to `stage_retries` times.
     A stage still down after that makes the whole council `council_unavailable` (reference levels)
@@ -25,6 +28,15 @@ Rules:
   - Each replicate is audited, then clipped by the caller's `enforce(levels, bands)`, then the
     medoid with per-line agreement decides (`aggregate.py`).
   - Deterministic: for a deterministic gateway, identical inputs give byte-identical results.
+  - Private capture (transparency-v2 §2.2): with `input_sink`, every call's exact input (its
+    sections: the desk variant, earlier turns, news items, the instruction tail) is recorded before
+    the call is made, keyed `role:replicate:attempt` (a stage retry's calls carry attempt >= 1).
+    The desks are built as sections (`desk.code.*` for the specialists and the control,
+    `desk.full.*` for the debate and the PM); a desk that had to fall back to one opaque section
+    sets `desk_scrub_crossed_sections`. The sink never changes the council's result.
+  - What code cut (transparency-v2 §4.3): `dropped` keeps the free-text notes; `drops` the same
+    drops as structured records (analysts' card drafts, macro drivers and tilts, debate proposal
+    entries and rebuttals), in the order the stages ran. The per-line trail reads `drops`.
 """
 
 from __future__ import annotations
@@ -41,6 +53,7 @@ from council.deliberation import pm as pm_mod
 from council.deliberation import roles as roles_mod
 from council.deliberation.aggregate import AggregateResult, aggregate
 from council.deliberation.audit import audit
+from council.deliberation.capture import InputSink
 from council.deliberation.common import (
     deadbands,
     num_predict,
@@ -50,16 +63,18 @@ from council.deliberation.common import (
     role_enabled,
     seed_for,
 )
-from council.deliberation.debate import DebateRun, run_debate, transcript
-from council.deliberation.desk import desk_pack
+from council.deliberation.debate import DebateRun, run_debate, transcript_section
+from council.deliberation.desk import desk_sections, scrub_crossed, shown_news
 from council.deliberation.officers import event_cards, vol_cards
 from council.deliberation.pm import PMRun, run_pm
 from council.deliberation.roles import MacroRun, NewsRun, run_news
+from council.deliberation.segments import SCRUB_CROSSED_FLAG, Segmented, joined
 from council.llm.gateway import Gateway
 from council.llm.prompts import PromptRegistry
 from council.models.cards import EvidenceCard, MacroAnalystOutput
 from council.models.common import Strict
 from council.models.cycle import Debate, PMReplicate, RoleCall
+from council.models.drops import Drop
 from council.models.facts import FactPack
 from council.models.reference import ReferenceBook
 from council.models.risk import Band, DecisionBasis
@@ -70,6 +85,7 @@ BandsFn = Callable[[list[EvidenceCard]], dict[str, Band]]
 Sleep = Callable[[float], Awaitable[None]]
 OUTAGE_STATUSES = frozenset({"transport", "timeout"})
 DEFAULT_DROP_ORDER = ("single_agent_control", "macro", "news")
+NO_NEWS_ITEMS = "no_news_items"
 
 
 class CouncilResult(Strict):
@@ -83,6 +99,7 @@ class CouncilResult(Strict):
     calls: list[RoleCall] = Field(default_factory=list)
     basis: DecisionBasis
     dropped: list[str] = Field(default_factory=list)       # card drops, debate normalisation notes
+    drops: list[Drop] = Field(default_factory=list)         # the same drops, structured
     flags: list[str] = Field(default_factory=list)         # budget drops, outages
     enforce_notes: dict[str, list[str]] = Field(default_factory=dict)
     bands: dict[str, Band] = Field(default_factory=dict)   # final bands the council actually used
@@ -156,6 +173,7 @@ async def run_council(
     code_cards: list[EvidenceCard] | None = None,
     bands_fn: BandsFn | None = None,
     call_log: list[RoleCall] | None = None,
+    input_sink: InputSink | None = None,
 ) -> CouncilResult:
     """Run the council for one cycle. Never raises on LLM failures (they become statuses/flags).
 
@@ -164,7 +182,8 @@ async def run_council(
     `bands_fn`: called once after the specialists with ALL cards; its bands are the ones the
     desk pack, debate, PM, audit and enforce use (see the module rules).
     `call_log`: a list the calls are appended to as each stage finishes (the same list is
-    returned in `calls`), so a caller that cancels the council still has the calls that ran."""
+    returned in `calls`), so a caller that cancels the council still has the calls that ran.
+    `input_sink`: records every call's exact input before it is sent (private; see capture.py)."""
     ctx = prompt_context(policy)
     ref_levels = reference_levels(ref, lines)
     current = {ln.symbol: float(current_levels.get(ln.symbol, 0.0)) for ln in lines}
@@ -176,20 +195,24 @@ async def run_council(
     calls: list[RoleCall] = call_log if call_log is not None else []
     flags: list[str] = []
     dropped: list[str] = []
+    drops: list[Drop] = []
     raw: dict[str, str] = {}
     kept, budget_flags = plan_stages(policy, run_macro=run_macro, run_single_agent=run_single_agent)
     flags += budget_flags
+    if "news" in kept and not shown_news(pack):      # nothing to read: no call
+        kept = kept - {"news"}
+        calls.append(_skipped(reg, "news", NO_NEWS_ITEMS))
     for name, role in (("news", "news"), ("macro", "macro")):
         if f"budget_dropped:{name}" in budget_flags:
             calls.append(_skipped(reg, role, "call_budget"))
     if "budget_dropped:single_agent_control" in budget_flags:
         calls += [_skipped(reg, "single_agent", "call_budget", i) for i in range(len(seeds))]
 
-    async def guarded(stage: str, fn: Callable[[], Awaitable[Any]]) -> _Stage:
+    async def guarded(stage: str, fn: Callable[[int], Awaitable[Any]]) -> _Stage:
         stage_calls: list[RoleCall] = []
         result: Any = None
         for attempt in range(retries + 1):
-            result = await fn()
+            result = await fn(attempt)
             stage_calls += result.calls
             down = bool(result.calls) and all(c.status in OUTAGE_STATUSES for c in result.calls)
             if not down:
@@ -207,13 +230,17 @@ async def run_council(
     corroborators = [(c, now) for c in code_cards if c.card_type == "vol_shock"]
     code_bands: dict[str, Band] = dict(bands)
 
-    def desk(cards: Sequence[EvidenceCard], use_bands: Mapping[str, Band]) -> str:
-        return desk_pack(
+    def desk(cards: Sequence[EvidenceCard], use_bands: Mapping[str, Band], variant: str) -> list[Segmented]:
+        sections = desk_sections(
             pack=pack, ref=ref, bands=use_bands, current_levels=current, cost_hints=cost_hints,
-            cards=cards, lines=lines,
+            cards=cards, lines=lines, variant=variant,
         )
+        if scrub_crossed(sections) and SCRUB_CROSSED_FLAG not in flags:
+            flags.append(SCRUB_CROSSED_FLAG)
+        return sections
 
-    code_desk = desk(code_cards, code_bands)
+    code_sections = desk(code_cards, code_bands, "code")
+    code_desk = joined(code_sections)
     outage = False
 
     # 2. specialists
@@ -222,19 +249,21 @@ async def run_council(
     macro_cards: list[EvidenceCard] = []
     if kept & {"news", "macro"}:
 
-        async def specialists() -> _SpecialistRun:
+        async def specialists(attempt: int) -> _SpecialistRun:
             jobs: list[Awaitable[Any]] = []
             if "news" in kept:
                 jobs.append(run_news(
                     gw=gw, reg=reg, pack=pack, desk_text=code_desk, ctx=ctx, lines=lines,
                     policy=policy, corroborators=corroborators, now=now,
                     seed=seed_for(policy, "news", 42), num_predict=num_predict(policy, "news"),
+                    desk_sections=code_sections, sink=input_sink, attempt=attempt,
                 ))
             if "macro" in kept:
                 jobs.append(roles_mod.run_macro(
                     gw=gw, reg=reg, pack=pack, desk_text=code_desk, ctx=ctx, lines=lines,
                     policy=policy, now=now,
                     seed=seed_for(policy, "macro", 42), num_predict=num_predict(policy, "macro"),
+                    desk_sections=code_sections, sink=input_sink, attempt=attempt,
                 ))
             results = await asyncio.gather(*jobs)
             news = next((r for r in results if isinstance(r, NewsRun)), None)
@@ -248,9 +277,11 @@ async def run_council(
         if spec.news is not None:
             news_cards, raw["news"] = spec.news.cards, spec.news.raw
             dropped += spec.news.dropped
+            drops += spec.news.drops
         if spec.macro is not None:
             macro_out, macro_cards, raw["macro"] = spec.macro.output, spec.macro.cards, spec.macro.raw
             dropped += spec.macro.dropped
+            drops += spec.macro.drops
 
     all_cards = code_cards + news_cards + macro_cards
 
@@ -262,22 +293,25 @@ async def run_council(
         except Exception as exc:  # a broken band builder keeps the code-card bands, flagged
             flags.append(f"bands_fn_error {type(exc).__name__}")
             final_bands = code_bands
-    full_desk = desk(all_cards, final_bands)
+    full_sections = desk(all_cards, final_bands, "full")
+    full_desk = joined(full_sections)
 
     # 3. debate
     debate = Debate()
     if not outage:
-        stage = await guarded("debate", lambda: run_debate(
+        stage = await guarded("debate", lambda attempt: run_debate(
             gw=gw, reg=reg, desk_text=full_desk, ctx=ctx, pack=pack, lines=lines,
             bull_seed=seed_for(policy, "bull", 42), bear_seed=seed_for(policy, "bear", 43),
             bull_num_predict=num_predict(policy, "bull", 900),
             bear_num_predict=num_predict(policy, "bear", 900),
+            desk_sections=full_sections, sink=input_sink, attempt=attempt,
         ))
         calls += stage.calls
         outage = stage.outage
         drun: DebateRun = stage.result
         debate = drun.debate
         dropped += drun.notes
+        drops += drun.drops
         raw.update(drun.raw)
     else:
         calls += [_skipped(reg, r, "council_unavailable") for r in ("bull_open", "bear")]
@@ -285,10 +319,12 @@ async def run_council(
     # 4. PM replicates
     pm_reps: list[PMReplicate] = []
     if not outage:
-        debate_text = transcript(debate)
-        stage = await guarded("pm", lambda: run_pm(
-            gw=gw, reg=reg, desk_text=full_desk, debate_text=debate_text, ctx=ctx,
+        debate_section = transcript_section(debate)
+        stage = await guarded("pm", lambda attempt: run_pm(
+            gw=gw, reg=reg, desk_text=full_desk, debate_text=debate_section.text(), ctx=ctx,
             seeds=seeds, num_predict=num_predict(policy, "pm", 1200),
+            desk_sections=full_sections, debate_section=debate_section, sink=input_sink,
+            attempt=attempt,
         ))
         calls += stage.calls
         outage = stage.outage
@@ -304,9 +340,10 @@ async def run_council(
         if outage:
             calls += [_skipped(reg, "single_agent", "council_unavailable", i) for i in range(len(seeds))]
         else:
-            stage = await guarded("single_agent", lambda: pm_mod.run_single_agent(
+            stage = await guarded("single_agent", lambda attempt: pm_mod.run_single_agent(
                 gw=gw, reg=reg, desk_text=code_desk, ctx=ctx, seeds=seeds,
                 num_predict=num_predict(policy, "single_agent_control", 1200),
+                desk_sections=code_sections, sink=input_sink, attempt=attempt,
             ))
             calls += stage.calls
             srun: PMRun = stage.result
@@ -364,6 +401,7 @@ async def run_council(
         calls=calls,
         basis=agg.basis,
         dropped=dropped,
+        drops=drops,
         flags=flags,
         enforce_notes=enforce_notes,
         bands=final_bands,

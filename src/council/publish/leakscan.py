@@ -46,9 +46,10 @@ VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("currency_amount", re.compile(r"\b(?:USD|EUR|GBP)\s?\d")),
     ("currency_suffix", re.compile(r"\d[\d,]*\.\d{2}\s?(?:USD|EUR|GBP)\b")),
     ("euro_pound_amount", re.compile(r"[€£]\s?\d|\d\s?[€£]")),
-    # 7+ digit numbers look like position/order/account ids. Evidence-id hashes (N:1234abcd) and
-    # hex digests are not ids and are excluded by the look-behind.
-    ("long_number", re.compile(r"(?<![\w.])(?<!\b[NSMECFVK]:)\d{7,}(?![\w])")),
+    # 7+ digit numbers look like position/order/account ids. Evidence-id hashes (N:1234abcd for a
+    # broker feed item, P:12345678 for a public-domain news item) and hex digests are not ids and
+    # are excluded by the look-behind (`redact._LONG_NUMBER` uses the same one).
+    ("long_number", re.compile(r"(?<![\w.])(?<!\b[NPSMECFVK]:)\d{7,}(?![\w])")),
     ("uuid", re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")),
     ("ipv4", re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")),
     ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")),

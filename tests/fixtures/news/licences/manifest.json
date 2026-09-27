@@ -1,0 +1,77 @@
+{
+  "checked": "2026-09-26",
+  "pages": {
+    "bea": {
+      "bytes": 28536,
+      "file": "bea-2026-09-26.html",
+      "final_url": "https://www.bea.gov/help/faq/147",
+      "licence": "public_domain",
+      "retrieved": "2026-09-26T15:23:38Z",
+      "served_bytes": 37557,
+      "served_sha256": "79c86007f36b5c106abbe4237e10309428f82f49000148dc3f4b45693473b4d0",
+      "sha256": "02c2bde5b0334dce8282ed921a8b4f86e4ba5fbc63dcb0cbb114ba26ed57d1d8",
+      "transform": "script, style and noscript elements removed",
+      "url": "https://www.bea.gov/help/faq/147"
+    },
+    "bls": {
+      "bytes": 46039,
+      "file": "bls-2026-09-26.html",
+      "final_url": "https://www.bls.gov/opub/copyright-information.htm",
+      "licence": "public_domain",
+      "retrieved": "2026-09-26T15:23:38Z",
+      "served_bytes": 47310,
+      "served_sha256": "93b73a7df1d66de966702f1ebe76ad42d3dcf5ca38741b4fcbf610f885021be2",
+      "sha256": "d57e23a7035bf75a49ef570fd5e6dd411eff19f09246c627c3689b4fd667afc9",
+      "transform": "script, style and noscript elements removed",
+      "url": "https://www.bls.gov/opub/copyright-information.htm"
+    },
+    "eia": {
+      "bytes": 49604,
+      "file": "eia-2026-09-26.html",
+      "final_url": "https://www.eia.gov/about/copyrights_reuse.php",
+      "licence": "public_domain",
+      "retrieved": "2026-09-26T15:23:38Z",
+      "served_bytes": 52660,
+      "served_sha256": "8f3e2027b7f90ddef40ca0ccf53b4760997c461f16c9a3274cf93eaccba9da03",
+      "sha256": "470f5eeef4ec9a10061e650af00741ab37c08a8188ae1fba96507624aaf6648a",
+      "transform": "script, style and noscript elements removed",
+      "url": "https://www.eia.gov/about/copyrights_reuse.php"
+    },
+    "fed_board": {
+      "bytes": 82382,
+      "file": "fed_board-2026-09-26.html",
+      "final_url": "https://www.federalreserve.gov/disclaimer.htm",
+      "licence": "public_domain",
+      "retrieved": "2026-09-26T15:23:38Z",
+      "served_bytes": 85130,
+      "served_sha256": "7c4947e85b0ca08bfdeac11ff1e404156b3e1d142d89c9a799fd337949288df2",
+      "sha256": "05d877288b49240619fd1f2fdc8fd06a0e3e805e86aa866a0900815bf256230e",
+      "transform": "script, style and noscript elements removed",
+      "url": "https://www.federalreserve.gov/disclaimer.htm"
+    },
+    "sec": {
+      "bytes": 85892,
+      "file": "sec-2026-09-26.html",
+      "final_url": "https://www.sec.gov/about/privacy-information",
+      "licence": "public_domain",
+      "retrieved": "2026-09-26T15:23:38Z",
+      "served_bytes": 90341,
+      "served_sha256": "64478ff6561cddc11e28f3e57e9f80600a477241177d98dc2dbf1a4637ce66bc",
+      "sha256": "78e8a278bf5192fba70d11dd0abd93411e3213ac7cdb06fabca827021f4664af",
+      "transform": "script, style and noscript elements removed",
+      "url": "https://www.sec.gov/about/privacy-information"
+    },
+    "treasury": {
+      "bytes": 64664,
+      "file": "treasury-2026-09-26.html",
+      "final_url": "https://home.treasury.gov/subfooter/site-policies-and-notices",
+      "licence": "federal_work_unverified",
+      "retrieved": "2026-09-26T15:23:38Z",
+      "served_bytes": 70265,
+      "served_sha256": "6bba0eff6562cf7880b07221088e833204dcac4b43a81a7d79156202b801fa8d",
+      "sha256": "05dd5de868c8ea5432f318bec85510e8c6804a9a36c926e1c1b8717cb6894d01",
+      "transform": "script, style and noscript elements removed",
+      "url": "https://home.treasury.gov/subfooter/site-policies-and-notices"
+    }
+  }
+}

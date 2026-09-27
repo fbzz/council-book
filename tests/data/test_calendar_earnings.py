@@ -80,11 +80,17 @@ def test_data_sources_add_the_stock_earnings_at_the_window_slot(sleeve_policy, r
     assert call["news"] == [] and call["state_dir"] == tmp_path          # no broker: the SEC estimate only
 
 
+def _no_public_news(policy, now, state_dir=None, *, slot=None, **kw):
+    from council.data.gov_news import NewsFetch
+
+    return NewsFetch()
+
+
 def test_one_feed_request_per_slot_serves_the_earnings_and_the_news(sleeve_policy, recorder, tmp_path):
     broker = FakeBroker()
-    sources = context.data_sources(sleeve_policy, broker=broker, state_dir=tmp_path)
+    sources = context.data_sources(sleeve_policy, broker=broker, state_dir=tmp_path, public_news=_no_public_news)
     sources.events(*window(SLOT))
-    items = sources.news(SLOT)
+    items = sources.news(SLOT).items                  # a NewsFetch: the broker items plus the public ones
     assert broker.calls == 1 and recorder[0]["news"] == items and items
     sources.news(SLOT + timedelta(hours=4))
     assert broker.calls == 2                                             # a new slot asks again

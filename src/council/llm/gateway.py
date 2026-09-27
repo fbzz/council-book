@@ -43,11 +43,24 @@ RETRYABLE_HTTP = frozenset({408, 409, 425, 429})
 
 @dataclass(frozen=True)
 class LLMResult:
-    """`parsed` is a validated, sanitized instance of the requested schema, or None."""
+    """`parsed` is a validated, sanitized instance of the requested schema, or None.
+
+    The private capture (transparency-v2 §2.2) also reads: `turns`, every raw reply in order (the
+    first reply of a corrected call is no longer lost); `errors`, the checker's errors on the first
+    reply; `correction`, the exact correction message; `sent_assistant`, the first reply exactly as
+    it was sent back in the correction turn (truncated to 8000 characters); `retries`, every
+    failed HTTP attempt of the timeout ladder, in order (`"first 1: timeout after 60s"`,
+    `"correction 2: http 503"`), each of which resent the same messages. `raw` is unchanged: the
+    last reply."""
 
     parsed: BaseModel | None
     call: RoleCall
     raw: str
+    turns: tuple[str, ...] = ()
+    correction: str = ""
+    sent_assistant: str = ""
+    errors: tuple[str, ...] = ()
+    retries: tuple[str, ...] = ()
 
 
 class Gateway(Protocol):
@@ -271,8 +284,11 @@ class OllamaGateway:
         tokens_out = int(payload.get("eval_count") or 0)
         return (content if isinstance(content, str) else ""), tokens_in, tokens_out
 
-    async def _post_with_ladder(self, body: dict[str, Any]) -> tuple[str, int, int]:
-        """Walk the timeout ladder. Raises the last _AttemptFailure when every step failed."""
+    async def _post_with_ladder(
+        self, body: dict[str, Any], failed: list[str] | None = None, turn: str = "first",
+    ) -> tuple[str, int, int]:
+        """Walk the timeout ladder. Raises the last _AttemptFailure when every step failed.
+        Each failed step is appended to `failed` as `"<turn> <step>: <reason>"` (private capture)."""
         last: _AttemptFailure | None = None
         for step, timeout in enumerate(self.timeouts):
             if step > 0 and self._backoff_s > 0:
@@ -281,6 +297,8 @@ class OllamaGateway:
                 return await self._attempt(body, timeout)
             except _AttemptFailure as exc:
                 last = exc
+                if failed is not None:
+                    failed.append(_short_error(f"{turn} {step + 1}: {exc}"))
                 if not exc.retryable:
                     break
         assert last is not None
@@ -305,6 +323,10 @@ class OllamaGateway:
         started = self._clock()
         tokens_in = tokens_out = 0
         raw = ""
+        turns: list[str] = []
+        correction = sent_assistant = ""
+        first: list[str] = []
+        failed: list[str] = []
 
         def result(parsed: BaseModel | None, status: CallStatus, error: str = "") -> LLMResult:
             call = RoleCall(
@@ -321,34 +343,40 @@ class OllamaGateway:
                 status=status,
                 error=_short_error(error),
             )
-            return LLMResult(parsed=parsed, call=call, raw=raw)
+            return LLMResult(parsed=parsed, call=call, raw=raw, turns=tuple(turns),
+                             correction=correction, sent_assistant=sent_assistant,
+                             errors=tuple(first), retries=tuple(failed))
 
         try:
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             try:
-                raw, t_in, t_out = await self._post_with_ladder(self._body(messages, seed, num_predict))
+                raw, t_in, t_out = await self._post_with_ladder(
+                    self._body(messages, seed, num_predict), failed, "first")
             except _AttemptFailure as exc:
                 return result(None, exc.status, str(exc))
             tokens_in, tokens_out = t_in, t_out
+            turns.append(raw)
             parsed, errors = decode_reply(raw, schema)
             if parsed is not None:
                 return result(parsed, "ok")
 
+            sent_assistant, correction, first = raw[:8000], correction_message(errors), list(errors)
             retry_messages = [
                 *messages,
-                {"role": "assistant", "content": raw[:8000]},
-                {"role": "user", "content": correction_message(errors)},
+                {"role": "assistant", "content": sent_assistant},
+                {"role": "user", "content": correction},
             ]
             first_errors = "; ".join(errors)
             try:
                 raw2, t_in, t_out = await self._post_with_ladder(
-                    self._body(retry_messages, seed, num_predict)
+                    self._body(retry_messages, seed, num_predict), failed, "correction"
                 )
             except _AttemptFailure as exc:
                 return result(None, "parse_fail", f"{first_errors} | correction {exc.status}: {exc}")
             tokens_in += t_in
             tokens_out += t_out
             raw = raw2
+            turns.append(raw2)
             parsed, errors2 = decode_reply(raw2, schema)
             if parsed is not None:
                 return result(parsed, "ok", f"corrected: {first_errors}")

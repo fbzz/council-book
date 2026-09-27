@@ -11,6 +11,7 @@ from council.facts.features import market_states
 from council.facts.pack import (
     EVENT_HORIZON,
     NEWS_MAX,
+    admissible_news,
     build_fact_pack,
     cost_facts_from_quotes,
     effective_age_h,
@@ -179,8 +180,11 @@ def test_news_admission_window_and_cap(policy):
     pack = _pack(policy, news=items + [items[-1]])
     assert [n.title for n in pack.news] == ["tjust_before", "tedge"]
     many = [_news(i, SLOT - timedelta(minutes=i + 1)) for i in range(NEWS_MAX + 5)]
-    capped = _pack(policy, news=many)
-    assert len(capped.news) == NEWS_MAX and capped.news[0].title == "t0"
+    capped = _pack(policy, news=many)                # broker feed items: the policy's broker quota
+    quota = policy.council["news"]["quotas"]["broker_feed"]
+    assert len(capped.news) == quota < NEWS_MAX and capped.news[0].title == "t0"
+    assert [n.id for n in admissible_news(many, SLOT)][:1] == [capped.news[0].id]
+    assert len(admissible_news(many, SLOT)) == NEWS_MAX       # no policy: the newest 40
 
 
 def _event(kind, at, severity=3):

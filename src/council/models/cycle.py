@@ -1,4 +1,12 @@
-"""The private cycle record: what the orchestrator assembles, the ledger stores, the exporter reads."""
+"""The private cycle record: what the orchestrator assembles, the ledger stores, the exporter reads.
+
+The per-line decision trail (transparency-v2 §4, `council.publish.trail`) is rebuilt from this
+record on demand (`council why`). The fields after `dropped_cards` keep what the record did not
+otherwise hold: the structured drops, the bands before the analysts' cards (only lines where they
+differ from `bands`), the lines whose medoid fell back to the reference, the lines with new material
+evidence, the lines each advocate claim is about, the publishable values of the evidence ids the
+trail cites and the lines whose R15 value may be shown. All default empty, so older ledger records
+load unchanged; all are PRIVATE (a later package publishes the public subset)."""
 
 from __future__ import annotations
 
@@ -10,6 +18,7 @@ from pydantic import Field
 from council.models.cards import EvidenceCard, MacroAnalystOutput, SectorAnalystOutput
 from council.models.common import Strict
 from council.models.debate import AdvocateCase, BearCase
+from council.models.drops import Drop
 from council.models.plan import Plan
 from council.models.pm import PMDecision
 from council.models.reference import ReferenceBook
@@ -87,6 +96,13 @@ class CycleRecord(Strict):
     single_agent_levels: dict[str, float] = Field(default_factory=dict)
     desk_sha: str = ""
     dropped_cards: list[str] = Field(default_factory=list)
+    drops: list[Drop] = Field(default_factory=list)                      # dropped_cards, structured
+    code_bands: dict[str, Band] = Field(default_factory=dict)            # before the analysts' cards
+    fallback_lines: list[str] = Field(default_factory=list)              # medoid -> reference
+    material_lines: list[str] = Field(default_factory=list)              # new material evidence (MC)
+    claim_lines: dict[str, list[str]] = Field(default_factory=dict)      # "bear:c1" -> lines
+    evidence_values: dict[str, str] = Field(default_factory=dict)        # cited id -> public value
+    value_lines: list[str] = Field(default_factory=list)                 # R15 value may be shown
     risk: RiskDecision | None = None
     plan: Plan | None = None
     decision_id: str | None = None

@@ -37,6 +37,30 @@ class RiskCheck(Strict):
     kind: Literal["policy", "execution"] = "policy"
 
 
+TraceStage = Literal["no_band", "band_clip", "deviation_cap", "compliance_base", "box",
+                     "projection", "line_filter", "budget", "final"]
+TraceInput = Literal["policy", "public_weights", "public_dates", "costs:floor", "open_history",
+                     "broker_quote", "broker_history", "fixed_fee", "size_floor", "nav"]
+
+
+class TraceStep(Strict):
+    """One step of the engine's per-line trace (transparency-v2 §4.2). The engine hooks that emit it
+    land with WP-K (T5b); until then `RiskDecision.line_trace` stays empty and the decision trail
+    reads `hold_reasons`. Weights are x NAV; `value`/`limit` are the rule's own numbers and `inputs`
+    names every source they were derived from, so `publish.trace_rules` can decide whether a number
+    may ever be shown (a bound from a size floor, a fixed fee or the NAV never is)."""
+
+    stage: TraceStage
+    code: str
+    before_w: float | None = None
+    after_w: float | None = None
+    lo_w: float | None = None
+    hi_w: float | None = None
+    value: float | None = None
+    limit: float | None = None
+    inputs: tuple[TraceInput, ...] = ()
+
+
 class RiskDecision(Strict):
     raw_levels: dict[str, float]
     banded_levels: dict[str, float]
@@ -54,6 +78,7 @@ class RiskDecision(Strict):
     basis: DecisionBasis
     hold_reasons: list[str] = Field(default_factory=list)
     compliance: list[str] = Field(default_factory=list)   # rule-driven risk reductions
+    line_trace: dict[str, list[TraceStep]] = Field(default_factory=dict)   # additive (T5b emits it)
 
     @property
     def passed(self) -> bool:

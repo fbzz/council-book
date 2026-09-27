@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<?xml-stylesheet href="rss.xsl" type="text/xsl" media="screen"?>
+<rss version="2.0">
+	<channel>
+		<title>Today in Energy</title>
+		<link>http://www.eia.gov/todayinenergy</link>
+		<description>Short, timely articles with graphics on energy facts, issues, and trends.</description>
+		<language>en-us</language>
+		<lastBuildDate>Fri, 25 Sep 2026 09:00:00 EST</lastBuildDate>
+		<webMaster>wmaster@eia.gov</webMaster>
+
+		<image>
+		<title>EIA logo</title>
+		<url>http://www.eia.gov/global/images/logos/eia_logo_250.png</url>
+		<link>http://www.eia.gov/</link>
+		<description>U.S. Energy Information Administration</description>
+		</image>
+		
+		<item>
+		<title>Henry Hub natural gas prices this summer were 6% lower than last summer</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68204</link>
+		<pubDate>Fri, 25 Sep 2026  09:00:00 EST</pubDate>
+		<description>The Henry Hub natural gas spot price averaged $2.93 per million British thermal units from June through August, 6% less than the same period last year. Prices were lower this summer despite exceptionally hot weather that increased electricity demand for air conditioning. Natural gas-fired power plants often help meet higher demand during such periods.</description>
+		</item>
+
+		<item>
+		<title>Public companies produce most U.S. crude oil and natural gas</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68184</link>
+		<pubDate>Tue, 22 Sep 2026  09:00:00 EST</pubDate>
+		<description>Publicly traded companies represent a tiny share of the total number of companies producing crude oil and natural gas in the United States, but they make up a large share of U.S. production. In 2025, publicly traded companies accounted for just 2% of about 12,000 oil and natural gas producers but produced 68% of the crude oil and natural gas in the Lower 48 states.</description>
+		</item>
+		
+		<item>
+		<title>What goes into diesel prices?</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68164</link>
+		<pubDate>Fri, 18 Sep 2026  09:00:00 EST</pubDate>
+		<description>The price of distillate fuel oil, often sold as diesel, is driven by the price of crude oil, retail margins, distribution costs, taxes, and crack spreads, the indicator we use for refining margins. Tight global supplies of distillate fuel oil and elevated crude oil prices have driven prices higher in recent months.</description>
+		</item>
+
+		<item>
+		<title>Corpus Christi LNG expansion makes facility the second-largest in the United States</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68144</link>
+		<pubDate>Tue, 15 Sep 2026  09:00:00 EST</pubDate>
+		<description>On August 28, 2026, Cheniere Energy, Inc., completed its Corpus Christi Liquefaction Stage 3 Project (CCL Stage 3) in Texas, taking custody and control of the seventh and last liquefied natural gas (LNG) train in the project.</description>
+		</item>
+		
+		<item>
+		<title>United States on track for record crude oil production in 2026</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68125</link>
+		<pubDate>Thu, 10 Sep 2026  09:00:00 EST</pubDate>
+		<description>We forecast U.S. crude oil production will average 13.8 million barrels per day (b/d) in 2026, surpassing the previous record of 13.7 million b/d set in 2025, in our latest Short-Term Energy Outlook (STEO).</description>
+		</item>
+		
+		<item>
+		<title>New England natural gas prices have been trading near record discounts to Henry Hub</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68124</link>
+		<pubDate>Wed, 09 Sep 2026  09:00:00 EST</pubDate>
+		<description>Low-cost Appalachian and Canadian natural gas supplies coupled with lower-than-usual regional consumption have pushed down natural gas prices at a major New England pricing hub in recent months to trade at a discount to the widely cited U.S. benchmark, Henry Hub.</description>
+		</item>
+		
+		<item>
+		<title>Elevated crack spreads and crude oil prices contribute to higher prices at the pump</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68104</link>
+		<pubDate>Fri, 04 Sep 2026  09:00:00 EST</pubDate>
+		<description>What are crack spreads and why are they elevated? Crack spreads are indicators of the profitability of refining crude oil into petroleum products such as gasoline and diesel. One common crack spread is calculated by subtracting the spot market price of a gallon of crude oil from the wholesale price of a gallon of refined product. Since May, the gasoline crack spread in New York Harbor has averaged about $1 per gallon (gal) higher than in 2025, when the crack spread peaked around 60 cents/gal. Gasoline crack spreads are elevated primarily because of tight gasoline supplies globally. </description>
+		</item>
+		
+		<item>
+		<title>Weekly average load in ERCOT continues near record high</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68084</link>
+		<pubDate>Thu, 03 Sep 2026 09:00:00 EST</pubDate>
+		<description>Sustained high temperatures have contributed to persistently high electricity demand in the Electric Reliability Council of Texas (ERCOT), the regional transmission organization for most of the state.</description>
+		</item>	
+		
+		<item>
+		<title>U.S. LNG exports rose 23% in the first half of 2026 because of higher capacity</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68064</link>
+		<pubDate>Tue, 01 Sep 2026 09:00:00 EST</pubDate>
+		<description>U.S. liquefied natural gas (LNG) exports averaged 17.4 billion cubic feet per day (Bcf/d) in the first six months of the year, 23% more than the same period in 2025, according to our Natural Gas Monthly. In our latest Short-Term Energy Outlook, we estimate U.S. LNG exports will average 17.3 Bcf/d in the second half of 2026 (2H26) before rising to 18.7 Bcf/d in 1H27.</description>
+		</item>	
+		
+		<item>
+		<title>U.S. uranium production more than tripled in 2025 and was the highest since 2017</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68044</link>
+		<pubDate>Fri, 28 Aug 2026  09:00:00 EST</pubDate>
+		<description>In 2025, uranium concentrate production in the United States totaled 2.1 million pounds of triuranium octoxide (U3O8), the base component of nuclear reactor fuel. U.S. U3O8 production in 2025 was the most since 2017 and more than triple the volume produced in 2024.</description>
+		</item>	
+		
+		<item>
+		<title>Eight petroleum liquids pipeline projects have been completed since the start of 2025</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68024</link>
+		<pubDate>Wed, 26 Aug 2026  09:00:00 EST</pubDate>
+		<description>In the 2026 release of our Liquids Pipeline Projects Database, we tracked the completion of 8 liquid fuels pipeline projects since the start of 2025, and an additional 14 new projects have been announced.</description>
+		</item>	
+		
+		<item>
+		<title>Dangote refinery drives increase in petroleum shipments from Nigeria</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=68004</link>
+		<pubDate>Mon, 24 Aug 2026  09:00:00 EST</pubDate>
+		<description>Seaborne petroleum product exports from Nigeria have grown seven-fold since 2023, playing an increasing role in the international market for petroleum products at a time when supplies from other areas have been constrained.</description>
+		</item>	
+		
+		<item>
+		<title>Longer wells boost Permian crude oil and natural gas production</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=67984</link>
+		<pubDate>Wed, 19 Aug 2026  09:00:00 EST</pubDate>
+		<description>Well operators in the Permian region of western Texas and eastern New Mexico are getting more oil and gas out of the ground by drilling longer, horizontal wells and increasingly incorporating so-called super-lateral wells that exceed 15,000 feet.</description>
+		</item>		
+		
+		<item>
+		<title>Waterborne shipments from the U.S. Gulf Coast increased in April and May</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=67964</link>
+		<pubDate>Mon, 17 Aug 2026  09:00:00 EST</pubDate>
+		<description>Waterborne shipments of crude oil and petroleum products from the U.S. Gulf Coast (PADD 3) to the West Coast (PADD 5) more than quadrupled year-on-year in April and May following a waiver that permitted a broader group of ships to travel between U.S. ports. Shipments from the U.S. Gulf Coast to the East Coast (PADD 1) also increased.</description>
+		</item>		
+		
+		<item>
+		<title>United States on track for record natural gas production in 2026</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=67944</link>
+		<pubDate>Wed, 12 Aug 2026  09:00:00 EST</pubDate>
+		<description>We forecast U.S. marketed natural gas production will average 122.5 billion cubic feet per day (Bcf/d) in 2026, surpassing the previous record of 118.5 Bcf/d set in 2025, in our August 2026 Short-Term Energy Outlook (STEO).</description>
+		</item>		
+		
+		<item>
+		<title>Duration of power outages in Puerto Rico not caused by major events increased 19% in 2025</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=67926</link>
+		<pubDate>Mon, 10 Aug 2026  09:00:00 EST</pubDate>
+		<description>In 2025, customers in Puerto Rico experienced an average of 36 hours of power interruptions that were not caused by major events such as hurricanes, 19% more than in 2024. On average, between 2021 and 2025, Puerto Rican customers experience 29 hours of power loss each year. By comparison, electricity customers in the mainland United States generally experience about two hours of electricity interruptions per year without major events.</description>
+		</item>
+		
+		<item>
+		<title>Battery storage capacity averaged 70% growth over the last three years</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=67925</link>
+		<pubDate>Fri, 7 Aug 2026  09:00:00 EST</pubDate>
+		<description>Utility-scale battery storage capacity in the United States increased significantly during the last three years, with an annual average growth rate of 70%. By the end of 2025, the U.S. power system had operational battery storage capacity of 43.6 gigawatts (GW). During the first six months of 2026, operators added another 8.3 GW of battery storage capacity, reaching nearly 52 GW of nameplate battery storage capacity, based on our latest Preliminary Monthly Electric Generator Inventory.</description>
+		</item>
+		
+		<item>
+		<title>The U.S.-Canada natural gas and electricity trade value rose in 2025</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=</link>
+		<pubDate>Wed, 05 Aug 2026  09:00:00 EST</pubDate>
+		<description>Although the total value of energy trade between the United States and Canada fell by 11% in 2025 to an estimated $137 billion, according to data from the U.S. Census Bureau, the trade value of natural gas and electricity between the two countries increased slightly primarily because of increased natural gas prices and trade volume.</description>
+		</item>
+		
+		<item>
+		<title>Hourly peak load in ERCOT set a new record, exceeding 91 GW on July 22</title>
+		<link>https://www.eia.gov/todayinenergy/detail.php?id=67906</link>
+		<pubDate>Mon, 03 Aug 2026  09:00:00 EST</pubDate>
+		<description>Hourly peak load in the Electric Reliability Council of Texas (ERCOT), the regional transmission organization serving most of Texas, reached a record 91.1 gigawatts (GW) on July 22, 2026, according to data reported to us for our Hourly Electric Grid Monitor.</description>
+		</item>
+		
+	</channel>
+</rss>

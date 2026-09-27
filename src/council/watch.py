@@ -5,6 +5,11 @@
   - publishes execution records written by the operator terminal (the operator never runs git),
   - kill switch: on a fresh HALT it creates a standing flatten PROPOSAL and sends an urgent alert,
   - checks that every open position carries a stop-loss and that the cycle heartbeat is fresh,
+  - records a vanished position as a broker stop-loss hit (R4d cool-off). With a stock sleeve, a
+    vanished STOCK position is classified first (`stocks.corporate.classify_vanished_positions`):
+    a stop hit only when its last observed bid was at or below its stop, or above it by at most
+    2 x the line's 4-hour sigma (stored by the last cycle), else `vanished_not_stop` (a cash
+    takeover?): URGENT, no cool-off. Missing data counts as a stop hit,
   - resolves orders the broker holds until their market opens (waiting_for_market), read-only:
     filled → reconcile → completed / completed_partial; cancelled or rejected → skipped legs →
     completed_partial; a partial fill keeps waiting for its remainder until the leg's deadline,
@@ -14,6 +19,10 @@
     stop-loss, an unknown position or a broken expected position blocks; drift from targets that
     may be hours old is recorded as a reason. A fill whose stop-loss sits at or through the fill
     price, or much closer than the class floor, raises an URGENT `sl_refit_needed:<line>` alert.
+    With a stock sleeve, that reconcile takes pending corporate actions out
+    (`stocks.corporate.reconcile_corporate`): a position no line owns that no leg of ours opened
+    holds only the stock sleeve (at the next cycle's start), and a credited line without a stop is
+    a warning; both are recorded as reasons.
     Still held one hour after the next full session closes → blocked with an URGENT alert (the
     operator checks the broker and runs `council ops resolve`). The timeout applies on every run,
     also when the broker read fails or no broker is connected. A timed-out hold keeps its blocker
@@ -23,7 +32,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -193,36 +201,90 @@ def _heartbeat(ctx: CycleContext, now: datetime) -> list[str]:
     return []
 
 
+ALERT_WITHHELD = "a watch alert was withheld by the notification leak scan: run `council status`"
+
+
+def _alert_texts(body: str) -> list[str]:
+    """The alert body, then the same body with instrument keys and long ids scrubbed (the notifier
+    refuses `UNMAPPED_<id>` and 7+ digit runs), then a fixed text: an URGENT alert must arrive even
+    when its details cannot."""
+    import re
+
+    scrubbed = re.sub(r"(?i)UNMAPPED_[0-9A-Za-z]+", "an unmapped instrument", body)
+    scrubbed = re.sub(r"(?<![\w.])\d{7,}(?!\w)", "[id]", scrubbed)
+    return list(dict.fromkeys([body, scrubbed, ALERT_WITHHELD]))
+
+
 def _alert(ctx: CycleContext, message: str) -> None:
+    """Send one watch alert; a text the notifier refuses is retried scrubbed, then as a fixed text
+    (never raises: an alert failure never stops the watch)."""
     if ctx.notifier is None:
         return
     urgent = message.startswith("URGENT")
-    with contextlib.suppress(Exception):
-        ctx.notifier.send("council watch", message.removeprefix("URGENT ").strip(),
-                          priority="urgent" if urgent else "default")
+    for text in _alert_texts(message.removeprefix("URGENT ").strip()):
+        try:
+            ctx.notifier.send("council watch", text, priority="urgent" if urgent else "default")
+            return
+        except Exception:  # noqa: BLE001 - try the next, safer text
+            continue
 
 
 # ---------------------------------------------------------------------- stops and flatten
 def _stop_hits(ctx: CycleContext, snapshot: Any, now: datetime) -> list[str]:
-    """Positions we expected (last observation) that vanished without one of our closes are
-    broker stop-loss hits: record them (R4d re-entry cool-off) and alert."""
-    from council.execution.planner import vehicle_to_line
+    """Positions we expected (last observation) that vanished without one of our closes
+    (`stocks.corporate.classify_vanished_positions`). A core line's is a broker stop-loss hit:
+    recorded (R4d re-entry cool-off) with an URGENT alert. A stock line's is a stop hit only when
+    its last observed bid was at or below its stop rate, or above it by at most 2 x the line's
+    4-hour sigma (`cycle.STOCK_SIGMA_4H_KEY`, stored by the last cycle); otherwise it is
+    `vanished_not_stop` (a cash takeover?): an URGENT alert, no cool-off. Missing data counts as a
+    stop hit. The observations (symbol, stop rate, last bid) are PRIVATE ledger state."""
+    from council.cycle import STOCK_SIGMA_4H_KEY
+    from council.stocks import corporate
 
     ledger = ctx.ledger
-    live = {p.position_id: p.symbol for p in snapshot.positions}
-    seen = {int(k): v for k, v in (ledger.get_runtime("watch_positions", {}) or {}).items()}
+    live = {p.position_id: p for p in snapshot.positions}
+    seen = _observations(ledger.get_runtime("watch_positions", {}) or {})
     ours = {row.position_id for row in ledger.legs_in_states(
                 ["filled", "partially_filled", "submitted", "in_flight", WAITING_STATE])
             if row.kind in ("close", "partial_close") and row.position_id is not None}
-    v2l = vehicle_to_line(ctx.policy.universe)
+    raw_sigma = ledger.get_runtime(STOCK_SIGMA_4H_KEY, {})
+    sigma = {str(k): _positive(v) for k, v in raw_sigma.items()} if isinstance(raw_sigma, dict) else {}
+    vanished = corporate.classify_vanished_positions(seen, live, ours, ctx.policy, sigma_4h=sigma)
     alerts = []
-    for pid, symbol in seen.items():
-        if pid not in live and pid not in ours:
-            line = v2l.get(symbol, symbol)
-            ledger.record_stop_hit(line=line, symbol=symbol, position_id=pid, at=now)
-            alerts.append(f"URGENT stop-loss hit on {line}")
-    ledger.set_runtime("watch_positions", {str(k): v for k, v in live.items()})
+    for v in vanished:
+        if v.outcome == corporate.STOP_HIT:
+            ledger.record_stop_hit(line=v.line, symbol=v.symbol, position_id=v.position_id, at=now)
+            alerts.append(f"URGENT stop-loss hit on {v.line}")
+    alerts += corporate.vanished_alerts(vanished)
+    ledger.set_runtime("watch_positions", {
+        str(pid): {"symbol": p.symbol, "sl_rate": p.sl_rate, "bid": p.close_rate if p.is_buy else None}
+        for pid, p in live.items()})
     return alerts
+
+
+def _observations(raw: Any) -> dict[int, Any]:
+    """{position id: corporate.Observation} from the stored `watch_positions` (a bare symbol, as
+    stored before the stock sleeve, reads as an observation without a stop rate or bid)."""
+    from council.stocks.corporate import Observation
+
+    out: dict[int, Any] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        try:
+            pid = int(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, str):
+            out[pid] = Observation(symbol=value)
+        elif isinstance(value, dict) and isinstance(value.get("symbol"), str):
+            out[pid] = Observation(symbol=value["symbol"], sl_rate=_positive(value.get("sl_rate")),
+                                   bid=_positive(value.get("bid")))
+    return out
+
+
+def _positive(value: Any) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) and value > 0 else None
 
 
 def _decision_state(ledger: Any, decision_id: str) -> str | None:
@@ -429,6 +491,8 @@ def _final_after_wait(ctx: CycleContext, rows: list[Any], port: Any, now: dateti
     ]
     targets = {r.line: float(r.detail["weight_after"]) for r in rows if r.detail.get("weight_after") is not None}
     rec = reconcile(snapshot_from_portfolio(port, now), targets, expected, ctx.policy)
+    rec, corporate_notes = _corporate_reconcile(ctx, rec, port)
+    reasons += corporate_notes
     if not rec.protected:
         reasons += [*(f"missing stop-loss: {s}" for s in rec.missing_sl),
                     *(f"unknown position: {s}" for s in rec.unknown_positions), *rec.issues]
@@ -439,6 +503,28 @@ def _final_after_wait(ctx: CycleContext, rows: list[Any], port: Any, now: dateti
     if any(r.state in ("rejected", "skipped", "partially_filled", "rejected_partial") for r in rows):
         return "completed_partial", reasons
     return "completed", reasons
+
+
+def _corporate_reconcile(ctx: CycleContext, rec: Any, port: Any) -> tuple[Any, list[str]]:
+    """(the reconcile with pending corporate actions taken out, reasons to record) via
+    `stocks.corporate.reconcile_corporate`, only while the policy has a stock sleeve (a core-only
+    book keeps today's rule: an unknown position blocks). A failure of the corporate step keeps the
+    plain reconcile (fail closed: an unknown position still blocks) with a note."""
+    from council.stocks import corporate
+
+    if not corporate.sleeve_active(ctx.policy):
+        return rec, []
+    try:
+        fixed, warnings, pending = corporate.reconcile_corporate(
+            rec, list(port.positions), ctx.policy, opened=corporate.opened_position_ids(ctx.ledger))
+    except Exception as exc:  # noqa: BLE001 - the held order still resolves on the plain reconcile
+        return rec, [f"corporate-action reconcile unavailable ({type(exc).__name__}); the plain reconcile applies"]
+    notes = [f"warning {w}: a credited position without a stop-loss (sold at the next US session)"
+             for w in warnings]
+    if pending:
+        notes.append("corporate action pending: an unknown position no leg of ours opened; the stock sleeve "
+                     "is held until `council stocks adopt`")
+    return fixed, notes
 
 
 def _refresh_report(ledger: Any, decision_id: str, final: str, reasons: list[str]) -> None:
