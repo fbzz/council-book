@@ -9,6 +9,8 @@
 *.pt
 state/
 raw/
+# no in-repo private fixtures (M5-C): they live in state_dir/licensed/fixtures/ (7 days); this
+# path stays ignored only as a tripwire, never as a fixture home
 tests/fixtures_private/
 site-preview/
 _site/

@@ -55,6 +55,7 @@ class WatchOutcome:
     expired: list[str] = field(default_factory=list)
     revealed: list[str] = field(default_factory=list)
     executions_published: list[str] = field(default_factory=list)
+    ops_rows_published: list[str] = field(default_factory=list)
     alerts: list[str] = field(default_factory=list)
     broker_error: str | None = None     # fixed code when the broker checks could not run
     urgent: list[str] = field(default_factory=list)   # fixed codes of URGENT conditions this run
@@ -112,9 +113,11 @@ def _run(ctx: CycleContext) -> WatchOutcome:
     out.revealed = _reveals(ctx, files)
     unpublished: list[str] = []
     out.executions_published = _executions(ctx, files, unpublished)
+    out.ops_rows_published = _ops_rows(ctx, files, unpublished)
     out.urgent += [code.split(":")[0] for code in dict.fromkeys(unpublished)]
     for code in dict.fromkeys(unpublished):          # a bad record never stops the loop; retried
-        urgent.send_once(ctx, code, "council watch", f"an execution report is unpublished ({code})", now)
+        what = "a public ops row" if code.startswith("ops_row") else "an execution report"
+        urgent.send_once(ctx, code, "council watch", f"{what} is unpublished ({code})", now)
     if files and ctx.publisher is not None:
         try:
             ctx.publisher.publish(files, f"watch {now.strftime('%Y-%m-%dT%H%MZ')}: reveals/executions")
@@ -122,6 +125,10 @@ def _run(ctx: CycleContext) -> WatchOutcome:
             ledger.set_runtime("executions_published",
                                sorted(set(ledger.get_runtime("executions_published", []))
                                       | set(out.executions_published)))
+            if out.ops_rows_published:              # cleared only after a successful publish
+                done = set(out.ops_rows_published)
+                ledger.set_runtime(OPS_ROWS_PENDING, [c for c in ledger.get_runtime(OPS_ROWS_PENDING, [])
+                                                      if c not in done])
         except Exception as exc:
             out.alerts.append(f"publish_error:{type(exc).__name__}")
     if ctx.sources.broker is not None:
@@ -146,6 +153,8 @@ def _run(ctx: CycleContext) -> WatchOutcome:
     for flag in _daily_backup(ctx, now):             # rate-limited: a failing backup retries every run
         out.urgent.append(BACKUP_ERROR)
         urgent.send_once(ctx, BACKUP_ERROR, "council watch", f"ledger backup failed ({flag})", now)
+    for flag in _licensed_sweep(ctx, now):           # once per UTC day (M5-M); flags only
+        out.alerts.append(flag)
     for alert in out.alerts:
         _alert(ctx, alert)
     return out
@@ -245,6 +254,44 @@ def _executions(ctx: CycleContext, files: dict[str, bytes], unpublished: list[st
     return published
 
 
+# ---------------------------------------------------------------------------- ops rows
+OPS_ROWS_PENDING = "ops_rows_pending"   # = council.operator.approve.OPS_ROWS_PENDING (not imported:
+                                        # approve.py is the operator's execution module; a test pins it)
+
+
+def _ops_rows(ctx: CycleContext, files: dict[str, bytes], unpublished: list[str] | None = None) -> list[str]:
+    """Republish the public ops row of each cycle `ops review` / `resume-exec` finalised (queued
+    under `ops_rows_pending`: the operator never runs git). A cycle whose record cannot be made
+    public is flagged `ops_row_unpublished:<type>` and stays queued; the caller clears the
+    published ids only after the publish succeeds."""
+    from council.models.cycle import CycleRecord
+    from council.publish import journal, redact
+
+    pending = list(dict.fromkeys(ctx.ledger.get_runtime(OPS_ROWS_PENDING, []) or []))
+    if not pending:
+        return []
+    rows, done = [], []
+    for cycle_id in pending:
+        try:
+            raw = ctx.ledger.get_cycle(cycle_id)
+            if not raw:
+                continue                                   # no record: stays queued, visible
+            rows.append(redact.public_ops_row(CycleRecord.model_validate(raw)))
+            done.append(cycle_id)
+        except Exception as exc:  # noqa: BLE001 - one bad record never stops the watch
+            if unpublished is not None:
+                unpublished.append(f"ops_row_unpublished:{type(exc).__name__}")
+    if rows:
+        try:
+            existing = files.get(journal.OPS_PATH) or _read_existing(ctx, journal.OPS_PATH)
+            files.update(journal.ops_files(existing, rows))
+        except Exception as exc:  # noqa: BLE001
+            if unpublished is not None:
+                unpublished.append(f"ops_row_unpublished:{type(exc).__name__}")
+            return []
+    return done
+
+
 # ------------------------------------------------------------------------ broker checks
 def _broker_checks(ctx: CycleContext, now: datetime) -> list[str]:
     from council.cycle import _snapshot_and_kill
@@ -286,11 +333,25 @@ def _daily_backup(ctx: CycleContext, now: datetime) -> list[str]:
     failure flags. The caller turns a failure into one URGENT per 4 h (a failed backup is retried
     on every run, so an unthrottled alert would fire every run) and a healthcheck `/fail`."""
     try:
+        from council.operator import licensed
         from council.ops import backup
 
-        return list(backup.maybe_daily_backup(ctx.state_dir, now))
+        return list(backup.maybe_daily_backup(ctx.state_dir, now,
+                                              licensed_check=licensed.backup_check(ctx.state_dir)))
     except Exception as exc:  # noqa: BLE001
         return [f"{BACKUP_ERROR}:{type(exc).__name__}"]
+
+
+def _licensed_sweep(ctx: CycleContext, now: datetime) -> list[str]:
+    """Once per UTC day, delete licensed payloads before they reach the 7-day retention
+    (`council.operator.licensed.sweep`, shared with the cycle hook: whichever runs first that day
+    writes the receipt). Never raises; returns `purge_error:*` flags."""
+    try:
+        from council.operator import licensed
+
+        return list(licensed.sweep(ctx.state_dir, now))
+    except Exception as exc:  # noqa: BLE001
+        return [f"purge_error:{type(exc).__name__}"]
 
 
 ALERT_WITHHELD = "a watch alert was withheld by the notification leak scan: run `council status`"
@@ -481,7 +542,14 @@ def _resolve_one(ctx: CycleContext, decision_id: str, now: datetime) -> list[str
                 if mismatch:
                     problems.append(f"{row.line}: {mismatch}")
                 refit = _sl_refit(ctx, row, st)
-                if refit:
+                if refit and not _sl_modify_verified(ctx):
+                    # M5-D1: stop changes are unproven (S2), so the fix is a close, never a modify_sl
+                    close = refit.replace("sl_refit_needed", "sl_refit_close_needed", 1)
+                    notes += [refit, close, "capability_missing:sl_modify"]
+                    alerts.append(f"URGENT {close}: the stop-loss no longer protects the fill and stop "
+                                  "changes are unverified (capability_missing:sl_modify); check it in "
+                                  "the broker and propose a close")
+                elif refit:
                     notes.append(refit)
                     alerts.append(f"URGENT {refit}: the stop-loss no longer protects the fill; "
                                   "check it in the broker and propose a fix")
@@ -534,6 +602,16 @@ def _fill_mismatch(row: Any, st: Any, tol: float, *, full: bool) -> str | None:
     if broker is not None and abs(broker / (filled * float(price)) - 1) > tol:
         return "broker-reported exposure differs from units × fill price"
     return None
+
+
+def _sl_modify_verified(ctx: CycleContext) -> bool:
+    """The M5-D1 `sl_modify` gate (S2 proven). Only reached with a connected broker; never raises."""
+    try:
+        from council.operator import capabilities
+
+        return capabilities.load(ctx.state_dir).has("sl_modify")
+    except Exception:  # noqa: BLE001 - an unreadable gate is a false gate
+        return False
 
 
 def _sl_refit(ctx: CycleContext, row: Any, st: Any) -> str | None:

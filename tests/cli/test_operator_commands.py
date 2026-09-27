@@ -44,12 +44,18 @@ MATRIX: dict[str, list[str]] = {
     "notify test": ["notify", "test"],
     "account set-mirror": ["account", "set-mirror", "--ratio", "0.2"],
     "doctor --live-read": ["doctor", "--live-read"],
+    "doctor --record-fixtures": ["doctor", "--record-fixtures"],
+    "keys verify": ["keys", "verify"],
+    "instruments resolve": ["instruments", "resolve", "--dry-run"],
+    "account set-mirror --from-broker": ["account", "set-mirror", "--funding-usd", "1000", "--from-broker"],
     "stocks rank": ["stocks", "rank", "--asof", "2026-08-20"],
     "stocks onboard": ["stocks", "onboard"],
     "stocks adopt": ["stocks", "adopt", "1"],
     "stocks status": ["stocks", "status"],
     "stocks prune": ["stocks", "prune"],
     "purge-licensed": ["purge-licensed", "--dry-run"],
+    "ops attest": ["ops", "attest", "terms-version"],
+    "ops capabilities": ["ops", "capabilities"],
 }
 # guarded inside their own module (transparency T1): refusal only
 SELF_GUARDED: dict[str, list[str]] = {

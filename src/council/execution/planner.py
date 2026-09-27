@@ -49,16 +49,22 @@ Rules (every one is tested):
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from council.broker.eligibility import VehicleChoice, select_config, whole_units_only
+from council.broker.eligibility import (
+    VehicleChoice,
+    required_capabilities,
+    select_config,
+    whole_units_only,
+)
 from council.models.broker import EligibilityRow, ExposureSnapshot, Position
 from council.models.common import Direction, Settlement
 from council.models.plan import Leg, LegKind, Plan
 from council.models.risk import RiskDecision, changed_lines
+from council.operator.capabilities import OPEN_PREREQUISITES
 from council.policy import Policy, Universe
 from council.risk.costs import TradeEconomics
 from council.risk.stops import fit_to_eligibility, sl_margin_pct, stop_loss_rate
@@ -185,8 +191,11 @@ class _Builder:
         ref_levels: Mapping[str, float] | None = None,
         economics: TradeEconomics | None = None,
         gap_ref: GapRef | None = None,
+        capabilities: Any | None = None,
     ) -> None:
         self.nav = nav
+        self.capabilities = capabilities       # M5-D1 gates (operator.capabilities.Capabilities) or None
+        self.by_line = policy.universe.by_symbol()
         self.vehicle_for = vehicle_for
         self.quotes = quotes
         self.stop_distance = stop_distance
@@ -211,6 +220,22 @@ class _Builder:
         note = f"{line}: {reason}"
         if note not in self.skipped:
             self.skipped.append(note)
+
+    def missing_caps(self, required: Iterable[str]) -> list[str]:
+        """The M5-D1 capabilities among `required` that are not verified ([] without gates)."""
+        if self.capabilities is None:
+            return []
+        return [c for c in required if not self.capabilities.has(c)]
+
+    def vehicle_gaps(self, line: str, settlement: str, direction: str, leverage: int) -> list[str]:
+        """The unverified capabilities an open of this vehicle class needs ([] without gates). A line
+        the universe does not know fails closed (`capability_missing:unknown_line`)."""
+        if self.capabilities is None:
+            return []
+        spec = self.by_line.get(line)
+        if spec is None:
+            return ["unknown_line"]
+        return self.missing_caps(required_capabilities(spec, settlement, direction, leverage))
 
     # ------------------------------------------------------------------ prices
     def close_price(self, p: Position) -> float:
@@ -314,6 +339,11 @@ class _Builder:
             minimum = row.min_position_exposure if row else 0.0
             if remainder_units <= 1e-9 or remainder_exposure < minimum:
                 self.close(line, p, f"{line}: reduce (full close, remainder below broker minimum)")
+            elif self.missing_caps(("partial_close",)):
+                self.skip(line, "capability_missing:partial_close")     # a trim waits for S3
+            elif row is not None and not row.allow_partial_close and self.reopen_gaps(line, p):
+                # the re-open would be refused by a capability gate: a trim must not become a full exit
+                self.skip(line, f"capability_missing:{self.reopen_gaps(line, p)[0]}")
             elif row is not None and not row.allow_partial_close:
                 closing = self.close(line, p, f"{line}: reduce (full close, partial close not allowed)")
                 self.reopen_remainder(line, p, remainder_units, closing.key)
@@ -323,6 +353,14 @@ class _Builder:
                 self.close(line, p, f"{line}: reduce (partial close, newest first)", units=deduct)
             remaining = 0.0
             break
+
+    def reopen_gaps(self, line: str, p: Position) -> list[str]:
+        """The M5-D1 capabilities a remainder re-open of `p` would lack ([] without gates)."""
+        if self.capabilities is None:
+            return []
+        direction = "long" if p.is_buy else "short"
+        return self.missing_caps(OPEN_PREREQUISITES) or self.vehicle_gaps(line, p.settlement, direction,
+                                                                          int(p.leverage))
 
     def reopen_remainder(self, line: str, p: Position, units: float, close_key: int) -> None:
         direction: Direction = "long" if p.is_buy else "short"
@@ -353,12 +391,20 @@ class _Builder:
         units: float | None = None,
     ) -> _Draft | None:
         leverage = int(self.leverage_for.get(line, 1))
+        gaps = self.missing_caps(OPEN_PREREQUISITES)
+        if gaps:
+            self.skip(line, f"capability_missing:{gaps[0]}")
+            return None
         if choice is None:
             choice = self.vehicle_for(line, direction, leverage)
             if choice is None:
                 self.skip(line, "no_eligible_vehicle")
                 return None
         leverage = choice.leverage
+        gaps = self.vehicle_gaps(line, choice.settlement, direction, leverage)
+        if gaps:
+            self.skip(line, f"capability_missing:{gaps[0]}")
+            return None
         quote = bid_ask(self.quotes.get(choice.symbol))
         if quote is None:
             self.skip(line, "no_quote")
@@ -573,6 +619,7 @@ def build_plan(
     ref_levels: Mapping[str, float] | None = None,
     economics: TradeEconomics | None = None,
     gap_ref: GapRef | None = None,
+    capabilities: Any | None = None,
 ) -> Plan:
     """Legs that move the lines in `target_w` from `snapshot` to their targets. See the module
     rules: ONLY lines present in `target_w` are planned (pass `changed_targets(decision)`), and a
@@ -583,7 +630,10 @@ def build_plan(
     fee bps of NAV]); a leg's variable cost in bps of NAV is per_side × |Δw|. `max_legs` overrides
     the policy's counted-leg cap (the total cap stays proposal.max_legs_total). `origin` and
     `ref_levels` (per line) are stamped on the legs; `economics` (private) sets the real trade
-    floor and the fee drag; `gap_ref` arms the gap guard. A flatten uses `build_flatten_plan`."""
+    floor and the fee drag; `gap_ref` arms the gap guard. `capabilities` (M5-D1, connected broker only; None = no gate):
+    without `partial_close` a trim is skipped (a full exit still works); without `rates_entitled` or
+    `price_units` no open is planned; an open's vehicle class must be verified. A flatten uses
+    `build_flatten_plan`."""
     if not (math.isfinite(nav_usd) and nav_usd > 0):
         raise ValueError("nav_usd must be positive")
     universe = policy.universe
@@ -596,7 +646,7 @@ def build_plan(
         policy=policy, nav=nav_usd, vehicle_for=vehicle_for, quotes=quotes,
         stop_distance=stop_distance, leverage_for=leverage_for, eligibility=eligibility,
         cost_bps=cost_bps, origin=origin, ref_levels=ref_levels, economics=economics,
-        gap_ref=gap_ref,
+        gap_ref=gap_ref, capabilities=capabilities,
     )
 
     by_line: dict[str, list[Position]] = {}

@@ -593,6 +593,19 @@ def test_a_gap_fill_completes_and_asks_for_a_stop_refit(market, make_executor, a
     assert row.state == "filled" and not row.error and not ledger.blockers()
 
 
+@pytest.mark.capability_gates
+def test_a_gap_fill_asks_for_a_close_while_sl_modify_is_unverified(market, make_executor, approve, ledger,
+                                                                    read_client, policy, fclock, tmp_path):
+    """M5-D1: with the real (empty) gates the refit becomes a close request, never a modify_sl."""
+    decision, _ = _held_open(market, make_executor, approve, ledger)
+    market.set_price("NSDQ100", bid=184.9, ask=185.0)
+    _order_of(market, ledger, decision).script = OpenScript("fill")
+    alerts = watch._resolve_waiting(_watch_ctx(ledger, read_client, policy, tmp_path), fclock.now())
+    assert any("sl_refit_close_needed:NDX" in a and "capability_missing:sl_modify" in a for a in alerts)
+    reason = ledger.events(decision)[-1]["reason"]
+    assert "sl_refit_close_needed:NDX" in reason and "capability_missing:sl_modify" in reason
+
+
 def test_a_fill_whose_units_differ_blocks_the_whole_book(market, make_executor, approve, ledger, read_client,
                                                          policy, fclock, tmp_path):
     decision, _ = _held_open(market, make_executor, approve, ledger)

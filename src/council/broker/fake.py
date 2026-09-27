@@ -183,6 +183,41 @@ class RecordedRequest:
     body: Any
 
 
+def agent_token(
+    name: str,
+    *,
+    scopes: Iterable[str] | None = ("etoro-public:trade.real:read",),
+    expires_at: datetime | None = None,
+    ips: Iterable[str] = (),
+) -> dict[str, Any]:
+    """One `userTokens` entry of GET /api/v1/agent-portfolios (route spec). `scopes=None` omits
+    `scopeNames` (an API that does not expose scopes)."""
+    out: dict[str, Any] = {"userTokenId": str(uuid.uuid5(uuid.NAMESPACE_URL, name)), "userTokenName": name,
+                           "clientId": str(uuid.uuid5(uuid.NAMESPACE_DNS, name)), "ipsWhitelist": list(ips),
+                           "createdAt": "2026-09-01T00:00:00Z"}
+    if expires_at is not None:
+        out["expiresAt"] = _iso(expires_at)
+    if scopes is not None:
+        out["scopeNames"] = list(scopes)
+    return out
+
+
+def agent_portfolio(
+    name: str = "FakePort",
+    *,
+    virtual_balance: float = 10_000.0,
+    tokens: Iterable[dict[str, Any]] | None = None,
+    portfolio_id: str | None = None,
+) -> dict[str, Any]:
+    """One `agentPortfolios` entry (route spec shape; synthetic ids)."""
+    return {
+        "agentPortfolioId": portfolio_id or str(uuid.uuid5(uuid.NAMESPACE_OID, name)),
+        "agentPortfolioName": name, "agentPortfolioGcid": 42, "agentPortfolioVirtualBalance": virtual_balance,
+        "mirrorId": 7, "createdAt": "2026-09-01T00:00:00Z",
+        "userTokens": list(tokens) if tokens is not None else [agent_token("fake-read")],
+    }
+
+
 def leverage_config(
     *,
     settlement: str = "CFD",
@@ -218,11 +253,20 @@ def eligibility_row(
     allow_close: bool = True,
     allow_partial_close: bool = True,
     units_quantity_type: str = "FractionalUnits",
+    currency: str | None = None,
+    price_unit: str | None = None,
 ) -> dict[str, Any]:
-    """A raw eligibility row in broker casing (CFD long+short 1/2/5 by default)."""
+    """A raw eligibility row in broker casing (CFD long+short 1/2/5 by default). `currency` /
+    `price_unit` add the unit fields `instruments.unit_of` reads (the route spec names none; they
+    are omitted unless given, so a default row is `unit_unknown`)."""
     if configs is None:
         configs = [leverage_config(direction="LONG"), leverage_config(direction="SHORT")]
-    return {
+    extra: dict[str, Any] = {}
+    if currency is not None:
+        extra["currency"] = currency
+    if price_unit is not None:
+        extra["priceUnit"] = price_unit
+    return {**extra,
         "instrumentId": instrument_id, "symbol": symbol,
         "minPositionExposure": min_position_exposure, "maxUnitsPerOrder": max_units_per_order,
         "allowOpenPosition": allow_open, "allowClosePosition": allow_close,
@@ -302,6 +346,8 @@ class FakeEtoro:
         self.orders_by_ref: dict[str, FakeOrder] = {}
         self.close_orders: dict[int, FakeCloseOrder] = {}
         self.news: list[dict[str, Any]] = []
+        # GET /api/v1/agent-portfolios: None = one portfolio whose balance is `credit`
+        self.agent_portfolios: list[dict[str, Any]] | None = None
         self.requests: list[RecordedRequest] = []
         self.stop_hits: list[int] = []
         self.patches: list[tuple[int, float | None]] = []
@@ -566,13 +612,15 @@ class FakeEtoro:
         if len(symbols) + len(ids) > 100:
             return _json(400, {"error": "at most 100 instruments"})
         rows, missing_syms, missing_ids = [], [], []
-        by_symbol = {i.symbol.upper(): i for i in self.instruments.values()}
+        by_symbol: dict[str, list[FakeInstrument]] = {}
+        for inst in self.instruments.values():        # two instruments may share a symbol (ambiguous)
+            by_symbol.setdefault(inst.symbol.upper(), []).append(inst)
         for sym in symbols:
-            inst = by_symbol.get(str(sym).upper())
-            if inst is None:
+            found = by_symbol.get(str(sym).upper())
+            if not found:
                 missing_syms.append(sym)
             else:
-                rows.append(inst.row)
+                rows.extend(inst.row for inst in found)
         for iid in ids:
             inst = self.instruments.get(int(iid))
             if inst is None:
@@ -645,6 +693,8 @@ class FakeEtoro:
         return _json(200, {"discussions": self.news[offset : offset + take], "paging": {}})
 
     def _route_agent_portfolios(self, *_: Any) -> httpx.Response:
+        if self.agent_portfolios is not None:
+            return _json(200, {"agentPortfolios": self.agent_portfolios})
         return _json(200, {"agentPortfolios": [{
             "agentPortfolioName": "FakePort", "agentPortfolioVirtualBalance": self.credit,
             "userTokens": [{"userTokenName": "fake-read", "scopeNames": ["etoro-public:trade.real:read"]}],

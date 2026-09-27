@@ -11,6 +11,9 @@ Rules:
 - The file is private account data (it bounds the real NAV). Nothing here prints, logs or
   publishes it; the command echoes only what the operator typed back to the operator's terminal.
 - Writes are atomic (temp file + rename) and never follow a symlink.
+- `source` records where the virtual NAV came from: "operator" (typed) or "broker" (`set-mirror
+  --from-broker`: the Agent Portfolio's `agentPortfolioVirtualBalance`, read by the operator
+  command through the READ client; gate K12 needs "broker"). Files without it read as "operator".
 
 This module imports no broker client and places nothing: the unattended runner may import it.
 """
@@ -32,6 +35,7 @@ from council.paths import assert_outside_repo
 MIRROR_DIR = "account"
 MIRROR_FILE = "mirror.json"
 MAX_RATIO = 10.0
+SOURCES = ("operator", "broker")
 VERSION = 1
 
 
@@ -45,10 +49,12 @@ class MirrorConfig:
     set_at: datetime
     funding_usd: float | None = None
     virtual_nav_usd: float | None = None
+    source: str = "operator"
 
     def to_json(self) -> dict[str, Any]:
         return {"version": VERSION, "mirror_ratio": self.mirror_ratio, "funding_usd": self.funding_usd,
-                "virtual_nav_usd": self.virtual_nav_usd, "set_at": self.set_at.isoformat()}
+                "virtual_nav_usd": self.virtual_nav_usd, "set_at": self.set_at.isoformat(),
+                "source": self.source}
 
 
 def mirror_path(state_dir: Path) -> Path:
@@ -109,7 +115,11 @@ def load_mirror(state_dir: Path) -> MirrorConfig | None:
         raise MirrorError("mirror file has no valid set_at") from exc
     funding = data.get("funding_usd")
     nav = data.get("virtual_nav_usd")
+    source = data.get("source", "operator")
+    if source not in SOURCES:
+        raise MirrorError("mirror file has an unknown source")
     return MirrorConfig(
+        source=source,
         mirror_ratio=ratio, set_at=set_at,
         funding_usd=_positive("funding", funding) if funding is not None else None,
         virtual_nav_usd=_positive("virtual NAV", nav) if nav is not None else None,
@@ -117,13 +127,17 @@ def load_mirror(state_dir: Path) -> MirrorConfig | None:
 
 
 def set_mirror(state_dir: Path, *, ratio: float | None = None, funding_usd: float | None = None,
-               virtual_nav_usd: float | None = None, now: datetime | None = None) -> MirrorConfig:
+               virtual_nav_usd: float | None = None, now: datetime | None = None,
+               source: str = "operator") -> MirrorConfig:
     """Validate and store the mirror ratio atomically (0600 file in a 0700 directory)."""
+    if source not in SOURCES:
+        raise MirrorError(f"unknown mirror source {source!r}")
     value, funding, nav = resolve_ratio(ratio=ratio, funding_usd=funding_usd, virtual_nav_usd=virtual_nav_usd)
     stamp = now or utcnow()
     if stamp.tzinfo is None:
         raise MirrorError("naive datetime; council code uses aware UTC datetimes only")
-    config = MirrorConfig(mirror_ratio=value, set_at=stamp, funding_usd=funding, virtual_nav_usd=nav)
+    config = MirrorConfig(mirror_ratio=value, set_at=stamp, funding_usd=funding, virtual_nav_usd=nav,
+                          source=source)
     path = mirror_path(state_dir)
     assert_outside_repo(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

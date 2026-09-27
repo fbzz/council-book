@@ -30,7 +30,7 @@ Rules:
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Container, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -274,17 +274,33 @@ class VehicleChoice(Frozen):
 ExpectedCost = Callable[[Vehicle, EligibilityRow, LeverageConfig], float | None]
 
 
+def required_capabilities(line: LineSpec, settlement: str, direction: str, leverage: int) -> tuple[str, ...]:
+    """The capability gates (m5-readiness §5, M5-D1) a vehicle class needs before it may be planned:
+    real UCITS/ETC `real_etf`, real crypto `crypto_real`, real stock `stock_fractional`; a CFD long
+    `cfd_long`, a CFD short `cfd_short`, and any leverage above 1 also `cfd_leverage`."""
+    if settlement == "real":
+        cls = line.asset_class
+        return ("crypto_real",) if cls == "crypto" else ("stock_fractional",) if cls == "stock" else ("real_etf",)
+    caps = ["cfd_long" if direction == "long" else "cfd_short"]
+    if leverage > 1:
+        caps.append("cfd_leverage")
+    return tuple(caps)
+
+
 def resolve_vehicle(
     line: LineSpec,
     direction: Direction,
     leverage: int,
     rows_by_symbol: Mapping[str, EligibilityRow],
     expected_cost: ExpectedCost,
+    capabilities: Container[str] | None = None,
 ) -> VehicleChoice | None:
     """First eligible candidate with the lowest expected cost (bps over the hold).
 
     `expected_cost(vehicle, row, config)` returns the expected cost in bps; None or a non-finite
-    value excludes the candidate."""
+    value excludes the candidate. `capabilities` (the verified capability names, M5-D1) excludes
+    every candidate whose class needs an unverified one (`required_capabilities`); None = no gate
+    (before the token, and for callers that gate elsewhere)."""
     candidates = line.vehicles.long if direction == "long" else line.vehicles.short
     upper = {k.upper(): v for k, v in rows_by_symbol.items()}
     best: tuple[float, int, VehicleChoice] | None = None
@@ -294,6 +310,9 @@ def resolve_vehicle(
             continue
         config = select_config(row, direction, leverage, settlement=vehicle.settlement)
         if config is None:
+            continue
+        if capabilities is not None and not all(
+                c in capabilities for c in required_capabilities(line, config.settlement, direction, leverage)):
             continue
         cost = expected_cost(vehicle, row, config)
         if cost is None or not math.isfinite(cost):

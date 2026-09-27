@@ -206,6 +206,8 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         except Exception as exc:  # any broker read failure: skip safely, alert once per 4 h
             return _skip_broker(ctx, info, now, flags, f"broker_error:{broker_error_kind(exc)}")
         corporate_blockers = corporate_actions(ctx, snapshot, cycle_id)
+    # M5-D1 capability gates: consulted only with a connected broker (None = nothing changes)
+    caps = _capabilities(ctx, now) if snapshot is not None else None
     # PRIVATE: the fixed fee and the real trade floor as NAV shares (never published or prompted)
     econ = cycle_trade_economics(policy, ctx.state_dir, snapshot.equity_usd if snapshot is not None else None)
 
@@ -264,6 +266,11 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         if q_short and ln.shortable and passes_cost_gate(q_short, sigma, q_lev_class(ln, q_short), policy,
                                                          toward_reference=False)[0]:
             short_ok.add(ln.symbol)
+    if caps is not None:                # §5: no short band / leverage extension until proven
+        if not caps.has("cfd_short"):
+            short_ok = set()
+        if not caps.has("cfd_leverage"):
+            lever_ok = set()
 
     def bands_fn(cards: list) -> dict[str, Band]:
         return compute_bands(lines=lines, ref=ref_levels, states=states, cards=cards,
@@ -283,6 +290,8 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     )
     if snapshot is not None:            # connected: say when the fee uses an assumed mirror ratio
         rec.flags += [f for f in econ.flags if f.startswith("mirror_ratio")]
+    if caps is not None:                # codes only: capability_missing:<cap> / capability_unproven:<cap>
+        rec.flags += [f for f in caps.flags() if f not in rec.flags]
     try:                                # PRIVATE (ledger): counts and public items only; never stops a cycle
         rec.extras["news_fetch"] = news_record(pack, news_extras)
     except Exception as exc:
@@ -312,7 +321,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     if snapshot is not None and ctx.sources.broker is not None:
         try:
             plan = _plan(ctx, decision, snapshot=snapshot, states=states, kill_state=kill_state,
-                         ref_levels=ref_levels, unit=unit, econ=econ, history=history)
+                         ref_levels=ref_levels, unit=unit, econ=econ, history=history, caps=caps)
             if plan is not None:
                 plan = stamp_sessions(plan, policy.universe, asof=slot)
         except Exception as exc:  # planning failure never trades; it is published as a flag
@@ -791,7 +800,7 @@ def _vol_fn(policy, returns, states):
 
 # ------------------------------------------------------------------------------- plan
 def _plan(ctx: CycleContext, decision: RiskDecision, *, snapshot, states, kill_state,
-          ref_levels=None, unit=None, econ=None, history=None):
+          ref_levels=None, unit=None, econ=None, history=None, caps=None):
     from council.broker.eligibility import resolve_vehicle
     from council.broker.instruments import InstrumentMap
     from council.broker.parsing import parse_rates
@@ -824,7 +833,8 @@ def _plan(ctx: CycleContext, decision: RiskDecision, *, snapshot, states, kill_s
         return 2 * side + 20 * carry_bps_day(config.direction, vehicle.settlement, lev, cls, None, policy)
 
     def vehicle_for(line: str, direction: str, leverage: int):
-        return resolve_vehicle(by_line[line], direction, leverage, rows_by_symbol, expected_cost)
+        return resolve_vehicle(by_line[line], direction, leverage, rows_by_symbol, expected_cost,
+                               capabilities=caps.verified if caps is not None else None)
 
     settlement_of = {v.symbol: v.settlement for ln in by_line.values()
                      for v in (*ln.vehicles.long, *ln.vehicles.short)}
@@ -851,7 +861,16 @@ def _plan(ctx: CycleContext, decision: RiskDecision, *, snapshot, states, kill_s
                       stop_distance=stop, leverage_for=lev, eligibility=rows_by_symbol,
                       cost_bps=cost_bps, nav_usd=nav_usd, policy=policy, origin=origin,
                       ref_levels=levels or None, economics=econ,
-                      gap_ref=gap_references(policy, changed, states, history))
+                      gap_ref=gap_references(policy, changed, states, history), capabilities=caps)
+
+
+def _capabilities(ctx: CycleContext, now: datetime):
+    """The M5-D1 gates from the private state dir; an unproven record alerts once (URGENT)."""
+    from council.operator import capabilities
+
+    caps = capabilities.load(ctx.state_dir)
+    capabilities.alert_unproven(ctx, caps, now)
+    return caps
 
 
 def gap_references(policy, lines, states, history) -> dict[str, tuple[float, float] | None]:

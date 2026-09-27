@@ -7,7 +7,12 @@ Rules:
 - KEY denylist (structured documents only): a key naming money, prices, units, margin or a
   broker/account/order/request id is refused unless it ends in `_pct`, `_bp` or `_x`.
 - CANARIES: exact private values (NAV, cash, ...) in several formats (1234.56, 1,234.56, 1234).
-- LICENSED TEXT: any shared 8-word n-gram with a licensed text (broker feed items).
+- LICENSED TEXT: any shared 8-word n-gram with a licensed text (broker feed items), or a whole
+  short licensed text (4-7 words, at least 20 characters of content words: a bare title).
+  `LicensedMatcher` is the ONE implementation of this rule (the licensed-filter contract): the
+  purge scrub (`council.operator.purge.LicensedFilter`) is the same class, so the gate refuses
+  exactly what the purge would scrub, and redaction must withhold at least that
+  (tests/redteam/test_licensed_filter_contract.py).
 
 Findings never echo the secret: excerpts are masked.
 
@@ -150,6 +155,52 @@ def ngram_overlap(text: str, licensed_texts: Iterable[str], n: int = 8) -> list[
 
 
 # ------------------------------------------------------------------------------ scanning
+LICENSED_NGRAM = 8
+TITLE_MIN_WORDS = 4
+TITLE_MIN_CONTENT_CHARS = 20
+STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "in", "is", "it", "its",
+    "of", "on", "or", "that", "the", "this", "to", "was", "were", "will", "with",
+})
+
+
+class LicensedMatcher:
+    """Does a text copy a licensed text? The licensed-filter contract, shared by the leak scan (the
+    publication gate) and the purge scrub (private stores): 8-word runs, plus whole short texts
+    (4-7 words with at least 20 characters of content words), on lower-cased `[a-z0-9']+` words."""
+
+    def __init__(self, texts: Iterable[str], n: int = LICENSED_NGRAM) -> None:
+        self.n = n
+        self.grams: set[tuple[str, ...]] = set()
+        self.titles: list[str] = []
+        for text in texts:
+            words = _words(text)
+            self.grams |= {tuple(words[i : i + n]) for i in range(len(words) - n + 1)}
+            content = " ".join(w for w in words if w not in STOPWORDS)
+            if TITLE_MIN_WORDS <= len(words) < n and len(content) >= TITLE_MIN_CONTENT_CHARS:
+                self.titles.append(" ".join(words))
+
+    def __bool__(self) -> bool:
+        return bool(self.grams or self.titles)
+
+    def matches(self, text: str) -> list[str]:
+        """The copied runs (n-grams and whole titles) found in `text`, in a stable order."""
+        words = _words(text)
+        found = sorted({" ".join(g) for g in
+                        (tuple(words[i : i + self.n]) for i in range(len(words) - self.n + 1))
+                        if g in self.grams})
+        padded = f" {' '.join(words)} "
+        return found + [t for t in self.titles if f" {t} " in padded]
+
+    def hits(self, text: str) -> bool:
+        words = _words(text)
+        if self.grams and any(tuple(words[i : i + self.n]) in self.grams
+                              for i in range(len(words) - self.n + 1)):
+            return True
+        padded = f" {' '.join(words)} "
+        return any(f" {t} " in padded for t in self.titles)
+
+
 def _mask(snippet: str) -> str:
     snippet = snippet.strip()
     if len(snippet) <= 2:
@@ -160,9 +211,7 @@ def _mask(snippet: str) -> str:
 class _Scanner:
     def __init__(self, canaries: Sequence[str | float | int], licensed: Sequence[str], n: int):
         self.canaries = [p for c in canaries for p in canary_patterns(c)]
-        self.licensed_grams: set[tuple[str, ...]] = set()
-        for text in licensed:
-            self.licensed_grams |= ngrams(text, n)
+        self.licensed = LicensedMatcher(licensed, n)
         self.n = n
         self.findings: list[Finding] = []
         self._seen: set[tuple[str, str, str]] = set()
@@ -180,9 +229,9 @@ class _Scanner:
         for pattern in self.canaries:
             for match in pattern.finditer(value):
                 self.add("canary", where, match.group(0))
-        if self.licensed_grams:
-            for gram in ngrams(value, self.n) & self.licensed_grams:
-                self.add("licensed_text", where, " ".join(gram))
+        if self.licensed:
+            for run in self.licensed.matches(value):
+                self.add("licensed_text", where, run)
 
     def number(self, value: float | int, where: str) -> None:
         if isinstance(value, int) and abs(value) >= 1_000_000:

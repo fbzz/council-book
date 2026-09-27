@@ -29,6 +29,8 @@ account = typer.Typer(add_completion=False, no_args_is_help=True,
 stocks = typer.Typer(add_completion=False, no_args_is_help=True,
                      help="Quarterly stock sleeve: rank, onboard, corporate actions (READ token only; "
                           "never writes policy/, commits or tags).")
+instruments = typer.Typer(add_completion=False, no_args_is_help=True,
+                          help="Resolve the vehicles of every line through eligibility (operator only; READ token).")
 notify = typer.Typer(add_completion=False, no_args_is_help=True,
                      help="Operator notifications (ntfy; the topic is private and never printed).")
 app.add_typer(keys, name="keys")
@@ -37,6 +39,7 @@ app.add_typer(site, name="site")
 app.add_typer(ops, name="ops")
 app.add_typer(account, name="account")
 app.add_typer(stocks, name="stocks")
+app.add_typer(instruments, name="instruments")
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -46,6 +49,8 @@ F = TypeVar("F", bound=Callable[..., Any])
 OPERATOR_COMMANDS: dict[str, bool] = {
     "show": False,
     "doctor --live-read": True,
+    "doctor --record-fixtures": True,
+    "account set-mirror --from-broker": True,
     "stocks rank": True,
     "purge-licensed": True,
 }
@@ -321,6 +326,74 @@ def ops_review(
     _refusable(lambda: review_blocked(decision_id, reason, deps))
 
 
+FEE_LEVELS = ("virtual", "mirror")
+
+
+@ops.command("attest")
+@operator_command("ops attest", pinned=True)
+def ops_attest(
+    item: str = typer.Argument(..., help="An attestation item, or fee-charged-on=<virtual,mirror>."),
+    decision: str = typer.Option("", "--decision", help="The smoke decision a mirror check is about."),
+    ref: str = typer.Option("", "--ref", help="etoro-licence: the ticket of eToro's written answer "
+                                             "(checked for presence, never stored)."),
+    no: bool = typer.Option(False, "--no", help="Record the item as checked and NOT true."),
+) -> None:
+    """Record a human check (m5-readiness §5, K6/K7/K12/K16): private readiness record `attest`
+    (0600), and for mirror checks also `account/capabilities.json`. Codes and booleans only."""
+    from council.operator import capabilities, readiness
+
+    name, _, value = item.partition("=")
+    if name not in readiness.ATTEST_ITEMS:
+        _refuse(f"unknown attestation {name!r}; one of: {', '.join(readiness.ATTEST_ITEMS)}")
+    if (name == "fee-charged-on") != bool(value):
+        _refuse("fee-charged-on takes =<levels> (e.g. fee-charged-on=virtual,mirror); other items take none")
+    if name == "etoro-licence" and not no and not ref.strip():
+        _refuse("etoro-licence needs --ref <ticket> of eToro's written answer")
+    if name in capabilities.MIRROR_ITEMS and not decision:
+        _refuse(f"{name} needs --decision <smoke decision id>")
+    head = readiness.Probes.default().head()
+    gates: dict[str, dict[str, str]] = {}
+    if name == "fee-charged-on":
+        gates["K15"] = _fee_location_gate(value)
+    try:
+        if name in capabilities.MIRROR_ITEMS:
+            capabilities.write_mirror_check(name, decision_id=decision, value=not no)
+        readiness.write_record("attest", head=head, gates=gates, attested={name: not no})
+    except (readiness.ReadinessError, capabilities.CapabilityError) as exc:
+        _refuse(str(exc))
+    suffix = f" ({gates['K15']['code']})" if gates else ""
+    typer.echo(f"attested {name}: {'no' if no else 'yes'}{suffix}")
+
+
+def _fee_location_gate(value: str) -> dict[str, str]:
+    """K15: the attested fee levels against costs.yaml `fixed_commission_charged_on`. Equal = green;
+    fewer levels than costs.yaml = amber (conservative until a tagged costs.yaml edit); a level
+    costs.yaml does not count = red."""
+    from council.policy import Policy
+    from council.risk.config import cost_floors
+
+    levels = {v.strip() for v in value.split(",") if v.strip()}
+    if not levels or not levels <= set(FEE_LEVELS):
+        _refuse(f"fee-charged-on levels must be among {', '.join(FEE_LEVELS)}")
+    policy_levels = set(cost_floors(Policy.load()).fixed_commission_charged_on)
+    if levels == policy_levels:
+        return {"state": "green", "code": "fee_location_matches"}
+    if levels < policy_levels:
+        return {"state": "amber", "code": "fee_location_conservative"}
+    return {"state": "red", "code": "fee_location_uncounted"}
+
+
+@ops.command("capabilities")
+@operator_command("ops capabilities", pinned=True)
+def ops_capabilities() -> None:
+    """Show the M5-D1 capability gates (private terminal; codes only). A false gate keeps its
+    behaviour off; a record without a completed smoke decision with fills shows as unproven."""
+    from council.operator import capabilities
+
+    for text in capabilities.report_lines(capabilities.load()):
+        typer.echo(text)
+
+
 @ops.command("assert-operator")
 def ops_assert_operator() -> None:
     """Exit 0 in the operator's own terminal, else 2 with every failed rule (for ops scripts)."""
@@ -372,6 +445,8 @@ def _no_writer() -> NoReturn:
 @app.command()
 def doctor(
     live_read: bool = typer.Option(False, "--live-read", help="Probe the broker with the READ token."),
+    record_fixtures: bool = typer.Option(False, "--record-fixtures", help="Operator: store the broker's raw "
+                                         "payloads privately under state_dir/licensed/fixtures/ (kept 7 days)."),
     ready: bool = typer.Option(False, "--ready", help="Readiness report: every M5 gate with its owner "
                                "(agent, user, token). Read-only; agents may run it."),
     track: str = typer.Option("core", "--track", help="With --ready: core (Track C) or stocks (Track S)."),
@@ -385,6 +460,11 @@ def doctor(
     import shutil
     import subprocess
 
+    if record_fixtures:                     # the READ token: operator terminal, installed release
+        require_operator("doctor --record-fixtures", pinned=OPERATOR_COMMANDS["doctor --record-fixtures"])
+        if ready or live_read or post_token or as_json or network or track != "core":
+            _refuse("--record-fixtures runs alone")
+        _onboarding_record_fixtures()
     if ready:                               # read-only, no broker or LLM import on this path
         if live_read:
             _refuse("--ready and --live-read are separate runs")
@@ -449,11 +529,7 @@ def doctor(
         rb = read_broker(Settings.from_env())
         line("broker READ token", rb is not None)
         if rb is not None:
-            try:
-                rb.pnl()
-                line("broker pnl read", True)
-            except Exception as exc:
-                line("broker pnl read", False, type(exc).__name__)
+            ok &= _broker_refusal(lambda: _onboarding_live_read(rb))   # K5–K10, K12, K17 → live-read.json
             from council.clock import utcnow
             from council.stocks.commands import default_repo, doctor_stock_sample
 
@@ -616,12 +692,21 @@ def account_set_mirror(
     ratio: float = typer.Option(None, "--ratio", help="Real funding / virtual NAV."),
     funding_usd: float = typer.Option(None, "--funding-usd", help="Real funding in USD (with --virtual-nav-usd)."),
     virtual_nav_usd: float = typer.Option(None, "--virtual-nav-usd", help="Agent Portfolio NAV in USD."),
+    from_broker: bool = typer.Option(False, "--from-broker", help="With --funding-usd: read the virtual NAV "
+                                     "from the Agent Portfolio (READ token; installed release)."),
 ) -> None:
     """Store the mirror ratio privately (state_dir/account/mirror.json, 0600). It prices the $1 fixed
-    fee and the real-dollar trade floor as NAV shares; never published, never sent anywhere."""
+    fee and the real-dollar trade floor as NAV shares; never published, never sent anywhere.
+    `--from-broker` takes the virtual NAV from the Agent Portfolio's virtual balance (gate K12)."""
     from council import paths
     from council.operator.mirror import MirrorError, set_mirror
 
+    if from_broker:
+        require_operator("account set-mirror --from-broker",
+                         pinned=OPERATOR_COMMANDS["account set-mirror --from-broker"])
+        if ratio is not None or virtual_nav_usd is not None or funding_usd is None:
+            _refuse("--from-broker takes --funding-usd only (the virtual NAV comes from the broker)")
+        _onboarding_set_mirror(funding_usd)
     try:
         config = set_mirror(paths.state_dir(), ratio=ratio, funding_usd=funding_usd,
                             virtual_nav_usd=virtual_nav_usd)
@@ -629,6 +714,172 @@ def account_set_mirror(
         typer.echo(f"refused: {exc}", err=True)
         raise typer.Exit(2) from exc
     typer.echo(f"mirror ratio stored ({config.mirror_ratio:.4g}); private, used for fee and trade-size checks")
+
+
+# --------------------------------------------------------------------------------- onboarding (M5-C)
+# Token day (m5-readiness §11.2): `keys verify`, `doctor --live-read`, `account set-mirror
+# --from-broker`, `instruments resolve`, `doctor --record-fixtures`. Every one runs behind
+# `@operator_command` / `require_operator` (release-pinned), reads through the READ client only and
+# records codes in `state_dir/readiness/*.json` (`operator.onboarding`; no amount, id or token).
+def _onboarding_transport():
+    """The HTTP transport of the WRITE-token GET reader: None = the real network (tests inject)."""
+    return None
+
+
+def _onboarding_policy():
+    """The working-tree policy; a committed stock sleeve only once STOCK_SLEEVE_LIVE is True."""
+    from council import invariants
+    from council.policy import Policy
+
+    return Policy.load(include_sleeve=bool(invariants.STOCK_SLEEVE_LIVE))
+
+
+def _onboarding_now():
+    from council.clock import utcnow
+
+    return utcnow()
+
+
+def _onboarding_finish(outcome, *, exit_after: bool = True) -> None:
+    """Record the outcome's gates (codes only), print its rows, exit 0 (no red) or 1."""
+    from council.operator import readiness
+
+    probes = readiness.Probes.default()
+    gates = outcome.gates()
+    if gates:
+        try:
+            readiness.write_record(outcome.record, head=probes.head(), gates=gates)
+        except readiness.ReadinessError as exc:
+            _refuse(f"readiness record not written: {exc}")
+    for text in outcome.report_lines():
+        typer.echo(text)
+    if exit_after:
+        raise typer.Exit(0 if outcome.ok else 1)
+
+
+def _onboarding_feed() -> tuple[bool, bool]:
+    """(feed on, LC1 green): the feed switch, and the `etoro-licence` attestation on top of it."""
+    from council.operator import readiness
+
+    probes = readiness.Probes.default()
+    feed_on = probes.broker_feed_on()
+    return feed_on, feed_on and probes.attested("etoro-licence")
+
+
+def _onboarding_live_read(read_client) -> bool:
+    from council import paths
+    from council.operator import onboarding
+
+    feed_on, licensed = _onboarding_feed()
+    outcome = onboarding.probe_live_read(read_client, policy=_onboarding_policy(), state_dir=paths.state_dir(),
+                                         now=_onboarding_now(), feed_on=feed_on, feed_licensed=licensed)
+    _onboarding_finish(outcome, exit_after=False)
+    return outcome.ok
+
+
+def _write_token_reader():
+    """A READ-client instance holding the WRITE token, for ONE GET of the portfolio list (`keys
+    verify`). The write keychain is unlocked for the read and locked again at once."""
+    from council.broker.etoro_read import EtoroReadClient
+    from council.operator import keychain
+    from council.settings import Settings
+
+    keychain.unlock_write_keychain()
+    try:
+        token = keychain.read_secret(keychain.WRITE_SERVICE, keychain=keychain.write_keychain_path())
+        api_key = keychain.read_secret(keychain.API_KEY_SERVICE)
+    finally:
+        keychain.lock_write_keychain()
+    try:
+        return EtoroReadClient(api_key, token, base_url=Settings.from_env().etoro_base_url,
+                               transport=_onboarding_transport())
+    finally:
+        del token, api_key
+
+
+def _broker_refusal(fn):
+    """Run a probe: a broker or onboarding error -> "refused: <type>" (never its message: it may
+    carry a payload) and exit 2."""
+    from council.broker.http import BrokerError
+    from council.broker.instruments import InstrumentIdentityChanged
+    from council.operator.keychain import KeychainError
+    from council.operator.onboarding import OnboardingError
+
+    try:
+        return fn()
+    except InstrumentIdentityChanged:
+        _refuse("instrument identity changed: nothing was written; freeze the instrument and check "
+                "the broker (instruments.json is append-only)")
+    except OnboardingError as exc:
+        _refuse(str(exc))
+    except (BrokerError, KeychainError) as exc:
+        _refuse(f"broker read failed ({type(exc).__name__})")
+
+
+@keys.command("verify")
+@operator_command("keys verify", pinned=True)
+def keys_verify() -> None:
+    """Check both tokens (K1–K4): one Agent Portfolio holding council-read and council-write, READ
+    scopes read-only, WRITE with trade.real:write, expiry, IP whitelist. Reads the WRITE token once,
+    for a GET only. Writes readiness/keys.json and, once K1/K2 pass, account/onboarded.json."""
+    from council import paths
+    from council.operator import onboarding, readiness
+
+    rb = _read_client(required=True)
+    attested = readiness.Probes.default().attested("token-scopes")
+    now = _onboarding_now()
+    outcome = _broker_refusal(lambda: onboarding.probe_keys(rb, _write_token_reader(), now=now,
+                                                            scopes_attested=attested))
+    if outcome.onboarded:
+        onboarding.write_onboarded(paths.state_dir(), now=now)
+        outcome.lines.append("account/onboarded.json written: from now on a missing broker alerts")
+    _onboarding_finish(outcome)
+
+
+@instruments.command("resolve")
+@operator_command("instruments resolve", pinned=True)
+def instruments_resolve(dry_run: bool = typer.Option(False, "--dry-run", help="Report only; write nothing.")) -> None:
+    """Every candidate of every line plus the held instruments in one eligibility batch: the vehicle,
+    currency, price unit, whole-unit flag and SL bounds per line (K11, K19) and the size-floor code
+    P2. instruments.json is append-only: an identity change refuses and writes nothing."""
+    from council import paths
+    from council.operator import onboarding
+
+    rb = _read_client(required=True)
+    outcome = _broker_refusal(lambda: onboarding.probe_instruments(
+        rb, policy=_onboarding_policy(), state_dir=paths.state_dir(), now=_onboarding_now(), dry_run=dry_run))
+    if dry_run:
+        for text in outcome.report_lines():
+            typer.echo(text)
+        raise typer.Exit(0 if outcome.ok else 1)
+    _onboarding_finish(outcome)
+
+
+def _onboarding_set_mirror(funding_usd: float) -> None:
+    from council import paths
+    from council.operator import onboarding
+    from council.operator.mirror import MirrorError
+
+    rb = _read_client(required=True)
+    try:
+        outcome, config = _broker_refusal(lambda: onboarding.mirror_from_broker(
+            rb, state_dir=paths.state_dir(), funding_usd=funding_usd, now=_onboarding_now()))
+    except MirrorError as exc:
+        _refuse(str(exc))
+    outcome.lines.append(f"mirror ratio stored from the broker's virtual balance ({config.mirror_ratio:.4g}); private")
+    _onboarding_finish(outcome)
+
+
+def _onboarding_record_fixtures() -> None:
+    from council import paths
+    from council.operator import onboarding
+
+    rb = _read_client(required=True)
+    feed_on, licensed = _onboarding_feed()
+    outcome = _broker_refusal(lambda: onboarding.record_fixtures(
+        rb, policy=_onboarding_policy(), state_dir=paths.state_dir(), now=_onboarding_now(),
+        feed_on=feed_on, feed_licensed=licensed))
+    _onboarding_finish(outcome)
 
 
 # --------------------------------------------------------------------------------- stocks

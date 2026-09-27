@@ -51,6 +51,25 @@ def _isolated_state(tmp_path, monkeypatch, _core_policy):
     policy_module.default_policy.cache_clear()
 
 
+def pytest_configure(config) -> None:
+    config.addinivalue_line("markers", "capability_gates: use the real M5-D1 capability gates "
+                                       "(state_dir/account/capabilities.json + ledger cross-check)")
+
+
+@pytest.fixture(autouse=True)
+def _capabilities_proven(request, monkeypatch):
+    """M5-D1: a connected cycle consults `capabilities.load`, which is all-false without a smoke
+    ledger. Tests written before the gates keep their proven-broker world; tests marked
+    `capability_gates` (and `tests/operator/test_capabilities.py`) see the real, fail-closed load."""
+    if request.node.get_closest_marker("capability_gates") is not None:
+        yield
+        return
+    from council.operator import capabilities
+
+    monkeypatch.setattr(capabilities, "load", lambda *a, **k: capabilities.Capabilities.all_verified())
+    yield
+
+
 @pytest.fixture(scope="session")
 def policy(_core_policy) -> Policy:
     return _core_policy

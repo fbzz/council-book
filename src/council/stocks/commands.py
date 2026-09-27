@@ -871,6 +871,11 @@ def run_onboard(*, state_dir: Path, repo: Path, broker: Any, now: datetime) -> O
     for problem in gate.preflight_errors(policy):
         ok = False
         lines.append(f"BAD  {problem} (live runs refuse it: re-rank with the broker gate)")
+    from council.operator import capabilities  # M5-D1: Track S waits for S7 (WP-N precondition)
+
+    if not capabilities.load(state_dir).has("stock_fractional"):
+        ok = False
+        lines.append("BAD  capability_missing:stock_fractional (smoke S7 + mirror attest first)")
     return Outcome(ok=ok, lines=lines)
 
 

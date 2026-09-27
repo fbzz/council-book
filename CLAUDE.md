@@ -5,7 +5,7 @@
    each refuses under an agent, CI or launchd. They are: `inbox`, `show <decision>`,
    `inputs show|verify|html`, `approve`, `reject`, `resume-exec`, `ops resolve`, `ops review`,
    `resume`, `keys init-write-keychain|store-read|store-write|verify|store`,
-   `doctor --live-read|--record-fixtures`, `instruments resolve`, `account set-mirror`,
+   `doctor --live-read|--record-fixtures`, `instruments resolve`, `account set-mirror [--from-broker]`,
    `smoke propose|verify|status`, `ops attest|capabilities|record-dress`, `purge-licensed`,
    `stocks onboard|adopt|status|prune`, `stocks rank` with the broker gate, and the scripts
    `ops/install.sh`, `ops/uninstall.sh`, `ops/rehearse-onboarding.sh`. A HALT ends when the

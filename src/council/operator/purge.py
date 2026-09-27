@@ -17,8 +17,8 @@ a new folder appears without an entry):
     `licensed/` folder under `fixtures/`: files older than the cut-off are deleted.
   - `inputs-view/`: rendered private pages; deleted on every purge (they are rebuilt on demand).
   - nested state roots (`rehearsal/`, `dryrun/`) are purged the same way.
-  - `backups/` hold the ledger only; when a ledger record was scrubbed the receipt counts the
-    backups that predate it (`backups_to_refresh`) so a fresh backup replaces them (M5-E).
+  - `backups/` hold the ledger only; after any ledger scrub (and on every `--all`) every backup
+    is deleted and a fresh one taken (`backups_deleted`, `backups_taken`; M5-M).
 A receipt with counts only is printed and written to `purge-receipts/` (never any content).
 The unattended runner calls `maybe_daily_purge` every cycle: it purges on the first cycle of each
 UTC day (no receipt for that day yet) with a cut-off one day under the retention, so no copy
@@ -33,7 +33,7 @@ import json
 import re
 import shutil
 import sqlite3
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,17 +47,13 @@ from council.deliberation.capture import (
     write_private,
 )
 from council.models.inputs import CycleInputs, LicensedInputs
+from council.publish.leakscan import LICENSED_NGRAM, LicensedMatcher
 
 LICENSED_RETENTION_DAYS = 7          # the ceiling; invariants.LICENSED_RETENTION_DAYS may only be lower
 REPLY_PLACEHOLDER = "[purged: overlapped licensed text]"
 RECEIPTS_DIR = "purge-receipts"
 NESTED_ROOTS = ("rehearsal", "dryrun")
-NGRAM = 8
-STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "in", "is", "it", "its",
-    "of", "on", "or", "that", "the", "this", "to", "was", "were", "will", "with",
-})
-_WORD = re.compile(r"[a-z0-9']+")
+NGRAM = LICENSED_NGRAM
 
 
 def retention_days() -> int:
@@ -72,32 +68,9 @@ def retention_days() -> int:
 
 
 # ----------------------------------------------------------------------------- the text filter
-def _words(text: str) -> list[str]:
-    return _WORD.findall(text.lower())
-
-
-class LicensedFilter:
-    """Does a text copy a licensed text? 8-word runs, plus whole short titles (4-7 words with at
-    least 20 characters of content words), matched on lower-cased words."""
-
-    def __init__(self, texts: Iterable[str], n: int = NGRAM) -> None:
-        self.n = n
-        self.grams: set[tuple[str, ...]] = set()
-        self.titles: list[str] = []
-        for text in texts:
-            words = _words(text)
-            self.grams |= {tuple(words[i : i + n]) for i in range(len(words) - n + 1)}
-            content = " ".join(w for w in words if w not in STOPWORDS)
-            if 4 <= len(words) < n and len(content) >= 20:
-                self.titles.append(" ".join(words))
-
-    def hits(self, text: str) -> bool:
-        words = _words(text)
-        if self.grams and any(tuple(words[i : i + self.n]) in self.grams
-                              for i in range(len(words) - self.n + 1)):
-            return True
-        padded = f" {' '.join(words)} "
-        return any(f" {t} " in padded for t in self.titles)
+# The purge scrub IS the publication gate's rule (the licensed-filter contract, M5-M): one class,
+# so the leak scan refuses exactly what the purge would scrub.
+LicensedFilter = LicensedMatcher
 
 
 # ---------------------------------------------------------------------------------- the run
@@ -141,6 +114,7 @@ class _Run:
     cutoff: datetime | None                     # None = everything (--all)
     dry_run: bool
     receipt: PurgeReceipt
+    scrubbed_roots: set[Path] = field(default_factory=set)   # roots whose ledger was scrubbed
 
     def due(self, when: datetime) -> bool:
         return self.cutoff is None or when < self.cutoff
@@ -273,11 +247,7 @@ def _scrub_ledger(run: _Run, root: Path, cycle_id: str, flt: LicensedFilter) -> 
     if not hits:
         return
     run.receipt.add("ledger_strings_scrubbed", len(hits))
-    backups = root / "backups"
-    if backups.is_dir():
-        n = sum(1 for p in backups.rglob("*") if p.is_file())
-        if n:
-            run.receipt.add("backups_to_refresh", n)   # they predate the scrub: take a fresh one
+    run.scrubbed_roots.add(root)
     if not run.dry_run and isinstance(scrubbed, dict):
         ledger.record_cycle({**scrubbed, **keep}, now=run.now)
         _compact(path)
@@ -439,11 +409,55 @@ def purge_licensed(
     receipt = PurgeReceipt(at=now, mode="all" if purge_all else "older_than", cutoff=cutoff,
                            dry_run=dry_run)
     root = Path(state_dir)
-    _purge_root(_Run(now=now, cutoff=cutoff, dry_run=dry_run, receipt=receipt), root, root)
+    run = _Run(now=now, cutoff=cutoff, dry_run=dry_run, receipt=receipt)
+    _purge_root(run, root, root)
+    if root.is_dir():                    # every state root, nested ones included, has its own backups
+        for base in (root, *(root / n for n in NESTED_ROOTS)):
+            if base.is_dir() and (purge_all or base in run.scrubbed_roots):
+                _refresh_backups(receipt, base, now, dry_run=dry_run)
     if write_receipt and not dry_run and root.is_dir():
         name = f"{now.astimezone(UTC):%Y%m%dT%H%M%SZ}.json"
         write_private(root, root / RECEIPTS_DIR / name, json.dumps(receipt.to_json()).encode())
     return receipt
+
+
+def _refresh_backups(receipt: PurgeReceipt, root: Path, now: datetime, *, dry_run: bool) -> None:
+    """Backups copy the ledger, so one taken before a scrub still holds the replaced strings: take a
+    fresh backup of the scrubbed ledger FIRST, then delete every older backup (so a failed fresh
+    backup never leaves the root with none while the scrub stands, yet the stale copies still go).
+    Called after a ledger scrub of this root and on every `--all`; a day whose ledger needed no
+    scrub keeps its backups (the daily sweep never erases history)."""
+    from council.ops import backup
+
+    folder = backup.backup_dir(root)
+    old = sorted(p for p in folder.rglob("*") if p.is_file()) if folder.is_dir() else []
+    if dry_run:
+        if old:
+            receipt.add("backups_deleted", len(old))
+        return
+    fresh: Path | None = None
+    try:
+        from council.operator.licensed import backup_check
+
+        result = backup.backup_ledger(root, now=now, licensed_check=backup_check(root))
+    except Exception as exc:  # the receipt says so; the stale copies are deleted all the same
+        receipt.errors.append(f"backups: {type(exc).__name__}")
+        result = None
+    if result is not None:
+        fresh = result.path
+        receipt.add("backups_taken")
+        if not result.licensed_free:
+            receipt.errors.append("backups: licensed_text_in_fresh_backup")
+    stale = [p for p in old if fresh is None or p.resolve() != fresh.resolve()]
+    deleted = 0
+    for path in stale:
+        try:
+            path.unlink(missing_ok=True)
+            deleted += 1
+        except OSError as exc:
+            receipt.errors.append(f"backups: {type(exc).__name__}")
+    if deleted:
+        receipt.add("backups_deleted", deleted)
 
 
 def daily_cutoff_days() -> int:

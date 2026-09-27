@@ -301,3 +301,117 @@ def resolve(
                              ambiguous=ambiguous)
     updated.save()
     return updated
+
+
+# ------------------------------------------------------------------------ resolution report (M5-C)
+# `council instruments resolve` (m5-readiness §4 K3/K8/K15, gate K19): per line, the vehicle chosen
+# for a long at 1x, with its currency, price unit, whole-unit flag, SL bounds and minimum.
+#
+# The eligibility route documents no currency field. The keys below are the candidates the parser
+# accepts; until the token-day fixture (`doctor --record-fixtures`) confirms one, an absent currency
+# is `unit_unknown` and the vehicle is not planned (fail closed, flag `instrument_unit_unknown`).
+CURRENCY_KEYS = ("currency", "instrumentCurrency", "denominationCurrency")
+PRICE_UNIT_KEYS = ("priceUnit", "quoteUnit", "priceCurrency")
+# price unit -> (currency, factor from one price unit to one currency unit)
+PRICE_UNITS: dict[str, tuple[str, float]] = {
+    "USD": ("USD", 1.0), "EUR": ("EUR", 1.0), "GBP": ("GBP", 1.0), "CHF": ("CHF", 1.0),
+    "GBX": ("GBP", 0.01), "GBP_PENCE": ("GBP", 0.01),
+}
+_UNIT_ALIASES = {"GBP": "GBP", "GBX": "GBX", "GBPENCE": "GBX", "PENCE": "GBX", "GBp": "GBX"}
+
+
+class UnknownPriceUnit(ValueError):
+    """A price unit the scaling table does not know: the vehicle is not planned."""
+
+
+def normalise_unit(value: Any) -> str | None:
+    """'GBp' / 'GBX' / 'pence' -> 'GBX'; other ISO codes upper-cased; blank or non-text -> None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text in _UNIT_ALIASES:
+        return _UNIT_ALIASES[text]
+    upper = text.upper().replace(" ", "").replace("-", "")
+    return _UNIT_ALIASES.get(upper, upper)
+
+
+def scale_price(price: float, unit: str) -> tuple[float, str]:
+    """(price in its currency, currency): the ONE place a GBX (pence) quote becomes GBP (x 0.01).
+    An unknown unit raises UnknownPriceUnit (never a silent 1:1)."""
+    norm = normalise_unit(unit)
+    if norm is None or norm not in PRICE_UNITS:
+        raise UnknownPriceUnit(f"unknown price unit {unit!r}")
+    currency, factor = PRICE_UNITS[norm]
+    return float(price) * factor, currency
+
+
+def unit_of(raw_row: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """(currency, price unit) of a raw eligibility row; (None, None) when the row names neither.
+    A pence currency ('GBX', 'GBp') means currency GBP quoted in GBX; a named currency without an
+    explicit unit is quoted in itself. A unit outside PRICE_UNITS reads as unknown."""
+    currency = next((normalise_unit(raw_row.get(k)) for k in CURRENCY_KEYS if raw_row.get(k)), None)
+    unit = next((normalise_unit(raw_row.get(k)) for k in PRICE_UNIT_KEYS if raw_row.get(k)), None)
+    if currency == "GBX":
+        currency, unit = "GBP", unit or "GBX"
+    unit = unit or currency
+    if unit is None or unit not in PRICE_UNITS:
+        return currency, None
+    if currency is None:
+        currency = PRICE_UNITS[unit][0]
+    if PRICE_UNITS[unit][0] != currency:
+        return currency, None                     # a unit of another currency: unknown, fail closed
+    return currency, unit
+
+
+class LineResolution(Frozen):
+    """One line's long-1x vehicle. PRIVATE: `min_position_usd` is a broker amount (never printed);
+    the report prints codes, symbols and NAV shares only."""
+
+    line: str
+    vehicle: str | None = None
+    settlement: str | None = None
+    currency: str | None = None
+    price_unit: str | None = None
+    whole_units: bool = False
+    sl_min_pct: float | None = None
+    sl_max_pct: float | None = None
+    min_position_usd: float | None = None
+    held_until: str | None = None          # a capability the vehicle waits for (e.g. "cfd_long")
+    code: str = "resolved"                 # resolved | no_vehicle | unit_unknown | held:<capability>
+
+
+def resolution_report(
+    lines: Iterable[Any],
+    rows: Mapping[str, EligibilityRow],
+    raw_rows: Mapping[str, Mapping[str, Any]],
+    expected_cost: Any,
+    capabilities: Mapping[str, bool] | None = None,
+) -> list[LineResolution]:
+    """Per line: the eligible long-1x candidate with the lowest expected cost (`eligibility.
+    resolve_vehicle`), its unit facts, and whether it waits for a capability (a CFD vehicle waits
+    for `cfd_long`, a real one for nothing here). `rows` / `raw_rows` are keyed by upper symbol and
+    hold only unambiguous symbols."""
+    from council.broker.eligibility import resolve_vehicle, whole_units_only
+
+    caps = dict(capabilities or {})
+    out: list[LineResolution] = []
+    for line in lines:
+        choice = resolve_vehicle(line, "long", 1, rows, expected_cost)
+        if choice is None:
+            out.append(LineResolution(line=line.symbol, code="no_vehicle"))
+            continue
+        key = choice.symbol.upper()
+        row = rows.get(key) or rows.get(choice.symbol)
+        currency, unit = unit_of(raw_rows.get(key) or {})
+        held = "cfd_long" if choice.settlement == "cfd" and not caps.get("cfd_long") else None
+        code = "unit_unknown" if unit is None else (f"held:{held}" if held else "resolved")
+        out.append(LineResolution(
+            line=line.symbol, vehicle=choice.symbol, settlement=choice.settlement,
+            currency=currency, price_unit=unit,
+            whole_units=bool(row is not None and whole_units_only(row)),
+            sl_min_pct=choice.config.min_sl_pct, sl_max_pct=choice.config.max_sl_pct,
+            min_position_usd=(max(float(row.min_position_exposure), float(choice.config.min_position_amount))
+                              if row is not None else None),
+            held_until=held, code=code,
+        ))
+    return out

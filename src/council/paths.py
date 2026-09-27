@@ -29,8 +29,13 @@ def log_dir() -> Path:
 
 def ensure_private_dirs() -> Path:
     root = state_dir()
-    for sub in ("cache", "transcripts", "salts", "broker_raw", "backups"):
+    for sub in ("cache", "transcripts", "salts", "backups"):
         (root / sub).mkdir(parents=True, exist_ok=True)
+    # eToro payloads live only under licensed/ (m5-readiness M5-M; the old broker_raw/ is gone,
+    # and purge-licensed still empties a legacy one)
+    for sub in ("fixtures", "calls", "feed"):
+        (root / "licensed" / sub).mkdir(parents=True, exist_ok=True)
+    (root / "licensed").chmod(0o700)
     log_dir().mkdir(parents=True, exist_ok=True)
     return root
 
