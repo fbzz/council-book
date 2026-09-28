@@ -551,3 +551,13 @@ def test_a_halted_cycle_with_a_smoke_ticket_publishes_only_the_ops_row_and_no_cy
     assert not list(journal.rglob("commitments/**/*.json")) and not list(journal.rglob("cycles/**/*.json"))
     if out.decision_id is not None:
         assert ctx.ledger.get_decision(out.decision_id).cycle_id is None
+
+
+def test_a_smoke_execution_is_never_published_by_the_watch(world):
+    """M5-D2/M5-N: the smoke legs and fills stay private; only the weightless ops row is public."""
+    ticket = world.run_step("S1")
+    world.clock.advance(900)
+    run_watch(world.ctx)
+    executions = world.clone / "journal" / "executions"
+    assert not (executions.exists() and any(executions.rglob("*.json")))
+    assert ticket not in world.ledger.get_runtime("executions_published", [])

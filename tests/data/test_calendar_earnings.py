@@ -16,6 +16,7 @@ from council.data.calendar import load_events
 from council.models.facts import EventItem
 from council.runtime import window
 from council.stocks import earnings as EA
+from tests.integration.test_news_wiring import attest_licence
 
 SLOT = datetime(2026, 10, 26, 14, 40, tzinfo=UTC)
 FEED = json.loads((Path(__file__).parent / "fixtures" / "etoro_news_feed.json").read_text())
@@ -88,6 +89,7 @@ def _no_public_news(policy, now, state_dir=None, *, slot=None, **kw):
 
 def test_one_feed_request_per_slot_serves_the_earnings_and_the_news(sleeve_policy, recorder, tmp_path):
     broker = FakeBroker()
+    attest_licence(tmp_path)                                             # LC1: the feed may be read
     sources = context.data_sources(sleeve_policy, broker=broker, state_dir=tmp_path, public_news=_no_public_news)
     sources.events(*window(SLOT))
     items = sources.news(SLOT).items                  # a NewsFetch: the broker items plus the public ones
@@ -97,6 +99,7 @@ def test_one_feed_request_per_slot_serves_the_earnings_and_the_news(sleeve_polic
 
 
 def test_a_failing_feed_leaves_the_sec_estimate_in_force(sleeve_policy, recorder, tmp_path):
+    attest_licence(tmp_path)
     sources = context.data_sources(sleeve_policy, broker=FakeBroker(fail=True), state_dir=tmp_path)
     events, flags = sources.events(*window(SLOT))
     assert "earnings_feed_failed:RuntimeError" in flags and recorder[0]["news"] == []

@@ -38,6 +38,10 @@ LINE_PATTERN = r"^[A-Z0-9](?:[A-Z0-9_]{0,10}[A-Z0-9])?$"
 SHA_PATTERN = r"^([0-9a-f]{8,64})?$"          # empty when unknown
 HEX64_PATTERN = r"^[0-9a-f]{64}$"
 
+# A decision without a cycle: a watch flatten or an onboarding smoke ticket (m5-readiness M5-N)
+DECISION_REF_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{4}Z-(flatten|smoke-S[1-7][a-z]{0,2})$"
+FillTolerance = Literal["within_tolerance", "outside_tolerance"]
+
 CycleId = Annotated[str, Field(pattern=CYCLE_ID_PATTERN)]
 Line = Annotated[str, Field(pattern=LINE_PATTERN)]
 Sha = Annotated[str, Field(pattern=SHA_PATTERN)]
@@ -629,13 +633,21 @@ class PublicFill(PublicModel):
     exposure_error_pct: Pct | None = None
     slippage_bp: Bp | None = None
     cost_bp: Bp | None = None
+    # M5-N: a measured fill within the planned tolerance of its target publishes as the target
+    # (whole-unit rounding would otherwise bound the NAV); outside it, the exact value
+    fill: FillTolerance | None = None
+
+    OMIT_WHEN_DEFAULT: ClassVar[frozenset[str]] = frozenset({"fill"})
 
 
 class PublicExecution(PublicModel):
     """The FINAL outcome of an executed decision (the cycle itself was sealed before approval)."""
 
     schema_id: Literal["council-book/execution/v1"] = "council-book/execution/v1"
-    cycle_id: CycleId
+    cycle_id: CycleId | None = None
+    # M5-N (G14/G34): a decision without a cycle (a watch flatten, a smoke ticket) is keyed by its
+    # own id, which never matches the cycle-id pattern
+    decision_ref: Annotated[str, Field(pattern=DECISION_REF_PATTERN)] | None = None
     decision_state: DecisionState
     approved_slot: UtcDatetime | None = None
     completed_slot: UtcDatetime | None = None
@@ -644,6 +656,19 @@ class PublicExecution(PublicModel):
     achieved_drift_x: X | None = None
     cost_bp_total: Bp | None = None
     flags: list[Code] = Field(default_factory=list)
+
+    OMIT_WHEN_DEFAULT: ClassVar[frozenset[str]] = frozenset({"cycle_id", "decision_ref"})
+
+    @model_validator(mode="after")
+    def _one_key(self) -> PublicExecution:
+        if (self.cycle_id is None) == (self.decision_ref is None):
+            raise ValueError("an execution names exactly one of cycle_id and decision_ref")
+        return self
+
+    @property
+    def key(self) -> str:
+        """The id the execution file is named after."""
+        return self.cycle_id or self.decision_ref or ""
 
 
 class PublicIncident(PublicModel):

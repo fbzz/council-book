@@ -11,7 +11,11 @@
   floor binds (flagged like the private `size_floor_binding:<line>`), each held line reads the
   bare `LINE: R11` (the same words as a genuine deadband hold), and no differing string carries a
   number, "minimum", "floor" or "broker".
-- (d) smoke tickets do not exist yet (M5-D2 adds them and extends this file's cases).
+- (d) smoke: the same smoke step at two funding levels gives byte-identical public files (the
+  weightless ops row and a weightless execution under its `decision_ref`).
+- Plan skips publish collapsed (`LINE: R11`), and `cycle.py` hands the broker minimum to the
+  engine so a line below it holds as R11 before the planner sees it; whole-unit fills within
+  tolerance publish as their target; a watch flatten publishes under its own id.
 
 Residuals this file does not claim to close (stated in transparency-v2 X3 and D18): whether a
 small change happened at all still bounds the NAV coarsely; the fixed fee in bps of NAV can hold
@@ -364,34 +368,166 @@ def test_unforced_below_the_threshold_differs_only_on_flagged_lines(policy):
                 assert not re.search(r"(?i)minimum|floor|broker", s), (name, s)
 
 
-# The planner's channel: `cycle.py` does not pass `broker_min_share` to the engine yet, so the
-# broker's minimum on an OPEN leg is met by the planner, whose skip note is published as written.
-# SPX's vehicle gets a 300 USD minimum here so that at 2,000 USD the fee (D18) does not hold SPX first.
+# The planner's channel: with the engine run without the broker minimum (as `cycle.py` did before
+# M5-N), the broker's minimum on an OPEN leg is met by the planner, whose skip note now publishes
+# collapsed. SPX's vehicle gets a 300 USD minimum here so that at 2,000 USD the fee (D18) does not
+# hold SPX first.
 PLANNER_NAV = 2_000.0
 
 
-def _planner_channel(policy, monkeypatch) -> tuple[dict[str, Any], RiskDecision]:
+def _planner_channel(policy, monkeypatch, *, engine_broker_min: bool = False) -> tuple[dict[str, Any], RiskDecision]:
     monkeypatch.setitem(BROKER_MIN_USD, "SPX", 300.0)
-    return unforced_at(policy, PLANNER_NAV, engine_broker_min=False)
+    return unforced_at(policy, PLANNER_NAV, engine_broker_min=engine_broker_min)
 
 
 def test_the_scenario_reaches_the_planner_skip_when_the_engine_lacks_the_broker_minimum(policy, monkeypatch):
-    """Pins that the xfail below exercises the real planner path (not a test artefact)."""
+    """Pins that the test below exercises the real planner path (not a test artefact)."""
     files, decision = _planner_channel(policy, monkeypatch)
     assert files["cycle"].plan.skipped and all(s.startswith("SPX: ") for s in files["cycle"].plan.skipped)
     assert not any(r.startswith("SPX") for r in decision.hold_reasons)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "open M5-N item (token-day): `redact._plan` publishes planner size skips as written "
-    "(`SPX: below_broker_minimum`), which bounds the NAV. Closing it needs `trace_rules.public_plan_skip` "
-    "wired into `redact._plan` together with the site's words for `R11` "
-    "(tests/publish/test_site.py::test_internal_codes_read_as_words), or cycle.py passing "
-    "`broker_min_share` so the engine holds the line under R11 first"))
 def test_no_public_plan_skip_names_the_broker_minimum(policy, monkeypatch):
     files, _ = _planner_channel(policy, monkeypatch)
+    assert files["cycle"].plan.skipped == ["SPX: R11"]
     text = commit_reveal.canonical_json(files["cycle"]).decode()
     assert not re.search(r"(?i)minimum|below_real|below_broker", text)
+
+
+def test_the_cycle_hands_the_broker_minimum_to_the_engine(policy, monkeypatch):
+    """`cycle.broker_min_shares` turns the eligibility rows into the engine's floor: SPX then holds
+    as R11 in the engine and the planner has nothing to skip."""
+    from council.cycle import broker_min_shares
+
+    monkeypatch.setitem(BROKER_MIN_USD, "SPX", 300.0)
+    rows = parse_eligibility({"eligibilities": [
+        eligibility_row(symbol, iid, min_position_exposure=BROKER_MIN_USD.get(line, OTHER_MIN_USD))
+        for line, (symbol, iid) in VEHICLES.items()]}, SLOT)
+    shares = broker_min_shares(policy, rows, PLANNER_NAV)
+    assert shares["SPX"] == pytest.approx(300.0 / PLANNER_NAV)
+    assert shares == pytest.approx({line: v for line, v in _min_share(PLANNER_NAV).items() if line in VEHICLES})
+    assert broker_min_shares(policy, rows, None) == broker_min_shares(policy, None, PLANNER_NAV) == {}
+    files, decision = _planner_channel(policy, monkeypatch, engine_broker_min=True)
+    assert "SPX: R11 below the minimum trade size" in decision.hold_reasons
+    assert files["cycle"].plan.skipped == [] and "SPX: R11" in files["cycle"].risk.hold_reasons
+
+
+def test_the_cycle_p2_flags_match_the_threshold_and_stay_private(policy):
+    from council.cycle import size_floor_binding_flags
+    from council.publish.redact import public_flags
+
+    for nav in (LOW, HIGH, HIGHER):
+        econ = trade_economics(policy, virtual_nav_usd=nav, mirror_ratio=1.0)
+        flags = size_floor_binding_flags(policy, _min_share(nav), econ.copy_floor_share)
+        assert flags == [f"size_floor_binding:{s}" for s in sorted(size_floor_binding(policy, nav))]
+        assert public_flags(["late", *flags]) == ["late"]
+    everything = size_floor_binding_flags(policy, {}, 1.0)          # a copy floor above the threshold
+    assert everything == [f"size_floor_binding:{s}" for s in sorted(policy.universe.symbols())]
+
+
+# ------------------------------------------------------------------------------ whole units, flatten, smoke
+def _open_plan(nav: float, target_w: float, units: float) -> Plan:
+    return Plan(
+        legs=[Leg(seq=1, kind="open", symbol="SGLN.L", line="GOLD", instrument_id=202, direction="long",
+                  settlement="real", leverage=1, weight_before=0.0, weight_after=target_w, stop_distance=0.1,
+                  sl_margin_pct=10.0, cost_bps_nav=0.4, risk_increasing=True, reason="GOLD: add",
+                  amount_usd=units * PRICE, units=units, sl_rate=PRICE * 0.9)],
+        gross_before=0.0, gross_after=target_w, net_before=0.0, net_after=target_w, cost_bps_nav=0.4,
+        carry_bps_day_nav=0.0, skipped=[])
+
+
+def _open_execution(policy, nav: float, target_w: float, *, cycle_id: str | None = CYCLE_ID,
+                    decision_ref: str | None = None, **tol: float):
+    from council.publish.redact import fill_tolerances
+
+    units = float(int(target_w * nav / PRICE))                 # whole units, rounded down
+    plan = _open_plan(nav, target_w, units)
+    achieved = {"GOLD": units * PRICE / nav}
+    return public_execution(_report(plan, achieved), cycle_id=cycle_id, decision_ref=decision_ref,
+                            lines=policy.universe, nav_usd=nav, plan=plan, approved_at=SLOT,
+                            completed_at=SLOT + timedelta(minutes=5), **(tol or fill_tolerances(policy)))
+
+
+def test_whole_unit_fills_within_tolerance_publish_as_the_target(policy):
+    # 0.1 x at 2,070 USD is 4.14 units -> 4 (0.0966 x); at 20,070 USD 40.14 -> 40 (0.0997 x)
+    small, large = _open_execution(policy, 2_070.0, 0.1), _open_execution(policy, 20_070.0, 0.1)
+    assert commit_reveal.canonical_json(small) == commit_reveal.canonical_json(large)
+    fill = small.fills[0]
+    assert (fill.weight_target_x, fill.weight_filled_x, fill.exposure_error_pct, fill.fill) == \
+        (0.1, 0.1, 0.0, "within_tolerance")
+    assert small.achieved_x == {"GOLD": 0.1} and small.flags == []
+
+
+def test_the_drift_never_carries_the_whole_unit_residual(policy):
+    """The reconcile's exact drift is Σ |achieved − planned|: published as is, it would give back the
+    rounding residual the snap hides. It publishes from the snapped weights instead."""
+    from council.publish.redact import fill_tolerances
+
+    docs = []
+    for nav in (2_070.0, 20_070.0):
+        units = float(int(0.1 * nav / PRICE))
+        plan = _open_plan(nav, 0.1, units)
+        achieved = {"GOLD": units * PRICE / nav}
+        report = _report(plan, achieved)
+        report.reconcile.drift = abs(achieved["GOLD"] - 0.1)         # the reconcile's own definition
+        docs.append(public_execution(report, cycle_id=CYCLE_ID, lines=policy.universe, nav_usd=nav, plan=plan,
+                                     approved_at=SLOT, completed_at=SLOT + timedelta(minutes=5),
+                                     **fill_tolerances(policy)))
+    small, large = docs
+    assert small.achieved_drift_x == 0.0
+    assert commit_reveal.canonical_json(small) == commit_reveal.canonical_json(large)
+
+
+def test_a_fill_outside_tolerance_keeps_the_exact_value_and_is_flagged(policy):
+    doc = _open_execution(policy, 2_070.0, 0.1, tolerance_rel=0.01, tolerance_x=0.0)
+    assert doc.fills[0].fill == "outside_tolerance" and doc.fills[0].weight_filled_x == 0.097
+    assert doc.achieved_x == {"GOLD": 0.097} and doc.flags == ["achieved_outside_tolerance:1"]
+
+
+def test_a_sealed_fill_without_the_tolerance_field_reserialises_unchanged(policy):
+    doc = _open_execution(policy, 2_070.0, 0.1)
+    raw = json.loads(commit_reveal.canonical_json(doc))
+    old = raw | {"fills": [{k: v for k, v in f.items() if k != "fill"} for f in raw["fills"]]}
+    assert "decision_ref" not in raw and "fill" not in old["fills"][0]
+    again = type(doc).model_validate(old)
+    assert json.loads(commit_reveal.canonical_json(again)) == old
+
+
+def test_a_watch_flatten_publishes_under_its_own_id(policy):
+    from council.publish import journal
+    from council.publish.public_models import CYCLE_ID_PATTERN
+
+    ref = "2026-10-01T1447Z-flatten"
+    doc = _open_execution(policy, 2_070.0, 0.1, cycle_id=None, decision_ref=ref)
+    assert doc.cycle_id is None and doc.decision_ref == ref and doc.key == ref
+    assert not re.match(CYCLE_ID_PATTERN, ref)
+    (path,) = journal.execution_files(doc)
+    assert path.endswith(f"/executions/2026/10/{ref}.json") and path != journal.execution_path(CYCLE_ID)
+    raw = json.loads(commit_reveal.canonical_json(doc))
+    assert "cycle_id" not in raw and raw["decision_ref"] == ref
+    with pytest.raises(ValueError):
+        _open_execution(policy, 2_070.0, 0.1, cycle_id=None, decision_ref=None)
+
+
+def test_the_same_smoke_step_publishes_identical_files_at_two_funding_levels(policy):
+    """(d): the smoke ticket's size is the broker minimum, so nothing sized by the NAV is published."""
+    from council.publish import journal
+    from council.publish.smoke_row import PublicSmokeRow, smoke_files
+
+    ref = "2026-10-01T1447Z-smoke-S2a"
+    files = {}
+    for nav in (2_070.0, 20_070.0):
+        # a minimum-size ticket: its weight is the broker minimum over the NAV
+        doc = _open_execution(policy, nav, 40.0 / nav + 1e-9, cycle_id=None, decision_ref=ref)
+        row = PublicSmokeRow(id=ref, step="S2a", state="completed", commitment="ef" * 32)
+        files[nav] = journal.execution_files(doc) | smoke_files(None, [row])
+    small, large = files.values()
+    assert small == large
+    doc = json.loads(next(v for k, v in small.items() if "/executions/" in k))
+    assert doc["achieved_x"] == {} and doc["achieved_drift_x"] is None and doc["cost_bp_total"] is None
+    for fill in doc["fills"]:
+        assert all(fill.get(k) is None for k in ("weight_target_x", "weight_filled_x", "exposure_error_pct",
+                                                  "cost_bp"))
 
 
 @pytest.mark.parametrize("nav", [LOW, HIGH])

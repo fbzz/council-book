@@ -125,7 +125,8 @@ ACCEPTANCE: dict[str, Package] = {
     "M5-0": Package("keys store-read CLI test", (
         "tests/cli/test_keys_cli.py::test_store_read_exits_0_and_stores_both_read_items_in_the_default_keychain",)),
     "M5-A": Package("broker-failure containment, base-URL pin, transport", (
-        "tests/boundaries/test_broker_transport.py", "tests/integration/test_broker_containment.py")),
+        "tests/boundaries/test_broker_pin.py", "tests/integration/test_broker_containment.py",
+        "tests/integration/test_news_wiring.py::test_the_feed_is_read_by_default_and_never_without_the_switch")),
     "M5-B": Package("operator commands, operator context, release pinning", (
         "tests/cli/test_operator_commands.py", "tests/execution/test_operator_recovery.py",
         "tests/boundaries/test_deny_rules.py")),
@@ -146,8 +147,16 @@ ACCEPTANCE: dict[str, Package] = {
         "tests/boundaries/test_ci_config.py::test_dependabot_bumps_the_pinned_actions_weekly",
         "tests/boundaries/test_ci_config.py::test_gitleaks_tarball_is_verified_before_it_is_unpacked")),
     "M5-J": Package("runbook v2 and docs", ("tests/boundaries/test_runbook.py",)),
-    "M5-K": Package("operator why screen", ("tests/operator/test_show_trail.py",)),
-    "M5-M": Package("licensed-content controls", ("tests/operator/test_licensed.py",)),
+    "M5-K": Package("operator why screen", (
+        "tests/operator/test_why_screen.py", "tests/integration/test_why_screen_cycle.py")),
+    "M5-M": Package("licensed-content controls", (
+        "tests/operator/test_licensed.py",          # LC2 (feed canary, off and on) + LC3 (7-day sweep)
+        "tests/operator/test_licensed_controls.py", "tests/operator/test_purge.py",
+        "tests/operator/test_purge_retention_ceiling.py", "tests/redteam/test_licensed_filter_contract.py",
+        "tests/council/test_input_capture.py::test_broker_licensed_text_is_held_apart_from_the_main_capture",
+        "tests/integration/test_news_wiring.py::test_the_policy_can_only_turn_the_feed_off",
+        "tests/rehearsal/test_rehearsal_variants.py"
+        "::test_v2a_unlicensed_feed_cycle_runs_on_public_items_with_zero_feed_requests")),
     "M5-N": Package("NAV side channels", ("tests/publish/test_nav_invariance.py",)),
     "T1": Package("private input capture", ("tests/council/test_input_capture.py",)),
     "T3": Package("public-domain news", ("tests/data/test_gov_news.py", "tests/integration/test_news_wiring.py")),

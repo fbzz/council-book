@@ -1,7 +1,7 @@
 """T3b end to end, offline (stub LLM, recorded public items, the fake broker): the news role reads
 public-domain `P:` items in every cycle and the broker's feed whenever an Agent Portfolio is
-connected and the switch is on (the user's decision of 2026-09-26); the switch off, or no broker,
-means zero feed requests; a 403 from the feed leaves the news role running on the public items; no
+connected, the switch is on and the operator attested the eToro licence (LC1; the user's decisions
+of 2026-09-26/27); the switch off, no attestation, or no broker, means zero feed requests; a 403 from the feed leaves the news role running on the public items; no
 item at all skips the news call; `N:` ids are keyed by the private install key; the earnings keep
 the SEC estimate when the feed is off. No network: the public fetch is a fake, the broker a
 FakeEtoro behind the real READ client."""
@@ -87,8 +87,18 @@ def feed_entry(post_id: str, title: str, at) -> dict:
                                     "tags": [{"market": {"symbolName": "NSDQ100"}}]}}
 
 
-def _cycle_ctx(tmp_path, *, broker=None, public=None, policy=None):
+def attest_licence(state_dir) -> None:
+    """The operator's `ops attest etoro-licence` (LC1), written the way the CLI writes it."""
+    from council.operator import readiness
+
+    readiness.write_record("attest", head="a" * 40, attested={"etoro-licence": True}, state_dir=state_dir,
+                           now=NOW, assert_operator=lambda: None, assert_release=lambda: None)
+
+
+def _cycle_ctx(tmp_path, *, broker=None, public=None, policy=None, licensed=True):
     ctx = _ctx(tmp_path, broker=broker)
+    if licensed:
+        attest_licence(ctx.state_dir)
     if policy is not None:
         ctx.policy = policy
     news, _ = context.news_sources(ctx.policy, broker=broker, state_dir=ctx.state_dir,
@@ -161,17 +171,20 @@ def test_the_feed_is_read_by_default_and_never_without_the_switch(tmp_path, fake
     assert call["status"] == "ok"                                        # the public items still read
 
 
-def test_the_policy_can_only_turn_the_feed_off(policy, monkeypatch):
+def test_the_policy_can_only_turn_the_feed_off(policy, monkeypatch, tmp_path):
     broker = object()
-    assert context.broker_feed_enabled(policy, broker)
-    assert not context.broker_feed_enabled(policy, None)
+    assert not context.broker_feed_enabled(policy, broker, tmp_path)     # LC1 not attested yet
+    attest_licence(tmp_path)
+    assert context.broker_feed_enabled(policy, broker, tmp_path)
+    assert not context.broker_feed_enabled(policy, broker)               # no state dir: no attestation
+    assert not context.broker_feed_enabled(policy, None, tmp_path)
     off = policy.model_copy(update={"council": {**policy.council,
                                                 "news": {**policy.council["news"], "broker_feed": False}}})
-    assert not context.broker_feed_enabled(off, broker)
+    assert not context.broker_feed_enabled(off, broker, tmp_path)
     monkeypatch.setattr(invariants, "BROKER_FEED_ENABLED", False)
     on = policy.model_copy(update={"council": {**policy.council,
                                                "news": {**policy.council["news"], "broker_feed": True}}})
-    assert not context.broker_feed_enabled(on, broker)                   # never above the ceiling
+    assert not context.broker_feed_enabled(on, broker, tmp_path)         # never above the ceiling
 
 
 def test_a_403_from_the_feed_leaves_the_news_role_on_the_public_items(tmp_path, fake_etoro):
@@ -202,6 +215,7 @@ def test_n_ids_are_keyed_by_the_install_key(tmp_path, policy):
                                                SLOT - timedelta(hours=3))]}
 
     def ids(state_dir, slot=SLOT):
+        attest_licence(state_dir)
         news, _ = context.news_sources(policy, broker=Feed(), state_dir=state_dir,
                                        public=FakePublic(items=[]), clock=lambda: NOW)
         return [item.id for item in news(slot).items]
@@ -221,6 +235,7 @@ def test_a_failing_public_fetch_is_a_flag_and_the_feed_still_counts(tmp_path, po
     def broken(*args, **kw):
         raise RuntimeError("bug")
 
+    attest_licence(tmp_path)
     news, _ = context.news_sources(policy, broker=Feed(), state_dir=tmp_path, public=broken, clock=lambda: NOW)
     fetch = news(SLOT)
     assert "news_source_error:public:RuntimeError" in fetch.flags
@@ -276,6 +291,7 @@ def test_a_failing_feed_is_asked_once_per_slot(sleeve_policy, tmp_path, monkeypa
             raise BrokerAuthError(403)
 
     monkeypatch.setattr(EA, "gather_earnings", lambda policy, **kw: ([], []))
+    attest_licence(tmp_path)
     sources = context.data_sources(sleeve_policy, broker=Refusing(), state_dir=tmp_path, public_news=FakePublic())
     _, event_flags = sources.events(*window(SLOT))
     fetch = sources.news(SLOT)

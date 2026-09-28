@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -25,8 +25,8 @@ def root() -> Path:
     return r
 
 
-def _age(path: Path, days: float) -> None:
-    t = time.time() - days * 86400
+def _age(path: Path, days: float, now: datetime | None = None) -> None:
+    t = (now.timestamp() if now else time.time()) - days * 86400
     os.utime(path, (t, t))
 
 
@@ -50,15 +50,17 @@ def test_sweeper_removes_payloads_before_seven_days_and_keeps_fresh_ones(root):
     old, fresh = root / "licensed" / "feed" / "old.json", root / "licensed" / "feed" / "new.json"
     old.parent.mkdir(parents=True)
     old.write_text("{}"), fresh.write_text("{}")
-    _age(old, 6.5)                                    # a day under the retention: swept today
-    _age(fresh, 1)
-    now = watch.datetime.now(watch.UTC)
+    now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)     # injected: an hour later is the same UTC day
+    _age(old, 6.5, now)                               # a day under the retention: swept today
+    _age(fresh, 1, now)
     assert licensed.sweep(root, now) == []
     assert not old.exists() and fresh.exists()
     assert list((root / RECEIPTS_DIR).glob("*.json"))
-    _age(fresh, 6.5)
+    _age(fresh, 6.5, now)
     assert licensed.sweep(root, now + timedelta(hours=1)) == []   # once per UTC day
     assert fresh.exists()
+    assert licensed.sweep(root, now + timedelta(hours=12, minutes=1)) == []   # the next UTC day
+    assert not fresh.exists()
 
 
 def test_watch_runs_the_sweeper(tmp_path, monkeypatch):

@@ -225,8 +225,8 @@ def _read_existing(ctx: CycleContext, rel: str) -> bytes | None:
 def _executions(ctx: CycleContext, files: dict[str, bytes], unpublished: list[str] | None = None) -> list[str]:
     """Publish each finished execution report. Every record is guarded: one that cannot be made
     public is flagged `execution_unpublished:<type>` and retried next run, never stopping the loop.
-    A report without a cycle (a watch flatten, keyed by `decision_ref`) waits for its own public
-    document type (M5-N)."""
+    A watch flatten publishes under its `decision_ref` (M5-N); a smoke ticket's execution is never
+    published here (M5-D2: its legs and fills stay private; `smoke_row` publishes its ops row)."""
     from council.publish import journal, redact
 
     ledger = ctx.ledger
@@ -241,17 +241,19 @@ def _executions(ctx: CycleContext, files: dict[str, bytes], unpublished: list[st
                 continue
             if _decision_state(ledger, key) == WAITING_STATE:     # published once resolved
                 continue
-            if payload.get("cycle_id") is None:                   # G14: no public type yet (M5-N)
-                continue
+            cycle_id = payload.get("cycle_id")
+            decision_ref = None if cycle_id else payload.get("decision_ref")
+            if decision_ref is not None and "-smoke-" in str(decision_ref):
+                continue    # M5-D2: smoke legs and fills stay private; the weightless ops row is public
             from council.execution.executor import ExecutionReport
             from council.models.plan import Plan
 
             report = ExecutionReport.model_validate(payload["report"])
             plan = Plan.model_validate(payload["plan"]) if payload.get("plan") else None
             public = redact.public_execution(
-                report, cycle_id=payload["cycle_id"], lines=ctx.policy.universe, nav_usd=payload["nav_usd"],
-                plan=plan, approved_at=_dt(payload.get("approved_at")),
-                completed_at=_dt(payload.get("completed_at")))
+                report, cycle_id=cycle_id, decision_ref=decision_ref, lines=ctx.policy.universe,
+                nav_usd=payload["nav_usd"], plan=plan, approved_at=_dt(payload.get("approved_at")),
+                completed_at=_dt(payload.get("completed_at")), **redact.fill_tolerances(ctx.policy))
             record_files = journal.execution_files(public)
         except Exception as exc:  # noqa: BLE001 - one bad record never stops the watch
             if unpublished is not None:

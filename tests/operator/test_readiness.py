@@ -869,6 +869,7 @@ def test_ci_runs_the_registry_in_job_m5_acceptance():
     out = subprocess.run([sys.executable, "-m", "council.operator.readiness", "acceptance-ids"],
                          capture_output=True, text=True, check=True, cwd=paths.REPO_ROOT)
     assert out.stdout.split() == rd.acceptance_ids()
+    assert "tests/rehearsal/test_onboarding_rehearsal.py" in rd.acceptance_ids()   # R3: L1 runs in this job
 
 
 def test_o1_o2_ignore_a_shell_only_value(world):

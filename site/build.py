@@ -272,7 +272,10 @@ AUDIT_WORDS = {
     "direction_mismatch": "the direction does not match the size",
     "short_without_risk_down_card": "a short without a card that argues for less risk",
 }
-SKIP_WORDS = {"below_broker_minimum": "below the broker's minimum order size"}
+# Plan skips publish collapsed (M5-N): a size skip is `R11`, anything unexplained `not_ordered`.
+# `below_broker_minimum` stays for journals sealed before the collapse.
+SKIP_WORDS = {"R11": "too small to trade", "not_ordered": "not ordered",
+              "below_broker_minimum": "below the broker's minimum order size"}
 WHY_WORDS = {"scheduled": "a scheduled review", "vol_shock": "a volatility shock", "event": "a scheduled event",
              "manual": "a manual run", "kill_switch": "the kill switch"}
 CADENCE_WORDS = {"every_cycle": "every run", "first_cycle_of_utc_day": "first run of each UTC day"}
@@ -584,7 +587,7 @@ def load_journal(journal_dir: Path) -> JournalView:
     for file in sorted(executions_dir.rglob("*.json")) if executions_dir.exists() else []:
         execution = PublicExecution.model_validate_json(file.read_text())
         rel = f"journal/{file.relative_to(journal_dir).as_posix()}"
-        executions[execution.cycle_id] = (execution, rel)
+        executions[execution.key] = (execution, rel)   # a flatten or smoke file never matches a cycle
         view.copies[rel] = file
     cycles_dir = journal_dir / "cycles"
     for file in sorted(cycles_dir.rglob("*.json")) if cycles_dir.exists() else []:
@@ -1493,10 +1496,10 @@ def plain_violation(code: str, lines: Lines) -> dict[str, str]:
 
 
 def plain_skip(code: str, lines: Lines) -> dict[str, str]:
-    """A skipped-leg code in words: "GOLD: below_broker_minimum (...)" -> "Gold: below the broker's minimum order size"."""
-    m = re.match(r"^([A-Za-z0-9_.]+): ([a-z_ ]+?)\s*(?:\(.*\))?$", code)
+    """A skipped-leg code in words: "GOLD: R11" -> "Gold: too small to trade"."""
+    m = re.match(r"^([A-Za-z0-9_.]+): ([A-Za-z0-9_ ]+?)\s*(?:\(.*\))?$", code)
     if not m:
-        return {"text": code.replace("_", " "), "raw": code}
+        return {"text": SKIP_WORDS.get(code, code.replace("_", " ")), "raw": code}
     sym, what = m.groups()
     if sym.startswith("UNMAPPED"):
         return {"text": "a position that belongs to no line", "raw": code}
