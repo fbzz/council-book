@@ -31,6 +31,26 @@ Order of operations for `approve` (any failure stops before a single order is se
   8. transition to approved (actor=operator), unlock the WRITE keychain, read the token, lock it
   9. execute (closes → confirm → opens with a stop-loss on every open), store the report for the
      watch job to publish (the operator never runs git)
+
+Swing book (swing-book.md rev 2, §4.1, §4.3; SW-5). Refusals are SCOPED: a swing-scoped `dropped`
+map ({seq: code}) holds every swing drop, and core legs are never dropped because of a swing leg.
+  - `--skip idea:k` (or `trade:<id>`) drops that swing entry and its take-profit leg; an unknown ref
+    or an exit is refused (reject the decision instead).
+  - A swing close / modify whose position vanished (typically its broker SL or TP fired inside the
+    window) drops that leg and records the broker close (`watch.record_swing_close`); the decision
+    proceeds. A core leg whose position vanished still refuses the whole decision.
+  - The drift check leaves out a swing line the broker already closed (`swing.book.approval_drift`
+    with the map of the swing lines still in the book).
+  - The S16 entry guard runs BEFORE the screen with the live rate (ask for a long, bid for a short):
+    older than 60 minutes -> `expired`; at or past the stop -> `swing_entry_stopped`; run beyond
+    min(0.5 x stop distance, 1.5%) -> `swing_entry_ran`; S6 at the live distances -> `swing_entry_S6`.
+    Otherwise the approved stop and target RATES are kept; when the stop is now further away the
+    units are REDUCED so the loss at the stop stays the approved one; units are never raised.
+  - A dropped swing exit drops every swing entry (risk first); a dropped swing entry never touches
+    a core leg, and the market-hours drop rule treats swing entries as independent.
+  - After the nonce the swing entries' price is read once more: keep or drop only (the same run-away
+    / stopped / S6 tests); no rate, unit or size changes. A dropped or expired entry's trade becomes
+    `missed` and its idea returns to `pending` (the Scout may re-propose it).
 """
 
 from __future__ import annotations
@@ -78,7 +98,7 @@ def _transition(ledger: Any, decision_id: str, state: str, reason: str) -> None:
     ledger.transition(decision_id, state, reason, actor="operator")
 
 
-def approve(decision_id: str, deps: ApprovalDeps) -> Any:
+def approve(decision_id: str, deps: ApprovalDeps, *, skip: tuple[str, ...] = ()) -> Any:
     from council.broker.instruments import InstrumentMap
     from council.execution.planner import vehicle_to_line
     from council.models.plan import Plan
@@ -107,13 +127,14 @@ def approve(decision_id: str, deps: ApprovalDeps) -> Any:
         if kill_state != "NORMAL" and not reducing:   # a smoke close stays approvable under WARN
             raise ApprovalRefused(f"kill switch {kill_state}: smoke tickets need NORMAL")
     dropped = market_hours_drops(plan, d.kind, policy, now)
-    kept = [leg for leg in plan.legs if leg.seq not in dropped]
+    swing_dropped = swing_skip_drops(plan, skip, ledger)           # --skip idea:k (swing-scoped)
+    swing_dropped = swing_cascade(plan, dropped, swing_dropped)
+    kept = [leg for leg in plan.legs if leg.seq not in dropped and leg.seq not in swing_dropped]
     if not kept:
-        reasons = "; ".join(f"leg {seq}: {why}" for seq, why in sorted(dropped.items()))
+        reasons = "; ".join(f"leg {seq}: {why}" for seq, why in sorted({**dropped, **swing_dropped}.items()))
         raise ApprovalRefused(f"nothing left to execute: {reasons}")
     if d.kind == "rebalance":
         _policy_check(d, ledger, policy)
-    kept_plan = plan.model_copy(update={"legs": kept})
 
     imap = InstrumentMap.load(deps.state_dir / "instruments.json")
     from council.swing.book import approval_drift, swing_vehicle_map
@@ -122,31 +143,62 @@ def approve(decision_id: str, deps: ApprovalDeps) -> Any:
     snap = snapshot_from_pnl(deps.read.pnl(), vehicle_by_instrument=smap.merged_symbols(imap.symbols_by_id()),
                              line_by_vehicle=smap.merged_lines(vehicle_to_line(policy.universe)), now=now)
     live_ids = {p.position_id for p in snap.positions}
+    closed_at_broker: dict[int, str] = {}
     for leg in kept:
-        if leg.kind in ("close", "partial_close", "modify_sl") and leg.position_id not in live_ids:
-            raise ApprovalRefused(f"leg {leg.seq}: position no longer exists (stop hit or manual change)")
+        if leg.kind in ("close", "partial_close", "modify_sl", "modify_tp", "set_tp") \
+                and leg.position_id is not None and leg.position_id not in live_ids:
+            if not leg.is_swing:
+                raise ApprovalRefused(f"leg {leg.seq}: position no longer exists (stop hit or manual change)")
+            # a swing SL / TP that fired inside the window: drop this leg only, record the close
+            closed_at_broker[leg.seq] = leg.swing_trade_id or ""
+            swing_dropped[leg.seq] = "swing_position_closed_at_broker"
     target = _json(d.target_json if hasattr(d, "target_json") else d.target) or {}
     base = target.get("base_w", {})
     current = current_book(snap.signed_w, ledger.pending_open_weights())
-    drift = approval_drift(current, base, smap)
+    drift = approval_drift(current, base, live_swing_map(smap, current))
     if drift > float(policy.risk["approval"]["drift_l1_max"]) + 1e-9:
         raise ApprovalRefused(f"book drifted {drift:.3f} since the proposal")
-    _price_guard(kept_plan, deps, imap, policy)
+    proposed_at = _as_dt(d.created_at) if getattr(d, "created_at", None) else now
+    guard = swing_entry_guard(plan, _kept_seqs(plan, dropped, swing_dropped), _swing_quotes(plan, deps),
+                              proposed_at=proposed_at, now=now, policy=policy, resize=True)
+    plan = guard.plan                             # entries resized (units only reduced), rates unchanged
+    swing_dropped.update(guard.dropped)
+    swing_dropped = swing_cascade(plan, dropped, swing_dropped)
+    kept = [leg for leg in plan.legs if leg.seq not in dropped and leg.seq not in swing_dropped]
+    if not kept:
+        reasons = "; ".join(f"leg {seq}: {why}" for seq, why in sorted({**dropped, **swing_dropped}.items()))
+        raise ApprovalRefused(f"nothing left to execute: {reasons}")
+    kept_plan = plan.model_copy(update={"legs": kept})
+    _price_guard(kept_plan, deps, imap, policy)   # core opens (swing entries: the S16 guard above)
     gross = _gross_after(current, plan, kept)
     if gross > GROSS_HARD_MAX + 1e-9:
         raise ApprovalRefused(f"post-trade gross {gross:.2f}x above the hard {GROSS_HARD_MAX:.1f}x")
 
-    _screen(kept_plan, deps, drift=drift, gross=gross, deadline=_as_dt(d.valid_until) if d.valid_until else None)
+    _screen(kept_plan, deps, drift=drift, gross=gross, deadline=_as_dt(d.valid_until) if d.valid_until else None,
+            swing=swing_screen_rows(kept_plan, ledger, guard.status))
     why_screen(d, kept_plan, deps)
-    for seq, why in sorted(dropped.items()):
+    for seq, why in sorted({**dropped, **swing_dropped}.items()):
         deps.print_fn(f"dropped leg {seq}: {why}")
     from council.operator.guards import new_nonce, typed_nonce_confirm
 
     nonce = new_nonce()
     if not typed_nonce_confirm(deps.input_fn, nonce):
         raise ApprovalRefused("nonce mismatch: nothing was sent")
-    _recheck_after_nonce(d, plan, policy, dropped, deps.now_fn())
+    after = deps.now_fn()
+    _recheck_after_nonce(d, plan, policy, dropped, after)
+    # after the nonce the swing entries can only be dropped (no rate, unit or size change)
+    again = swing_entry_guard(plan, _kept_seqs(plan, dropped, swing_dropped), _swing_quotes(plan, deps),
+                              proposed_at=proposed_at, now=after, policy=policy, resize=False)
+    for seq, why in again.dropped.items():
+        swing_dropped[seq] = f"after_nonce:{why}"
+        deps.print_fn(f"dropped leg {seq} after the nonce: {why}")
+    swing_dropped = swing_cascade(plan, dropped, swing_dropped)
+    if not [leg for leg in plan.legs if leg.seq not in dropped and leg.seq not in swing_dropped]:
+        raise ApprovalRefused("nothing left to execute after the nonce: nothing was sent")
     _transition(ledger, decision_id, "approved", "operator approved in the operator terminal")
+    _settle_swing_drops(ledger, d, plan, swing_dropped, closed_at_broker, deps, after)
+    _store_resized(ledger, decision_id, plan, guard.status)
+    dropped = {**dropped, **swing_dropped}
 
     from council.execution.executor import Executor
     from council.execution.ratelimit import TokenBucket
@@ -407,9 +459,13 @@ def market_hours_drops(plan: Any, kind: str, policy: Any, now: datetime) -> dict
 
     while changed:
         changed = False
-        if kind == "rebalance" and any(not by_seq[seq].risk_increasing for seq in dropped):
+        # swing entries are independent (§4.1 d): a dropped swing leg never drops a core leg; a
+        # dropped swing exit drops the swing entries only (swing_cascade), a core one drops them all
+        core_reducing = any(not by_seq[seq].risk_increasing and not by_seq[seq].is_swing for seq in dropped)
+        swing_exit = any(by_seq[seq].is_swing and by_seq[seq].kind in SWING_EXIT_KINDS for seq in dropped)
+        if kind == "rebalance" and (core_reducing or swing_exit):
             for leg in plan.legs:
-                if leg.risk_increasing:
+                if leg.risk_increasing and (core_reducing or leg.is_swing):
                     drop(leg, "drop rule: a risk-reducing leg of this plan was dropped")
         for leg in plan.legs:
             if any(dep in dropped for dep in leg.depends_on):
@@ -488,11 +544,260 @@ def _gross_after(current: Mapping[str, float], plan: Any, kept: list[Any]) -> fl
     return sum(abs(w) for w in after.values())
 
 
+# ------------------------------------------------------------------------------ swing book (SW-5b)
+SWING_EXIT_KINDS = ("close", "partial_close")
+CLOSED_AT_BROKER = "swing_position_closed_at_broker"
+
+
+def swing_skip_drops(plan: Any, skip: tuple[str, ...], ledger: Any) -> dict[int, str]:
+    """`--skip idea:k` / `--skip trade:<id>`: {seq: "operator_skip:<ref>"} for that swing entry and
+    its take-profit leg. An unknown ref, or a ref naming a swing exit, is refused."""
+    out: dict[int, str] = {}
+    for ref in skip:
+        ref = ref.strip()
+        trade_ids = {ref} if ref.startswith("trade:") else set()
+        if ref.startswith("idea:"):
+            try:
+                trade_ids = {t.trade_id for t in ledger.swing_trades() if t.idea_id == ref}
+            except Exception:  # noqa: BLE001 - no swing tables: nothing can match
+                trade_ids = set()
+        elif not ref.startswith("trade:"):
+            raise ApprovalRefused(f"--skip takes idea:<k> or trade:<id>, not {ref!r}")
+        legs = [leg for leg in plan.legs if leg.is_swing and leg.swing_trade_id in trade_ids]
+        if not legs:
+            raise ApprovalRefused(f"--skip {ref}: no swing leg of this decision")
+        if any(leg.kind in SWING_EXIT_KINDS for leg in legs):
+            raise ApprovalRefused(f"--skip {ref}: an exit cannot be skipped (reject the decision instead)")
+        for leg in legs:
+            out[leg.seq] = f"operator_skip:{ref}"
+    return out
+
+
+def swing_cascade(plan: Any, dropped: Mapping[int, str], swing_dropped: Mapping[int, str]) -> dict[int, str]:
+    """Close the swing drops: a leg whose dependency dropped drops; a dropped swing EXIT (not one the
+    broker already closed) drops every swing entry. Core legs are never added here."""
+    out = dict(swing_dropped)
+    changed = True
+    while changed:
+        changed = False
+        gone = {**dropped, **out}
+        exit_dropped = any(leg.is_swing and leg.kind in SWING_EXIT_KINDS and leg.seq in gone
+                           and gone[leg.seq] != CLOSED_AT_BROKER for leg in plan.legs)
+        for leg in plan.legs:
+            if leg.seq in gone or not leg.is_swing:
+                continue
+            if any(dep in gone for dep in leg.depends_on):
+                out[leg.seq] = "its dependency was dropped"
+                changed = True
+            elif exit_dropped and leg.risk_increasing:
+                out[leg.seq] = "swing_exit_dropped"
+                changed = True
+    return out
+
+
+def live_swing_map(smap: Any, current: Mapping[str, float]) -> Any:
+    """The runtime swing map restricted to the swing lines still in the book: a swing line whose trade
+    the broker closed inside the window (still `open` in the ledger) then counts as closed for the
+    drift check (§3.2)."""
+    from council.swing.book import SwingVehicleMap
+
+    held = {line for line, w in current.items() if abs(w) > 0}
+    return SwingVehicleMap(symbols_by_id=dict(smap.symbols_by_id),
+                           line_by_vehicle={k: v for k, v in smap.line_by_vehicle.items() if v in held})
+
+
+def _kept_seqs(plan: Any, *dropped_maps: Mapping[int, str]) -> set[int]:
+    gone = set().union(*(set(m) for m in dropped_maps))
+    return {leg.seq for leg in plan.legs if leg.seq not in gone}
+
+
+def _swing_quotes(plan: Any, deps: ApprovalDeps) -> dict[str, Any]:
+    """Fresh quotes of the swing entries' instruments (keyed by vehicle symbol); {} when none."""
+    from council.broker.parsing import parse_rates
+
+    entries = [leg for leg in plan.legs if leg.is_swing and leg.kind == "open" and leg.instrument_id is not None]
+    if not entries:
+        return {}
+    names = {int(leg.instrument_id): leg.symbol for leg in entries}
+    return parse_rates(deps.read.rates(sorted(names)), names)
+
+
+@dataclass
+class SwingGuardResult:
+    plan: Any
+    dropped: dict[int, str]
+    status: dict[int, str]
+
+
+def _round_trip_pct(leg: Any, policy: Any) -> float:
+    """The entry's round-trip cost in percent of the position: its per-side cost (bps of NAV over its
+    NAV share), never below the swing spread floor (`swing.costs`)."""
+    floor = 10.0
+    try:
+        from council.swing.costs import CostConfig
+
+        floor = CostConfig.from_policy(policy).spread_floor_bps
+    except Exception:  # noqa: BLE001 - the floor stays at its default
+        pass
+    dw = abs(leg.weight_after - leg.weight_before)
+    per_side = leg.cost_bps_nav / dw if dw > 0 else 0.0
+    return 2.0 * max(per_side, floor) / 100.0
+
+
+def swing_entry_guard(plan: Any, kept: set[int], quotes: Mapping[str, Any], *, proposed_at: datetime,
+                      now: datetime, policy: Any, resize: bool) -> SwingGuardResult:
+    """S16 (§4.3) for every kept swing entry, with the live rate. `resize=False` after the nonce:
+    keep or drop only. The approved stop and target rates never change."""
+    from council.swing import costs as swing_costs
+    from council.swing import rules as swing_rules
+
+    sp = policy.swing
+    lim = swing_rules.limits(sp)
+    legs = {leg.seq: leg for leg in plan.legs}
+    dropped: dict[int, str] = {}
+    status: dict[int, str] = {}
+    for leg in plan.legs:
+        if not (leg.is_swing and leg.kind == "open" and leg.seq in kept):
+            continue
+        q = quotes.get(leg.symbol)
+        live = (getattr(q, "ask", None) if leg.direction == "long" else getattr(q, "bid", None)) if q else None
+        if not live or live <= 0 or not leg.units or not leg.amount_usd or not leg.sl_rate:
+            dropped[leg.seq] = "swing_entry_no_quote" if not live else "stop_missing"
+            continue
+        planned = leg.amount_usd / leg.units
+        side = "long" if leg.direction == "long" else "short"
+        code = swing_rules.entry_guard(side=side, planned_rate=planned, stop_rate=leg.sl_rate, live_rate=live,
+                                       proposed_at=proposed_at, now=now, sp=sp)
+        sign = 1.0 if side == "long" else -1.0
+        if code is None and leg.tp_rate and (leg.tp_rate - live) * sign <= 0:
+            code = "swing_entry_ran"                      # the target is already reached
+        stop_now = abs(live - leg.sl_rate) / live
+        if code is None and leg.tp_rate:
+            target_now = abs(leg.tp_rate - live) / live
+            if not swing_costs.econ_ok(_round_trip_pct(leg, policy), stop_now * 100.0, target_now * 100.0,
+                                       min_cost_mult=lim.min_cost_mult, min_net_rr=lim.min_net_rr):
+                code = "swing_entry_S6"
+        if code is not None:
+            dropped[leg.seq] = code
+            status[leg.seq] = f"dropped:{code}"
+            continue
+        per_unit_then, per_unit_now = abs(planned - leg.sl_rate), abs(live - leg.sl_rate)
+        if resize and per_unit_now > per_unit_then * (1 + 1e-12):
+            ratio = per_unit_then / per_unit_now          # the loss at the stop stays the approved one
+            units = _floor_units(leg.units * ratio, leg.whole_units)
+            if units <= 0:
+                dropped[leg.seq] = "swing_entry_S1"
+                status[leg.seq] = "dropped:swing_entry_S1"
+                continue
+            legs[leg.seq] = _resized(leg, units, stop_now)
+            for other in plan.legs:            # its take-profit leg follows the new size
+                if other.kind == "modify_tp" and leg.seq in other.depends_on:
+                    legs[other.seq] = other.model_copy(update={"units": units})
+            status[leg.seq] = "resized"
+        else:
+            status[leg.seq] = "kept"
+    new_plan = plan.model_copy(update={"legs": [legs[leg.seq] for leg in plan.legs]})
+    return SwingGuardResult(plan=new_plan, dropped=dropped, status=status)
+
+
+def _floor_units(units: float, whole: bool) -> float:
+    if whole:
+        return float(math.floor(units + 1e-9))
+    return math.floor(units * 1e6 + 1e-6) / 1e6
+
+
+def _resized(leg: Any, units: float, stop_now: float) -> Any:
+    ratio = units / leg.units
+    return leg.model_copy(update={
+        "units": units, "amount_usd": leg.amount_usd * ratio,
+        "weight_after": leg.weight_before + (leg.weight_after - leg.weight_before) * ratio,
+        "cost_bps_nav": leg.cost_bps_nav * ratio, "carry_bps_day_nav": leg.carry_bps_day_nav * ratio,
+        "stop_distance": stop_now})
+
+
+def _store_resized(ledger: Any, decision_id: str, plan: Any, status: Mapping[int, str]) -> None:
+    """The planned rows of the entries the guard resized (units only reduced) and their take-profit
+    legs, so the executor's idempotent leg check sees the plan it is given."""
+    for leg in plan.legs:
+        opener = leg.seq if leg.kind == "open" else next(iter(leg.depends_on), None)
+        if status.get(opener or -1) != "resized" or leg.kind not in ("open", "modify_tp"):
+            continue
+        ledger.update_leg(decision_id, leg.seq, units=leg.units,
+                          **({"amount_usd": leg.amount_usd} if leg.kind == "open" else {}),
+                          detail={"weight_after": leg.weight_after, "resized_by": "entry_guard"})
+
+
+def swing_screen_rows(plan: Any, ledger: Any, status: Mapping[int, str]) -> dict[int, str]:
+    """The approval screen's swing line per swing leg (§4.1): trade ref, side, size % NAV, stop %,
+    target % and whether it goes to the broker, time-stop date, Skeptic verdict, PM votes, and the
+    entry guard's kept / resized / dropped status. Percent and codes only."""
+    out: dict[int, str] = {}
+    for leg in plan.legs:
+        if not leg.is_swing:
+            continue
+        trade = None
+        try:
+            trade = ledger.swing_trade(leg.swing_trade_id) if leg.swing_trade_id else None
+        except Exception:  # noqa: BLE001 - a display aid
+            trade = None
+        detail = (trade.detail if trade is not None else {}) or {}
+        ref = leg.swing_trade_id or "trade:?"
+        if trade is not None and trade.idea_id:
+            ref = f"{trade.idea_id} / {ref}"
+        size = abs(leg.weight_after - leg.weight_before)
+        target = "n/a"
+        if leg.tp_rate and leg.units and leg.amount_usd:
+            target = f"{abs(leg.tp_rate / (leg.amount_usd / leg.units) - 1):.1%}"
+        broker = {"body": "yes (open body)", "patch": "yes (PATCH after the fill)",
+                  "none": "no (watched)"}.get(leg.tp_mode or "", "-")
+        votes = (f"{detail.get('votes_for')}/{detail.get('replicates')}"
+                 if detail.get("votes_for") is not None else "n/a")
+        skeptic = "/".join(str(detail[k]) for k in ("skeptic", "priced_in", "regime") if detail.get(k)) or "n/a"
+        row = (f"swing {ref} {leg.direction} size {size:.1%} stop {(leg.stop_distance or 0):.1%} "
+               f"target {target} to broker: {broker} time stop {leg.time_stop_date or 'n/a'} "
+               f"skeptic {skeptic} PM {votes}")
+        if leg.kind == "open":
+            row += f" guard: {status.get(leg.seq, 'kept')}"
+        out[leg.seq] = row
+    return out
+
+
+def _settle_swing_drops(ledger: Any, d: Any, plan: Any, swing_dropped: Mapping[int, str],
+                        closed_at_broker: Mapping[int, str], deps: ApprovalDeps, now: datetime) -> None:
+    """After the approval transition: record the broker closes found inside the window, and move each
+    dropped swing entry's trade to `missed` (its idea returns to `pending`). Never raises."""
+    from council import watch
+
+    by_seq = {leg.seq: leg for leg in plan.legs}
+    for seq, trade_id in closed_at_broker.items():
+        leg = by_seq.get(seq)
+        try:
+            watch.record_swing_close(ledger, deps.read, trade_id, leg.position_id if leg else None,
+                                     now=now, state_dir=deps.state_dir)
+        except Exception as exc:  # noqa: BLE001 - the watch classifies it on its next run
+            deps.print_fn(f"swing close of {trade_id} not recorded ({type(exc).__name__}); the watch retries")
+    for seq, why in swing_dropped.items():
+        leg = by_seq.get(seq)
+        if leg is None or leg.kind != "open" or not leg.swing_trade_id:
+            continue
+        try:
+            trade = ledger.swing_trade(leg.swing_trade_id)
+            if trade is None or trade.state != "proposed":
+                continue
+            code = why.split(":")[-1] if why.startswith("after_nonce:") else why.split(":")[0]
+            ledger.transition_swing_trade(trade.trade_id, "missed", reason=code[:64], actor="operator",
+                                          cycle_id=d.cycle_id, now=now)
+            if trade.idea_id and ledger.swing_idea(trade.idea_id) is not None:
+                ledger.update_swing_idea(trade.idea_id, status="pending", now=now)
+        except Exception as exc:  # noqa: BLE001 - the cycle's settle pass moves it later
+            deps.print_fn(f"swing trade {leg.swing_trade_id} not moved to missed ({type(exc).__name__})")
+
+
 # ------------------------------------------------------------------------------ helpers
 def _price_guard(plan: Any, deps: ApprovalDeps, imap: Any, policy: Any) -> None:
     from council.broker.parsing import parse_rates
 
-    opens = [leg for leg in plan.legs if leg.kind == "open" and leg.units and leg.amount_usd]
+    opens = [leg for leg in plan.legs if leg.kind == "open" and leg.units and leg.amount_usd and not leg.is_swing]
     if not opens:
         return
     ids = [i for i in (imap.get(leg.symbol) for leg in opens) if i is not None]
@@ -512,7 +817,7 @@ def _price_guard(plan: Any, deps: ApprovalDeps, imap: Any, policy: Any) -> None:
 
 
 def _screen(plan: Any, deps: ApprovalDeps, *, drift: float, gross: float,
-            deadline: datetime | None = None) -> None:
+            deadline: datetime | None = None, swing: Mapping[int, str] | None = None) -> None:
     p = deps.print_fn
     p("leg  kind           line     vehicle   dir    lev  w before → after   stop   cost bp  risk  market  approve by")
     for leg in plan.legs:
@@ -521,6 +826,8 @@ def _screen(plan: Any, deps: ApprovalDeps, *, drift: float, gross: float,
           f"{leg.leverage:>3}  {leg.weight_before:+.3f} → {leg.weight_after:+.3f}   "
           f"{(leg.stop_distance or 0):.1%}  {leg.cost_bps_nav:>6.1f}  {'UP' if leg.risk_increasing else 'down':<4}  "
           f"{(leg.session or '-'):<6}  {until}")
+        if swing and leg.seq in swing:
+            p(f"       {swing[leg.seq]}")
     p(f"gross after {gross:.2f}x · drift since proposal {drift:.3f} · cost {plan.cost_bps_nav:.1f} bp of NAV")
     if deadline is not None:
         p(f"approval deadline {deadline:%Y-%m-%d %H:%MZ} (a leg past its own time above is dropped)")

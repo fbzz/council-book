@@ -32,6 +32,7 @@ def cand(**kw) -> R.Candidate:
 
 
 def book(**kw) -> R.BookState:
+    kw.setdefault("drawdown_from_peak", 0.0)          # SW-5b: an unknown drawdown blocks entries
     return R.BookState(today=TODAY, now=NOW, **kw)
 
 

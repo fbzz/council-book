@@ -167,13 +167,14 @@ def test_state_table_covers_every_state():
     ("exit_pending", "closed_time"), ("exit_pending", "closed_exit"), ("exit_pending", "closed_halt"),
     ("open", "closed_stop"), ("open", "closed_target"), ("partial", "closed_external"),
     ("open_tp_missing", "open"), ("exit_pending", "closed_unclassified"),
+    ("exit_pending", "open"),          # SW-5b: a rejected / expired exit never strands the trade
 ])
 def test_legal_transitions(src, dst):
     assert m.check_transition(src, dst) == dst
 
 
 @pytest.mark.parametrize("src,dst", [
-    ("proposed", "open"), ("open", "closed_time"), ("open", "proposed"), ("exit_pending", "open"),
+    ("proposed", "open"), ("open", "closed_time"), ("open", "proposed"), ("exit_pending", "missed"),
     ("closed_stop", "open"), ("closed_target", "closed_stop"), ("missed", "entry_executing"),
     ("open", "bogus"), ("bogus", "open"),
 ])

@@ -17,7 +17,7 @@ Reason codes (public; the numbers behind them are not):
 | S2 capacity | `max_open`, `max_short`, `already_open` (one swing trade per ticker: a second entry would stack past the size and loss caps) |
 | S3 weekly cap | `weekly_cap` |
 | S4 open risk | `open_risk` |
-| S5 stops | `stop_missing`, `stop_out_of_range`, `stop_inside_atr` (a stop inside 1 ATR is widened when the wider stop still passes S1/S6) |
+| S5 stops | `stop_missing`, `stop_out_of_range`, `stop_inside_atr` (a stop inside 1 ATR is widened when the wider stop still passes S1/S6), `atr_unknown` (no ATR: the 1-ATR check cannot run, so the entry drops; fail closed) |
 | S6 targets | `target_missing`, `vol_unknown`, `vol_too_high`, `target_too_small`, `target_beyond_vol`, `cost_unavailable` |
 | S7 time stop | `time_stop_out_of_range` |
 | S8 liquidity | `illiquid`, `price_too_low` |
@@ -29,7 +29,7 @@ Reason codes (public; the numbers behind them are not):
 | S14 cool-off | `cooloff` |
 | S15 brake | `swing_brake` |
 | S16 entry guard | at approval: `swing_entry_ran`, `swing_entry_stopped`, `expired` (`entry_guard`) |
-| S17 drawdown | flag `drawdown_scaled`; WARN / HALTED / FLAT -> `kill_state` |
+| S17 drawdown | flag `drawdown_scaled`; WARN / HALTED / FLAT -> `kill_state`; an unknown drawdown -> `drawdown_unknown` (fail closed: no entry) |
 | other | `setup_paper_only`, `swing_blocker`, `vehicle_owned_by_core` |
 """
 
@@ -59,6 +59,7 @@ RULE_OF: dict[str, str] = {
     "weekly_cap": "S3",
     "open_risk": "S4",
     "stop_missing": "S5", "stop_out_of_range": "S5", "stop_inside_atr": "S5",
+    "atr_unknown": "S5",
     "target_missing": "S6", "vol_unknown": "S6", "vol_too_high": "S6", "target_too_small": "S6",
     "target_beyond_vol": "S6", "cost_unavailable": "S6",
     "time_stop_out_of_range": "S7",
@@ -72,7 +73,7 @@ RULE_OF: dict[str, str] = {
     "cooloff": "S14",
     "swing_brake": "S15",
     "swing_entry_ran": "S16", "swing_entry_stopped": "S16", "expired": "S16",
-    "kill_state": "S17",
+    "kill_state": "S17", "drawdown_unknown": "S17",
     "setup_paper_only": "SB16", "swing_blocker": "R20", "vehicle_owned_by_core": "S0",
 }
 SWING_DROP_CODES: frozenset[str] = frozenset(RULE_OF)
@@ -335,6 +336,9 @@ def screen_entry(c: Candidate, book: BookState, sp: SwingPolicy, cost_fn: CostFn
         return _drop(c, "swing_blocker")
     if book.brake_on:
         return _drop(c, "swing_brake")
+    dd = book.drawdown_from_peak      # S17 cannot scale what it cannot see: no entry (fail closed)
+    if dd is None or not math.isfinite(dd):
+        return _drop(c, "drawdown_unknown")
     if c.vehicle_owned_by_core:
         return _drop(c, "vehicle_owned_by_core")
     if c.setup is not None and c.setup not in sp.setups_live:
@@ -409,7 +413,9 @@ def screen_entry(c: Candidate, book: BookState, sp: SwingPolicy, cost_fn: CostFn
     if not lim.stop_min - EPS <= stop <= stop_max + EPS:
         return _drop(c, "stop_out_of_range")
     widened = False
-    if c.atr_pct is not None and stop < lim.atr_mult * c.atr_pct - EPS:
+    if c.atr_pct is None or not math.isfinite(c.atr_pct) or c.atr_pct <= 0:
+        return _drop(c, "atr_unknown")     # the 1-ATR floor is never skipped (fail closed)
+    if stop < lim.atr_mult * c.atr_pct - EPS:
         stop = lim.atr_mult * c.atr_pct
         if stop > stop_max + EPS:
             return _drop(c, "stop_inside_atr")

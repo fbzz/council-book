@@ -283,7 +283,9 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "open": frozenset({"open_tp_missing", "exit_pending"}) | _BROKER_CLOSES,
     "partial": frozenset({"open_tp_missing", "exit_pending"}) | _BROKER_CLOSES,
     "open_tp_missing": frozenset({"open", "partial", "exit_pending"}) | _BROKER_CLOSES,
-    "exit_pending": _EXIT_CLOSES | _BROKER_CLOSES,
+    # a rejected or expired exit returns the trade to where it was: the stop is still in force and
+    # the next swing slot proposes the exit again (it must never strand the trade in exit_pending)
+    "exit_pending": _EXIT_CLOSES | _BROKER_CLOSES | {"open", "open_tp_missing", "partial"},
     **{state: frozenset() for state in TERMINAL_STATES},
 }
 

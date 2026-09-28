@@ -51,6 +51,8 @@
     "Bash(uv run council ops record-dress:*)",
     "Bash(council smoke:*)",
     "Bash(uv run council smoke:*)",
+    "Bash(council swing:*)",
+    "Bash(uv run council swing:*)",
     "Bash(council account:*)",
     "Bash(uv run council account:*)",
     "Bash(council instruments resolve:*)",

@@ -36,6 +36,18 @@ Rules (every one is tested):
   smoke position is open (K20), and the K14 / K20 / S3 codes.
 Output is value-free: codes, steps, symbols and percentages of NAV; never an amount, an id of the
 broker or a token.
+
+Swing-book steps (swing-book.md rev 2, SW-5; Track S, operator-approved like S1-S6):
+- S7 opens a REAL stock long with its stop-loss AND a take-profit in the open body. All green proves
+  `stock_fractional` and `stock_real_long`; the take-profit is checked separately on the live
+  position: kept -> `tp_on_open` and `tp_min_pct` (the design's `tp_on_open_or_patch`); not kept ->
+  reported, and the optional S7t PATCHes the take-profit (resending the stop), proving `tp_min_pct`
+  (the planner then uses the ledgered `modify_tp` leg). S7p partially closes, S7x fully closes and
+  proves `closed_trade_route` when the closed-trade record is readable with its close rate.
+- S8 opens a 1x stock CFD SHORT with a stop-loss and a take-profit (`stock_cfd_short`,
+  `cfd_short_mirror`: the mirror attestations of S8 are the mirror's short behaviour). S8x closes it
+  after at least one overnight (refused on the same US session) and proves `stock_short_carry` when
+  the closed-trade record reports the carry fee (its sign is then known) and `closed_trade_route`.
 """
 
 from __future__ import annotations
@@ -93,6 +105,9 @@ class Step:
     proves: str | None = None            # the capability verify writes
     optional: bool = False
     track: str = "C"                     # C = token day, S = Track S day
+    tp_distance: float | None = None     # opens / set_tp: a take-profit this far from the price
+    also_proves: tuple[str, ...] = ()    # further capabilities (each with its own check, see verify)
+    overnight: bool = False              # closes: refused on the host open's US session
 
     @property
     def is_open(self) -> bool:
@@ -117,10 +132,20 @@ STEPS: dict[str, Step] = {s.code: s for s in (
     Step("S6b", "open", "fx24x5", ("EURUSD",), settlement="cfd", leverage=2, stop_distance=0.03,
          proves="cfd_leverage", optional=True),
     Step("S6bx", "close", "fx24x5", host="S6b", optional=True),
-    Step("S7", "open", "us", _STOCKS, stop_distance=0.15, split=2, proves="stock_fractional", track="S"),
+    Step("S7", "open", "us", _STOCKS, stop_distance=0.10, split=2, proves="stock_fractional", track="S",
+         tp_distance=0.25, also_proves=("stock_real_long", "tp_on_open", "tp_min_pct")),
+    Step("S7t", "set_tp", "us", host="S7", track="S", tp_distance=0.25, proves="tp_min_pct", optional=True),
     Step("S7p", "partial_close", "us", host="S7", track="S"),
-    Step("S7x", "close", "us", host="S7", track="S"),
+    Step("S7x", "close", "us", host="S7", track="S", proves="closed_trade_route"),
+    Step("S8", "open", "us", _STOCKS, settlement="cfd", direction="short", stop_distance=0.06, track="S",
+         tp_distance=0.15, proves="stock_cfd_short", also_proves=("cfd_short_mirror",)),
+    Step("S8x", "close", "us", host="S8", track="S", overnight=True, proves="stock_short_carry",
+         also_proves=("closed_trade_route",)),
 )}
+# capabilities a step writes only when their own (non-blocking) check reports them seen
+CONDITIONAL_PROOF = {"tp_on_open": "tp_on_open_kept", "closed_trade_route": "closed_trade_record_seen",
+                     "stock_short_carry": "short_carry_seen"}
+S7_TP_CHECK = "tp_on_open_kept"
 TOKEN_DAY_STEPS = tuple(c for c, s in STEPS.items() if s.track == "C" and not s.optional)
 
 
@@ -244,15 +269,12 @@ class _Reads:
 def _read(deps: SmokeDeps, symbols: Sequence[str], held_ids: Sequence[int], now: datetime) -> _Reads:
     from council.broker.instruments import InstrumentMap
     from council.broker.parsing import parse_rates
-    from council.execution.planner import vehicle_to_line
     from council.operator.onboarding import eligibility_batch
-    from council.risk.exposure import snapshot_from_pnl
 
     if deps.read is None:
         raise SmokeRefused("no_read_client: the READ token is needed")
     imap = InstrumentMap.load(deps.state_dir / "instruments.json")
-    snapshot = snapshot_from_pnl(deps.read.pnl(), vehicle_by_instrument=imap.symbols_by_id(),
-                                 line_by_vehicle=vehicle_to_line(deps.policy.universe), now=now)
+    snapshot = swing_aware_snapshot(deps, imap, deps.read.pnl(), now=now)
     nav = float(snapshot.equity_usd)
     if not (math.isfinite(nav) and nav > 0):
         raise SmokeRefused("nav_unavailable")
@@ -263,6 +285,18 @@ def _read(deps: SmokeDeps, symbols: Sequence[str], held_ids: Sequence[int], now:
     by_id = {iid: sym for sym, iid in found.items()}
     quotes = parse_rates(deps.read.rates(sorted(set(found.values()))), by_id.get) if found else {}
     return _Reads(snapshot, nav, rows, raw, quotes, found)
+
+
+def swing_aware_snapshot(deps: SmokeDeps, imap: Any, payload: Any, *, now: datetime) -> Any:
+    """The READ snapshot with the runtime swing map merged in (swing-book §1.9): a Track S stock that
+    no universe line owns, but a swing trade does, keeps its symbol and line (not UNMAPPED_<id>)."""
+    from council.execution.planner import vehicle_to_line
+    from council.risk.exposure import snapshot_from_pnl
+    from council.swing.book import swing_vehicle_map
+
+    smap = swing_vehicle_map(deps.ledger, deps.policy)
+    return snapshot_from_pnl(payload, vehicle_by_instrument=smap.merged_symbols(imap.symbols_by_id()),
+                             line_by_vehicle=smap.merged_lines(vehicle_to_line(deps.policy.universe)), now=now)
 
 
 def _economics(deps: SmokeDeps, nav: float) -> Any:
@@ -321,7 +355,6 @@ def size_open(step: Step, rows: Mapping[str, Any], quotes: Mapping[str, Any], *,
 def build_ticket(step_code: str, deps: SmokeDeps) -> tuple[Ticket, _Reads, Step]:
     """Guards, refusals, fresh reads and the plan (nothing is written)."""
     from council.execution.planner import SmokeIntent, SmokePlanError, build_smoke_plan
-    from council.operator.approve import current_book
 
     run_guards(deps)
     step = step_of(step_code)
@@ -347,19 +380,24 @@ def build_ticket(step_code: str, deps: SmokeDeps) -> tuple[Ticket, _Reads, Step]
                                choice=sized.choice, units=sized.units, stop_distance=step.stop_distance)]
     else:
         from council.broker.instruments import InstrumentMap
-        from council.execution.planner import vehicle_to_line
-        from council.risk.exposure import snapshot_from_pnl
 
         if deps.read is None:
             raise SmokeRefused("no_read_client: the READ token is needed")
         imap = InstrumentMap.load(deps.state_dir / "instruments.json")
-        snap = snapshot_from_pnl(deps.read.pnl(), vehicle_by_instrument=imap.symbols_by_id(),
-                                 line_by_vehicle=vehicle_to_line(deps.policy.universe), now=now)
+        snap = swing_aware_snapshot(deps, imap, deps.read.pnl(), now=now)
         pos = _host_position(deps, step, snap)
-        reads = _read(deps, [], [pos.instrument_id], now)
+        if step.overnight:
+            _refuse_same_session(deps, step, pos.position_id, now)
+        # by its symbol too, so the rows and quotes carry the position's name (a Track S stock that
+        # no universe line owns would otherwise come back as UNMAPPED_<id>)
+        named = [] if pos.symbol.startswith("UNMAPPED_") else [pos.symbol]
+        reads = _read(deps, named, [pos.instrument_id], now)
         econ = _economics(deps, reads.nav)
         live = {p.position_id: p for p in reads.snapshot.positions}
         pos = live.get(pos.position_id, pos)
+        if step.action == "set_tp":
+            plan = _set_tp_plan(step, pos, reads, deps)
+            return _ticket(step, plan, reads, deps, now), reads, step
         intents = [_host_intent(step, pos, reads, econ)]
     try:
         plan = build_smoke_plan(intents=intents, snapshot=reads.snapshot, quotes=reads.quotes,
@@ -367,6 +405,14 @@ def build_ticket(step_code: str, deps: SmokeDeps) -> tuple[Ticket, _Reads, Step]
                                 economics=econ)
     except SmokePlanError as exc:
         raise SmokeRefused(f"smoke_plan_refused: {exc}") from exc
+    if step.is_open and step.tp_distance is not None:
+        plan = with_take_profit(plan, step.tp_distance)
+    return _ticket(step, plan, reads, deps, now), reads, step
+
+
+def _ticket(step: Step, plan: Any, reads: _Reads, deps: SmokeDeps, now: datetime) -> Ticket:
+    from council.operator.approve import current_book
+
     by_line = deps.policy.universe.by_symbol()
     legs = []
     for leg in plan.legs:
@@ -380,7 +426,57 @@ def build_ticket(step_code: str, deps: SmokeDeps) -> tuple[Ticket, _Reads, Step]
     base = current_book(reads.snapshot.signed_w, deps.ledger.pending_open_weights())
     ticket.requests = [request_preview(leg, reads.raw.get(leg.symbol)) for leg in plan.legs]
     ticket.base_w = base
-    return ticket, reads, step
+    return ticket
+
+
+def with_take_profit(plan: Any, distance: float) -> Any:
+    """S7 / S8: every open leg carries a take-profit `distance` from its planned price, sent in the
+    open body (`tp_mode="body"`); the stop-loss is unchanged."""
+    legs = []
+    for leg in plan.legs:
+        if leg.kind == "open" and leg.units and leg.amount_usd:
+            price = leg.amount_usd / leg.units
+            rate = price * (1 + distance) if leg.direction == "long" else price * (1 - distance)
+            leg = leg.model_copy(update={"tp_rate": rate, "tp_mode": "body"})
+        legs.append(leg)
+    return plan.model_copy(update={"legs": legs})
+
+
+def _set_tp_plan(step: Step, pos: Any, reads: _Reads, deps: SmokeDeps) -> Any:
+    """S7t: one `set_tp` leg on S7's position: the take-profit by PATCH, the current stop resent."""
+    from council.execution.planner import bid_ask, smoke_line
+    from council.models.plan import Leg, Plan
+
+    quote = bid_ask(reads.quotes.get(pos.symbol))
+    if quote is None:
+        raise SmokeRefused(f"no_quote: {pos.symbol}")
+    ref = quote[0] if pos.is_buy else quote[1]
+    dist = float(step.tp_distance or 0.0)
+    rate = ref * (1 + dist) if pos.is_buy else ref * (1 - dist)
+    snap = reads.snapshot
+    exposure = abs(float(getattr(pos, "exposure_usd", 0.0) or pos.units * ref))
+    w = (exposure if pos.is_buy else -exposure) / reads.nav
+    line = smoke_line(deps.policy.universe, pos.symbol, pos.instrument_id)
+    leg = Leg(seq=1, kind="set_tp", symbol=pos.symbol, line=line, instrument_id=pos.instrument_id,
+              direction="long" if pos.is_buy else "short", settlement=pos.settlement, leverage=pos.leverage,
+              weight_before=w, weight_after=w, risk_increasing=False, units=pos.units,
+              reason=f"smoke {step.code}: take-profit by PATCH on {step.host}'s position (stop resent)",
+              position_id=pos.position_id, sl_rate=pos.sl_rate, tp_rate=rate)
+    return Plan(legs=[leg], gross_before=snap.gross, gross_after=snap.gross, net_before=snap.net,
+                net_after=snap.net, cost_bps_nav=0.0, carry_bps_day_nav=0.0)
+
+
+def _refuse_same_session(deps: SmokeDeps, step: Step, position_id: int, now: datetime) -> None:
+    """S8x: the short must have been held over at least one US overnight."""
+    host = dict(step_positions(deps.ledger).get(step.host or "", []))
+    decision_id = host.get(position_id)
+    opened = None
+    if decision_id is not None:
+        opened = next((r.resolved_at for r in deps.ledger.legs(decision_id)
+                       if r.kind == "open" and r.resolved_at is not None), None)
+    if opened is None or opened.astimezone(clock.NEW_YORK).date() >= now.astimezone(clock.NEW_YORK).date():
+        raise SmokeRefused(f"held_overnight_missing: {step.code} closes {step.host}'s short only after "
+                           "one US overnight")
 
 
 def _host_intent(step: Step, pos: Any, reads: _Reads, econ: Any) -> Any:
@@ -528,8 +624,6 @@ def _raw_positions(payload: Any) -> dict[int, Mapping[str, Any]]:
 def automatic_checks(decision_id: str, deps: SmokeDeps) -> list[Check]:
     """verify's automatic checks for one smoke decision (READ only)."""
     from council.broker.instruments import InstrumentMap
-    from council.execution.planner import vehicle_to_line
-    from council.risk.exposure import snapshot_from_pnl
 
     ledger = deps.ledger
     d = ledger.get_decision(decision_id)
@@ -546,10 +640,10 @@ def automatic_checks(decision_id: str, deps: SmokeDeps) -> list[Check]:
         raise SmokeRefused("no_read_client: the READ token is needed")
     payload = deps.read.pnl()
     imap = InstrumentMap.load(deps.state_dir / "instruments.json")
-    snap = snapshot_from_pnl(payload, vehicle_by_instrument=imap.symbols_by_id(),
-                             line_by_vehicle=vehicle_to_line(deps.policy.universe), now=deps.now_fn())
+    snap = swing_aware_snapshot(deps, imap, payload, now=deps.now_fn())
     live = {p.position_id: p for p in snap.positions}
     raw = _raw_positions(payload)
+    planned = _planned_legs(d)
     for r in legs:
         if r.kind == "open":
             sent_units = r.detail.get("units_sent")
@@ -574,6 +668,13 @@ def automatic_checks(decision_id: str, deps: SmokeDeps) -> list[Check]:
                 fees = raw.get(pid or -1, {}).get("totalfees")
                 seen = isinstance(fees, int | float) and not isinstance(fees, bool) and fees != 0
                 checks.append(Check("fee_virtual_seen" if seen else "fee_virtual_not_seen", True, "reported"))
+                tp = getattr(planned.get(r.seq), "tp_rate", None)
+                if tp:                  # S7 / S8: reported; a kept take-profit proves tp_on_open
+                    kept = pos is not None and _close(getattr(pos, "tp_rate", None), tp, SL_TOLERANCE)
+                    checks.append(Check(S7_TP_CHECK if kept else "tp_on_open_not_kept", True,
+                                        "take-profit on the position" if kept else "reported: S7t PATCHes it"))
+                    checks.append(Check(f"leg{r.seq}_tp_min_respected", kept or r.state == "filled",
+                                        "the open with a take-profit was accepted"))
         elif r.kind == "modify_sl":
             pos = live.get(r.position_id or -1)
             checks.append(Check(f"leg{r.seq}_sl_moved", r.state == "filled" and pos is not None
@@ -585,10 +686,60 @@ def automatic_checks(decision_id: str, deps: SmokeDeps) -> list[Check]:
             checks.append(Check(f"leg{r.seq}_remainder_units", r.state == "filled" and pos is not None
                                 and _close(pos.units, expect, UNITS_TOLERANCE), "reconcile drift"))
             checks.append(Check(f"leg{r.seq}_sl_kept", pos is not None and bool(pos.sl_rate), "stop-loss"))
+        elif r.kind == "set_tp":
+            pos = live.get(r.position_id or -1)
+            tp = getattr(planned.get(r.seq), "tp_rate", None)
+            checks.append(Check(f"leg{r.seq}_tp_patched", r.state == "filled" and pos is not None
+                                and _close(getattr(pos, "tp_rate", None), tp, SL_TOLERANCE), "take-profit rate"))
+            checks.append(Check(f"leg{r.seq}_sl_resent", pos is not None
+                                and _close(pos.sl_rate, r.sl_rate, SL_TOLERANCE), "stop-loss kept"))
         elif r.kind == "close":
             checks.append(Check(f"leg{r.seq}_flat", r.state == "filled" and (r.position_id not in live),
                                 "reconcile drift"))
+            checks += _closed_trade_checks(deps, r.position_id)
     return checks
+
+
+def _planned_legs(d: Any) -> dict[int, Any]:
+    """{seq: planned Leg} of the ticket's private plan ({} when unreadable)."""
+    from council.models.plan import Plan
+
+    try:
+        raw = d.plan_json if hasattr(d, "plan_json") else d.plan
+        plan = Plan.model_validate(json.loads(raw) if isinstance(raw, str) else raw)
+    except Exception:  # noqa: BLE001 - a display aid: missing plan -> no take-profit checks
+        return {}
+    return {leg.seq: leg for leg in plan.legs}
+
+
+def closed_trade_record(read: Any, position_id: int | None) -> Mapping[str, Any] | None:
+    """The broker's closed-trade record of a position, through the READ client's `closed_trade`
+    route when it has one (not modelled until `closed_trade_route` is proven); None otherwise."""
+    fn = getattr(read, "closed_trade", None)
+    if fn is None or position_id is None:
+        return None
+    try:
+        rec = fn(position_id)
+    except Exception:  # noqa: BLE001 - a read failure is "not seen", never a crash
+        return None
+    return rec if isinstance(rec, Mapping) else None
+
+
+def _closed_trade_checks(deps: SmokeDeps, position_id: int | None) -> list[Check]:
+    """Reported (non-blocking): the closed-trade record with its close rate (-> closed_trade_route)
+    and, for a short held overnight, a numeric carry fee (-> stock_short_carry)."""
+    rec = closed_trade_record(deps.read, position_id)
+    rate = rec.get("closeRate") if rec else None
+    seen = isinstance(rate, int | float) and not isinstance(rate, bool) and rate > 0
+    out = [Check("closed_trade_record_seen" if seen else "closed_trade_record_missing", True, "reported")]
+    carry = None
+    for key in ("overnightFees", "overnightFee", "totalFees"):
+        value = (rec or {}).get(key)
+        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
+            carry = value
+            break
+    out.append(Check("short_carry_seen" if carry is not None else "short_carry_missing", True, "reported"))
+    return out
 
 
 def verify(decision_id: str, deps: SmokeDeps) -> list[Check]:
@@ -604,12 +755,21 @@ def verify(decision_id: str, deps: SmokeDeps) -> list[Check]:
     d = deps.ledger.get_decision(decision_id)
     step = step_of(str((d.target or {}).get(STEP_KEY, "")))
     ok = all(c.ok for c in checks)
-    if ok and step.proves:
-        capabilities.write_capability(step.proves, decision_id=decision_id, step=step.code,
-                                      state_dir=deps.state_dir, now=deps.now_fn(),
-                                      assert_operator=deps.guard_fn, assert_release=deps.release_fn)
-        p(f"capability {step.proves}: automatic checks recorded; it counts once both mirror checks "
-          "are attested")
+    seen = {c.code for c in checks}
+    proven = [cap for cap in (step.proves, *step.also_proves) if cap
+              and (cap not in CONDITIONAL_PROOF or CONDITIONAL_PROOF[cap] in seen)]
+    if step.code == "S7" and S7_TP_CHECK not in seen:
+        proven = [cap for cap in proven if cap != "tp_min_pct"]     # S7t proves it by PATCH
+    if ok:
+        for cap in proven:
+            capabilities.write_capability(cap, decision_id=decision_id, step=step.code,
+                                          state_dir=deps.state_dir, now=deps.now_fn(),
+                                          assert_operator=deps.guard_fn, assert_release=deps.release_fn)
+            p(f"capability {cap}: automatic checks recorded; it counts once both mirror checks "
+              "are attested")
+        for cap in (step.proves, *step.also_proves):
+            if cap and cap not in proven:
+                p(f"capability {cap}: not seen on this ticket, stays unproven")
     elif not ok:
         p(f"automatic checks failed: {step.proves or step.code} stays unproven")
     p("manual checklist (main account):")
@@ -635,12 +795,9 @@ def status(deps: SmokeDeps) -> Status:
     live = None
     if deps.read is not None:
         from council.broker.instruments import InstrumentMap
-        from council.execution.planner import vehicle_to_line
-        from council.risk.exposure import snapshot_from_pnl
 
         imap = InstrumentMap.load(deps.state_dir / "instruments.json")
-        snap = snapshot_from_pnl(deps.read.pnl(), vehicle_by_instrument=imap.symbols_by_id(),
-                                 line_by_vehicle=vehicle_to_line(deps.policy.universe), now=deps.now_fn())
+        snap = swing_aware_snapshot(deps, imap, deps.read.pnl(), now=deps.now_fn())
         live = [p.position_id for p in snap.positions]
     latest: dict[str, Any] = {}
     for d in sorted(smoke_decisions(deps.ledger), key=lambda d: d.created_at):
@@ -658,6 +815,10 @@ def status(deps: SmokeDeps) -> Status:
         "S3": {"state": "green" if caps.has("stock_fractional") else "amber",
                "code": "stock_fractional_verified" if caps.has("stock_fractional") else "s7_not_run"},
     }
+    swing_missing = [c for c in capabilities.SWING_CAPABILITIES if not caps.has(c)]
+    gates["SW"] = {"state": "green" if not swing_missing else "amber",   # S7/S7t/S7x/S8/S8x (swing book)
+                   "code": "swing_capabilities_verified" if not swing_missing
+                   else f"capability_missing:{swing_missing[0]}"}
     p = deps.print_fn
     for code, did, state in rows:
         p(f"{code:<5} {state:<20} {did}")

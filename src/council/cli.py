@@ -44,6 +44,9 @@ app.add_typer(account, name="account")
 app.add_typer(stocks, name="stocks")
 app.add_typer(instruments, name="instruments")
 app.add_typer(smoke, name="smoke")
+swing = typer.Typer(add_completion=False, no_args_is_help=True,
+                    help="The swing book: status (operator terminal, ledger only; nothing is sent).")
+app.add_typer(swing, name="swing")
 rehearse = typer.Typer(add_completion=False, no_args_is_help=True,
                        help="Onboarding rehearsal against the fake broker (dev role; marked sandbox only).")
 app.add_typer(rehearse, name="rehearse")
@@ -281,7 +284,10 @@ def show(
 
 @app.command()
 @operator_command("approve", pinned=True)
-def approve(decision_id: str) -> None:
+def approve(decision_id: str,
+            skip: list[str] = typer.Option(None, "--skip",
+                                           help="Drop a swing entry by its ref (idea:<k> or trade:<id>); repeatable.")
+            ) -> None:
     """Approve and execute a proposal (operator terminal, installed release only)."""
     from council.context import build_context, read_broker
     from council.operator.approve import ApprovalDeps, write_client_factory
@@ -299,7 +305,7 @@ def approve(decision_id: str) -> None:
     deps = ApprovalDeps(ledger=ctx.ledger, policy=ctx.policy, read=read,
                         write_factory=write_client_factory(settings), state_dir=ctx.state_dir,
                         print_fn=typer.echo)
-    do_approve(decision_id, deps)
+    do_approve(decision_id, deps, skip=tuple(skip or ()))
 
 
 @app.command()
@@ -941,21 +947,16 @@ def _read_client(required: bool):
 def stocks_rank(
     asof: str = typer.Option(None, "--asof", help="Rank date YYYY-MM-DD (default: the latest rule anchor)."),
     no_eligibility: bool = typer.Option(False, "--no-eligibility",
-                                        help="Skip the broker gate (lines stay unchecked; live runs refuse them)."),
-    policy_overlay: Path = typer.Option(None, "--policy-overlay",
-                                        help="Directory of go-live drafts (e.g. the re-based universe.yaml) "
-                                             "validated on top of the committed policy."),
-    ai_list: Path = typer.Option(None, "--ai-list", help="AI-adjacent list when policy/ has none yet."),
-    allow_off_anchor: bool = typer.Option(False, "--allow-off-anchor", help="Rank on a non-anchor date."),
-    no_prefetch: bool = typer.Option(False, "--no-prefetch", help="Skip the history prefetch for new names."),
+                                        help="Accepted for compatibility: the benchmark never reads the broker."),
 ) -> None:
-    """Rank the universe and write a proposed stock-sleeve.yaml under the state dir (never policy/)."""
+    """Rank the SQ-8 paper benchmark (tracked, never traded)."""
     from datetime import date
 
-    if not no_eligibility:                  # the broker gate reads the READ token
+    if not no_eligibility:                  # kept: the retargeted rank is still an operator command
         require_operator("stocks rank", pinned=OPERATOR_COMMANDS["stocks rank"])
 
     from council import paths
+    from council.benchmark import sq8
     from council.clock import utcnow
     from council.settings import Settings
     from council.stocks import commands, sleeve_file
@@ -964,13 +965,34 @@ def stocks_rank(
 
     def body():
         root = paths.state_dir()
-        services = commands.live_rank_services(root, Settings.from_env(), eligibility=not no_eligibility,
-                                               prefetch=not no_prefetch)
-        return commands.run_rank(day, services, state_dir=root, repo=commands.default_repo(),
-                                 eligibility=not no_eligibility, overlay_dir=policy_overlay, ai_list=ai_list,
-                                 allow_off_anchor=allow_off_anchor)
+        services = commands.live_rank_services(root, Settings.from_env(), eligibility=False, prefetch=False)
+        return sq8.run_benchmark_rank(day, services.build_inputs, state_dir=root)
 
-    _stocks_outcome(_stocks_run(body))
+    try:
+        result = _stocks_run(body)
+    except sq8.BenchmarkError as exc:
+        _refuse(str(exc))
+    for text in result.report_lines():
+        typer.echo(text)
+
+
+@swing.command("status")
+@operator_command("swing status", pinned=False)
+def swing_status_cmd(
+    asof: str = typer.Option(None, "--asof", help="Status date YYYY-MM-DD (default: today, UTC)."),
+) -> None:
+    """The swing book on one screen (private: open trades, missing take-profits, waiting ideas,
+    the weekly counter, blockers, the Skeptic test, the pause rule and the SQ-8 paper benchmark)."""
+    from datetime import date
+
+    from council.clock import utcnow
+    from council.swing.status import swing_status
+
+    now = utcnow()
+    _root, ledger = _ledger_only()          # ledger only: no policy load, no broker, nothing sent
+    today = date.fromisoformat(asof) if asof else now.date()
+    for text in swing_status(ledger, today=today, now=now).lines():
+        typer.echo(text)
 
 
 @stocks.command("onboard")

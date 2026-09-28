@@ -223,7 +223,8 @@ def _swing_detail(leg: Leg) -> dict[str, Any]:
     ledger reads `sleeve` / `swing_trade_id` to scope a hold, and `record_swing_fill` reads
     `tp_rate` / `time_stop_date`. Core legs get none of these keys."""
     if not (leg.sleeve == "swing" or leg.swing_trade_id):
-        return {}
+        # a smoke ticket's take-profit (S7 / S7t / S8, SW-5b) rides on a core-marked leg
+        return {"tp_rate": leg.tp_rate, "tp_mode": leg.tp_mode} if leg.tp_rate else {}
     return {"sleeve": "swing", "swing_trade_id": leg.swing_trade_id, "tp_rate": leg.tp_rate,
             "tp_mode": leg.tp_mode, "time_stop_date": leg.time_stop_date}
 
@@ -334,6 +335,7 @@ def _leg(row: sqlite3.Row) -> LegRow:
 _LEG_FIELDS = frozenset({
     "request_id", "attempt", "order_id", "position_ids", "broker_status", "error",
     "submitted_at", "resolved_at", "detail", "units",
+    "amount_usd",       # SW-5b: the approval's swing entry guard may only REDUCE a planned entry's size
 })
 
 
@@ -1539,7 +1541,8 @@ class Ledger:
             ids = _merge_ids(json.loads(leg["position_ids_json"] or "[]"),
                              [leg["position_id"]] if leg["position_id"] is not None else [])
             units = detail.get("units_filled", leg["units"])
-            open_rate = detail.get("fill_rate", detail.get("avg_price"))
+            # the executor records the average fill as `fill_price` (older rows: fill_rate / avg_price)
+            open_rate = detail.get("fill_price", detail.get("fill_rate", detail.get("avg_price")))
             if row is None:
                 if not trade_id:
                     raise LedgerError(f"leg {decision_id}:{seq} is not a swing leg (no trade, no swing_trade_id)")

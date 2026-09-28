@@ -60,7 +60,21 @@ SMOKE_STEPS: dict[str, tuple[str, ...]] = {
     "cfd_short": ("S6",),
     "cfd_leverage": ("S6b",),
     "stock_fractional": ("S7",),
+    # swing book (swing-book.md rev 2, SW-5): every one stays false until its Track S smoke step is
+    # verified and both mirror checks are attested. `tp_on_open` is the design's
+    # `tp_on_open_or_patch`: it is proven when S7's open body carried the take-profit and the position
+    # kept it (the planner then sends it in the body); without it the planner uses the ledgered
+    # `modify_tp` PATCH, whose route S7t proves together with the broker minimum (`tp_min_pct`).
+    "stock_real_long": ("S7",),
+    "tp_on_open": ("S7",),
+    "tp_min_pct": ("S7", "S7t"),
+    "stock_cfd_short": ("S8",),
+    "cfd_short_mirror": ("S8",),
+    "stock_short_carry": ("S8x",),
+    "closed_trade_route": ("S7x", "S8x"),
 }
+SWING_CAPABILITIES: tuple[str, ...] = ("stock_real_long", "tp_on_open", "tp_min_pct", "stock_cfd_short",
+                                       "cfd_short_mirror", "stock_short_carry", "closed_trade_route")
 
 
 @dataclass(frozen=True)

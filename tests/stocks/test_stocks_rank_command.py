@@ -350,18 +350,8 @@ def _cli(monkeypatch, env: Env, args: list[str]):
     return CliRunner().invoke(app, ["stocks", "rank", *args])
 
 
-def test_the_cli_exit_codes(tmp_path, monkeypatch):
-    good = Env(tmp_path / "good")
-    res = _cli(monkeypatch, good, ["--asof", "2026-08-20"])
-    assert res.exit_code == 0, res.output
-    assert "VALID" in res.output and f"git tag stocks-{Q}" in res.output
-    bad = Env(tmp_path / "bad", rebased=False)
-    res = _cli(monkeypatch, bad, ["--asof", "2026-08-20"])
-    assert res.exit_code == 1 and "REJECTED" in res.output and "reference_gross_max" in res.output
-    res = _cli(monkeypatch, bad, ["--asof", "2026-08-20", "--policy-overlay", str(cs.rebased_overlay(tmp_path))])
-    assert res.exit_code == 0, res.output
-    res = _cli(monkeypatch, good, ["--asof", "2026-08-21"])
-    assert res.exit_code == 2 and "refused:" in res.output
+# SW-5b retargeted `council stocks rank` to the SQ-8 paper benchmark (swing-book.md §6.2): its CLI
+# is tested in tests/swing/test_sw5b_cli.py; `commands.run_rank` above keeps its own tests.
 
 
 def test_the_cli_lists_the_five_commands():

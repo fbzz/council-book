@@ -27,8 +27,8 @@ from pydantic import Field
 from council.publish.journal import JOURNAL
 from council.publish.public_models import Hex64, PublicModel
 
-SMOKE_STEP_PATTERN = r"^S[1-7][a-z]{0,2}$"
-SMOKE_ID_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{4}Z-smoke-S[1-7][a-z]{0,2}$"
+SMOKE_STEP_PATTERN = r"^S[1-8][a-z]{0,2}$"
+SMOKE_ID_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{4}Z-smoke-S[1-8][a-z]{0,2}$"
 SMOKE_PATH = f"{JOURNAL}/ops/smoke.jsonl"
 SmokeState = Literal["proposed", "completed", "blocked", "rejected"]
 SMOKE_STATES: tuple[str, ...] = ("proposed", "completed", "blocked", "rejected")

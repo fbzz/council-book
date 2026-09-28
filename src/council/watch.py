@@ -32,6 +32,17 @@
     also when the broker read fails or no broker is connected. A timed-out hold keeps its blocker
     scope (a stock-only hold still holds only the satellite); a broken fill holds the whole book.
     The execution record of a waiting decision is published only once it is resolved.
+  - swing book (swing-book.md rev 2, §1.8, §1.9; SW-5): FLAGS ONLY, it never creates an exit. Each
+    swing position's observation keeps its stop and take-profit rates and the last bid (long) or
+    ask (short). A swing position that left the book is classified from the broker's closed-trade
+    record (`closed_trade_route`, once proven) by its actual close rate: `closed_target`,
+    `closed_stop` or `closed_external`; no record -> `closed_unclassified` with an URGENT operator
+    alert, never a guessed "stop hit" and never an R4d cool-off. A long closed at its take-profit
+    raises no URGENT alert. The trade's percent-only outcome goes into its detail first
+    (`trade_outcome_detail`). Open trades raise `swing_events` flags once a day each:
+    `time_stop_due`, `earnings_exit_due` (a confirmed date in the trade's detail),
+    `target_reached_unplaced` (the target never reached the broker and the price is through it);
+    the cycle turns them into exit legs at the next swing slot.
 """
 
 from __future__ import annotations
@@ -370,6 +381,10 @@ def _broker_checks(ctx: CycleContext, now: datetime) -> list[str]:
     prev = ledger.get_runtime("kill_state", "NORMAL")
     snapshot, kill_state, _ = _snapshot_and_kill(ctx, now)
     alerts += _stop_hits(ctx, snapshot, now)
+    try:
+        alerts += swing_flags(ctx.ledger, ctx.policy, snapshot, now)
+    except Exception as exc:  # noqa: BLE001 - a flag failure never stops the watch
+        alerts.append(f"swing_flags_error:{type(exc).__name__}")
     missing = [p.symbol for p in snapshot.positions if p.sl_rate in (None, 0)]
     if missing:
         alerts.append(f"URGENT positions without a stop-loss: {', '.join(sorted(set(missing)))}")
@@ -478,16 +493,198 @@ def _stop_hits(ctx: CycleContext, snapshot: Any, now: datetime) -> list[str]:
                                                      swing_map=swing_vehicle_map(ledger, ctx.policy))
     alerts = []
     for v in vanished:
-        if v.outcome == corporate.SWING_CLOSED:
-            alerts.append(f"swing position closed at the broker: {v.line}")   # never a core R4d stop hit
+        if v.outcome == corporate.SWING_CLOSED:   # never a core R4d stop hit
+            alerts += _swing_closed(ctx, v, live, now)
             continue
         if v.outcome == corporate.STOP_HIT:
             ledger.record_stop_hit(line=v.line, symbol=v.symbol, position_id=v.position_id, at=now)
             alerts.append(f"URGENT stop-loss hit on {v.line}")
     alerts += corporate.vanished_alerts(vanished)
-    ledger.set_runtime("watch_positions", {
-        str(pid): {"symbol": p.symbol, "sl_rate": p.sl_rate, "bid": p.close_rate if p.is_buy else None}
-        for pid, p in live.items()})
+    ledger.set_runtime("watch_positions", {str(pid): observation(p) for pid, p in live.items()})
+    return alerts
+
+
+def observation(p: Any) -> dict[str, Any]:
+    """The PRIVATE per-position observation: stop and take-profit rates, and the quote a close would
+    fill at: the bid for a long, the ask for a short (`close_rate` is the side's closing quote)."""
+    out = {"symbol": p.symbol, "sl_rate": p.sl_rate, "bid": p.close_rate if p.is_buy else None}
+    if getattr(p, "tp_rate", None):
+        out["tp_rate"] = p.tp_rate
+    if not p.is_buy:
+        out["ask"] = p.close_rate
+    return out
+
+
+# ------------------------------------------------------------------------------ swing book (SW-5b)
+SWING_CLOSE_TOL = 0.005        # a close within 0.5% of the stop / target rate is that exit
+DECLARED_COST_PCT_PER_LEG = 1.25
+
+
+def closed_trade_route_ok(state_dir: Any) -> bool:
+    """The closed-trade READ route is used only once its smoke step proved it (`closed_trade_route`)."""
+    try:
+        from council.operator import capabilities
+
+        return capabilities.load(state_dir).has("closed_trade_route")
+    except Exception:  # noqa: BLE001 - unproven = unused
+        return False
+
+
+def classify_swing_close(side: str, sl_rate: float | None, tp_rate: float | None,
+                         record: Any) -> tuple[str, float | None]:
+    """(state, close rate) from the broker's closed-trade record: at / through the take-profit ->
+    `closed_target`, at / through the stop -> `closed_stop`, anything else (manual, liquidation,
+    corporate action) -> `closed_external`. No record or no close rate -> `closed_unclassified`."""
+    rate = record.get("closeRate") if isinstance(record, dict) else None
+    if isinstance(rate, bool) or not isinstance(rate, int | float) or not rate > 0:
+        return "closed_unclassified", None
+    sign = 1.0 if side == "long" else -1.0
+    if tp_rate and (rate - tp_rate) * sign >= -SWING_CLOSE_TOL * tp_rate:
+        return "closed_target", float(rate)
+    if sl_rate and (rate - sl_rate) * sign <= SWING_CLOSE_TOL * sl_rate:
+        return "closed_stop", float(rate)
+    return "closed_external", float(rate)
+
+
+def trade_outcome_detail(trade: Any, close_rate: float | None, exit_kind: str, now: datetime, *,
+                         sector_etf_ret: float | None = None,
+                         declared_cost_pct_per_leg: float = DECLARED_COST_PCT_PER_LEG) -> dict[str, Any]:
+    """A closed trade's percent-only outcome for its detail (numbers and short codes only):
+    r_declared, net_ret, size_nav, beta, sector_etf_ret, exit_kind, days_held. Without a close rate
+    only the codes and counts are kept (the metrics then leave the trade out)."""
+    from council.swing.rules import sessions_until
+
+    d = dict(trade.detail or {})
+    held = sessions_until(trade.opened_at.date(), now.date()) if trade.opened_at is not None else 0
+    out: dict[str, Any] = {"exit_kind": exit_kind, "days_held": int(held),
+                           "size_nav": _num(d.get("size_nav")), "beta": _num(d.get("beta")),
+                           "sector_etf_ret": _num(sector_etf_ret)}
+    if close_rate and trade.open_rate:
+        sign = 1.0 if trade.side == "long" else -1.0
+        net = sign * (close_rate / trade.open_rate - 1.0) - 2.0 * declared_cost_pct_per_leg / 100.0
+        stop = _num(d.get("stop_pct"))
+        if stop is None and trade.sl_rate:
+            stop = abs(trade.open_rate - trade.sl_rate) / trade.open_rate
+        out["net_ret"] = round(net, 6)
+        if stop:
+            out["r_declared"] = round(net / stop, 6)
+    return out
+
+
+def _num(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if value == value and abs(value) != float("inf") else None
+
+
+def record_swing_close(ledger: Any, read: Any, trade_id: str, position_id: int | None, *, now: datetime,
+                       state_dir: Any = None, route_ok: bool | None = None) -> str | None:
+    """Classify and record one swing trade the broker closed (its SL / TP, or outside them). The
+    closed-trade record is read only when `closed_trade_route` is proven. Returns the new state, or
+    None when the trade is unknown, already closed, or still holds another live position."""
+    from council.operator.smoke import closed_trade_record
+    from council.swing.models import TERMINAL_STATES
+
+    trade = ledger.swing_trade(trade_id) if trade_id else None
+    if trade is None or trade.state in TERMINAL_STATES or trade.state in ("proposed", "entry_executing"):
+        return None
+    ok = closed_trade_route_ok(state_dir) if route_ok is None else route_ok
+    record = closed_trade_record(read, position_id) if ok else None
+    state, rate = classify_swing_close(trade.side, trade.sl_rate, trade.tp_rate,
+                                       dict(record) if record is not None else None)
+    ledger.update_swing_trade(trade_id, detail=trade_outcome_detail(trade, rate, state.removeprefix("closed_"),
+                                                                    now), now=now)
+    ledger.transition_swing_trade(trade_id, state, close_rate=rate, now=now,
+                                  reason=f"broker_close:{state.removeprefix('closed_')}")
+    return state
+
+
+def _swing_closed(ctx: CycleContext, v: Any, live: dict[int, Any], now: datetime) -> list[str]:
+    """One vanished swing position: record its trade's broker close (once every position of the
+    trade is gone) and alert. Only an unclassified or external close is URGENT."""
+    from council.swing.models import ACTIVE_STATES
+
+    ledger = ctx.ledger
+    try:
+        trades = [t for t in ledger.swing_trades(states=sorted(ACTIVE_STATES)) if v.position_id in t.position_ids]
+    except Exception:  # noqa: BLE001 - an old ledger without swing tables
+        trades = []
+    if not trades:
+        return [f"URGENT swing position closed at the broker without a trade record: {v.line}"]
+    trade = trades[0]
+    if any(pid in live for pid in trade.position_ids):
+        return [f"swing position partly closed at the broker: {v.line}"]
+    try:
+        state = record_swing_close(ledger, ctx.sources.broker, trade.trade_id, v.position_id, now=now,
+                                   state_dir=ctx.state_dir, route_ok=closed_trade_route_ok(ctx.state_dir))
+    except Exception as exc:  # noqa: BLE001 - never a guessed outcome: the operator checks
+        return [f"URGENT swing_close_error:{v.line}:{type(exc).__name__}"]
+    if state == "closed_target":
+        return [f"swing trade closed at its take-profit: {v.line}"]
+    if state == "closed_stop":
+        return [f"swing stop-loss hit (pre-approved): {v.line}"]
+    if state == "closed_external":
+        return [f"URGENT swing position closed outside its stop and target: {v.line} (check the broker)"]
+    return [f"URGENT swing_close_unclassified:{v.line}: no closed-trade record; check the broker"]
+
+
+FLAG_KINDS = ("time_stop_due", "earnings_exit_due", "target_reached_unplaced")
+
+
+def swing_flags(ledger: Any, policy: Any, snapshot: Any, now: datetime) -> list[str]:
+    """The watch's swing flags (§1.8): one `swing_events` row per trade, kind and US day. FLAGS ONLY:
+    the cycle creates the exits at the next swing slot."""
+    from datetime import date as _date
+
+    from council.clock import NEW_YORK
+    from council.swing.rules import exit_due
+    from council.swing.slots import season_of
+
+    try:
+        trades = ledger.swing_trades(states=["open", "open_tp_missing", "partial"])
+    except Exception:  # noqa: BLE001 - no swing tables: nothing to flag
+        return []
+    if not trades:
+        return []
+    sp = policy.swing
+    today = now.astimezone(NEW_YORK).date()
+    slots = sp.slots.summer_utc if season_of(now) == "summer" else sp.slots.winter_utc
+    marks = {}
+    for p in snapshot.positions:
+        marks[p.position_id] = p.close_rate          # bid for a long, ask for a short
+    seen = {(e["trade_id"], e["kind"], str(e["created_at"])[:10]) for e in ledger.swing_events()
+            if e["kind"] in FLAG_KINDS}
+    alerts: list[str] = []
+
+    def flag(t: Any, kind: str, reason: str) -> None:
+        key = (t.trade_id, kind, now.date().isoformat())
+        if key in seen:
+            return
+        ledger.add_swing_event(kind, trade_id=t.trade_id, reason=reason, now=now)
+        seen.add(key)
+        alerts.append(f"swing {kind}: {t.trade_id}")
+
+    for t in trades:
+        detail = t.detail or {}
+        if t.time_stop_date:
+            due, _ = exit_due(_date.fromisoformat(t.time_stop_date), today, slots_per_session=len(slots),
+                              lead_slots=0)
+            if due:
+                flag(t, "time_stop_due", "time_stop")
+            earn = detail.get("earnings_next")
+            if isinstance(earn, str) and detail.get("earnings_confirmed") is True:
+                e_due, when = exit_due(_date.fromisoformat(t.time_stop_date), today, slots_per_session=len(slots),
+                                       lead_slots=int(sp.earnings.exit_proposal_lead_slots),
+                                       earnings_next=_date.fromisoformat(earn), earnings_confirmed=True,
+                                       exit_before_sessions=int(sp.earnings.exit_before_sessions))
+                if e_due and when < _date.fromisoformat(t.time_stop_date):
+                    flag(t, "earnings_exit_due", "earnings")
+        unplaced = t.state == "open_tp_missing" or detail.get("tp_mode") == "none"
+        if unplaced and t.tp_rate:
+            sign = 1.0 if t.side == "long" else -1.0
+            px = [marks[pid] for pid in t.position_ids if marks.get(pid)]
+            if px and any((m - t.tp_rate) * sign >= 0 for m in px):
+                flag(t, "target_reached_unplaced", "target_watched")
     return alerts
 
 
