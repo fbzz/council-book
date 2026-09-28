@@ -128,6 +128,7 @@ def approve(decision_id: str, deps: ApprovalDeps, *, skip: tuple[str, ...] = ())
             raise ApprovalRefused(f"kill switch {kill_state}: smoke tickets need NORMAL")
     dropped = market_hours_drops(plan, d.kind, policy, now)
     swing_dropped = swing_skip_drops(plan, skip, ledger)           # --skip idea:k (swing-scoped)
+    swing_dropped.update(swing_not_live_drops(plan))               # SWING_BOOK_LIVE False: no entry
     swing_dropped = swing_cascade(plan, dropped, swing_dropped)
     kept = [leg for leg in plan.legs if leg.seq not in dropped and leg.seq not in swing_dropped]
     if not kept:
@@ -571,6 +572,20 @@ def swing_skip_drops(plan: Any, skip: tuple[str, ...], ledger: Any) -> dict[int,
         for leg in legs:
             out[leg.seq] = f"operator_skip:{ref}"
     return out
+
+
+def swing_not_live_drops(plan: Any) -> dict[int, str]:
+    """While `invariants.SWING_BOOK_LIVE` is False the swing book is paper-only: every swing leg that
+    adds risk (an entry and its take-profit leg) drops with `swing_book_not_live`. Exits and a
+    `set_tp` on an existing trade stay (they only reduce or protect)."""
+    from council import invariants
+
+    if bool(invariants.SWING_BOOK_LIVE):
+        return {}
+    entries = {leg.seq for leg in plan.legs if leg.is_swing and (leg.kind == "open" or leg.risk_increasing)}
+    return {leg.seq: "swing_book_not_live" for leg in plan.legs
+            if leg.seq in entries or (leg.is_swing and leg.kind == "modify_tp"
+                                       and any(dep in entries for dep in leg.depends_on))}
 
 
 def swing_cascade(plan: Any, dropped: Mapping[int, str], swing_dropped: Mapping[int, str]) -> dict[int, str]:

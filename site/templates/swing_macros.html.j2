@@ -1,0 +1,102 @@
+{# The swing book's pieces (swing-book.md §7.4 / §8.4): the plain-words header, an idea card, the
+   trade table with stop / target bars, the Skeptic-health line and an agent card. Percentages,
+   R and words only. PAPER rows always carry the word, never colour alone. #}
+
+{% import "macros.html.j2" as m %}
+{% macro tk(ticker, root) %}{% set href = swing_page(ticker) %}{% if href %}<a class="ln mono" href="{{ root }}{{ href }}">{{ ticker | ticker }}</a>{% else %}<span class="mono">{{ ticker | ticker }}</span>{% endif %}{% endmacro %}
+
+{% macro side(s) %}<span class="chip pos-chip pc-{{ s }}">{{ s }}</span>{% endmacro %}
+
+{% macro paper() %}<span class="chip state-rehearsal sw-paper" title="Tracked on paper only: never traded">PAPER</span>{% endmacro %}
+
+{% macro header(h) %}
+<div class="sw-head">
+  <p>Experimental swing book{% if h.live_since %}, live since {{ h.live_since }}{% else %}, not trading yet{% endif %}{% if h.paper_since %} (paper-traded from {{ h.paper_since }}){% else %}; every idea is also tracked on paper{% endif %}. Language-model agents read the news, a separate Skeptic agent — blind to the pitch — checks whether the news is already in the price, and a human approves every trade.</p>
+  <p>This cannot be tested on past data (the model has read that history), so it is judged only on live trades, by <a href="{{ h.prereg }}">rules written before the first trade</a>. {{ plural(h.closed, "closed trade") | cap }} so far; telling skill from luck needs several hundred, so early numbers mostly show whether something is badly wrong. Results are shown after a declared cost of {{ h.cost }}% per trade leg, which is at least what we pay. Next to it: the mechanical stock rule we did not adopt for trading (it failed its test), the same trades' sector-and-beta benchmark, and the index.</p>
+</div>
+{% endmacro %}
+
+{% macro health(hv) %}
+{% if hv %}
+<p class="sw-health"><span class="dot accent-skeptic" aria-hidden="true"></span><strong>Skeptic health:</strong>
+  <span class="chip state-{{ hv.canary_css }}">{{ hv.canary }}</span>
+  canaries caught {{ hv.h.canaries_caught_total }}, missed {{ hv.h.canaries_missed_total }} ·
+  pass rate over its last 20 verdicts {{ hv.pass_rate }} · rejects in the last 10: {{ hv.h.rejects_last_10 }}
+  {% if hv.alarm %}<span class="chip state-halted">ALARM: pass rate too high</span>{% else %}<span class="chip state-executed">no alarm</span>{% endif %}</p>
+{% endif %}
+{% endmacro %}
+
+{% macro idea(v, root) %}
+{% set i = v.i %}
+<article class="sw-idea" id="sw-{{ i.ref | replace(':', '-') }}">
+  <header class="sw-idea-head">
+    <span class="sw-ref mono">{{ i.ref }}</span>
+    {{ tk(i.ticker, root) }} {{ side(i.side) }}
+    <span class="chip tag">{{ v.setup }}</span>{% if v.paper %}{{ paper() }}{% else %}<span class="chip state-executed" title="A setup that may trade">live setup</span>{% endif %}
+    <span class="chip state-{{ v.stage_css }} sw-stage">{{ v.stage }}</span>
+  </header>
+  {% if v.drop %}<p class="small sw-drop">Why it stopped: {{ v.drop }}{% if i.drop_code %} <code>{{ i.drop_code }}</code>{% endif %}</p>{% endif %}
+  <div class="sw-row"><span class="sw-k">Catalyst</span><span class="sw-v">{% for c in v.cats %}{% if c.href %}<a class="ev ev-{{ c.css }}" href="{{ c.href }}" title="{{ c.note }}">{{ c.label }}</a>{% else %}<span class="ev ev-{{ c.css }}" title="{{ c.note }}">{{ c.label }}{% if c.css == "feed" %} <span class="ev-note">{{ c.note }}</span>{% endif %}</span>{% endif %}{% endfor %}</span></div>
+  {% if i.catalyst_claim %}<div class="sw-row"><span class="sw-k">Claim</span><span class="sw-v">{{ i.catalyst_claim }}</span></div>{% endif %}
+  {% if i.thesis %}<div class="sw-row"><span class="sw-k">Scout</span><span class="sw-v"><span class="dot accent-scout" aria-hidden="true"></span>{{ i.thesis }}</span></div>{% endif %}
+  {% if i.text_withheld %}<p class="small muted">Part of this idea's text is withheld: it was carried from {{ i.carried_from | join(", ") }} and overlapped licensed news text.</p>{% elif i.carried_from %}<p class="small muted">Carried from {{ i.carried_from | join(", ") }}.</p>{% endif %}
+  <div class="sw-row"><span class="sw-k">Levels</span><span class="sw-v n">stop {{ "%.2f" | format(i.stop_pct) }}% · target {{ "%.2f" | format(i.target_pct) }}% · time stop {{ i.time_stop_days }} sessions</span></div>
+  {% if v.facts or v.withheld %}<div class="sw-row"><span class="sw-k">Reaction</span><span class="sw-v"><span class="sw-facts">{% for f in v.facts %}<span class="sw-fact">{{ f.label }} <strong class="n">{{ f.value }}</strong></span>{% endfor %}</span>{% for why, labels in v.withheld %}<span class="small muted sw-withheld">{{ why | cap }}: {{ labels | join(", ") }}.</span>{% endfor %}</span></div>{% endif %}
+  {% if v.verdict %}{% set s = v.verdict %}
+  <div class="sw-skeptic accent-skeptic">
+    <p class="sw-chips"><span class="dot accent-skeptic" aria-hidden="true"></span><strong>Skeptic</strong>
+      <span class="chip state-{{ s.css }}">{{ s.word }}</span>
+      <span class="chip tag">priced in: {{ s.priced_in }}</span>
+      <span class="chip tag">news: {{ s.news }}</span>
+      <span class="chip tag">bigger picture: {{ s.regime }}</span>
+      <span class="chip tag">crowding: {{ s.crowding }}</span>
+      {% if s.said %}<span class="chip state-warn" title="What the model said before the code rules">said {{ s.said }} · {{ s.override }}</span>{% elif s.override %}<span class="chip state-warn">{{ s.override }}</span>{% endif %}
+      {% if s.same_family %}<span class="chip state-warn" title="The Skeptic ran on the Scout's model family">same model family</span>{% endif %}</p>
+    <ul class="sw-reasons">{% for r in s.reasons %}<li>{{ r.text }}{% for e in r.evidence %} <code class="small">{{ e }}</code>{% endfor %}</li>{% endfor %}</ul>
+    {% if s.mind %}<p class="small">Would change its mind: {{ s.mind }}</p>{% endif %}
+  </div>
+  {% endif %}
+  {% if i.votes %}<p class="small sw-votes"><span class="dot accent-pm" aria-hidden="true"></span>Manager: <strong>{{ i.votes.enter }} of {{ i.votes.replicates }}</strong> attempts voted to enter{% if i.votes.failed %} ({{ i.votes.failed }} failed){% endif %}; two of three are needed.</p>{% endif %}
+</article>
+{% endmacro %}
+
+{% macro book(trades, root, closed=false) %}
+{{ m.wrap_open("Swing trades (scrolls sideways)") }}
+<table class="wide stack sw-book">
+  <thead><tr><th scope="col">Trade</th><th scope="col">Side</th><th scope="col">Stop · entry · target</th><th scope="col" class="n">Size</th><th scope="col" class="n">Days</th>{% if closed %}<th scope="col">Exit</th><th scope="col" class="n">R</th><th scope="col" class="n">Net</th><th scope="col" class="n">Book</th>{% else %}<th scope="col">State</th><th scope="col">Time stop</th>{% endif %}</tr></thead>
+  <tbody>
+  {% for v in trades %}{% set t = v.t %}
+  <tr>
+    <td>{{ tk(t.ticker, root) }}{% if v.paper %} {{ paper() }}{% endif %}<br><span class="small muted mono">{{ t.trade_id }}</span></td>
+    <td data-label="Side">{{ side(t.side) }}</td>
+    <td data-label="Stop · entry · target">{% if not closed %}<span class="sw-bar" role="img" aria-label="stop {{ '%.2f' | format(t.stop_pct) }}% below the entry, target {{ '%.2f' | format(t.target_pct) }}% beyond it"><span class="sw-stop {{ v.stop_cls }}"></span><span class="sw-entry"></span><span class="sw-target {{ v.target_cls }}"></span></span>{% endif %}<span class="small n">stop {{ "%.2f" | format(t.stop_pct) }}% · target {{ "%.2f" | format(t.target_pct) }}%</span></td>
+    <td class="n" data-label="Size">{{ (t.weight_x * 100) | pct1 }}</td>
+    <td class="n" data-label="Days">{{ t.days_held }}</td>
+    {% if closed %}
+    <td data-label="Exit">{{ v.exit }}</td>
+    <td class="n" data-label="R"><span class="mv mv-{{ v.r_css }}">{{ v.r }}</span></td>
+    <td class="n" data-label="Net">{{ v.net }}</td>
+    <td class="n" data-label="Book">{{ v.contrib }}</td>
+    {% else %}
+    <td data-label="State">{{ v.state }}{% if not t.tp_at_broker %}<br><span class="small muted">target watched by code</span>{% endif %}</td>
+    <td data-label="Time stop">{{ t.time_stop_date | day if t.time_stop_date else "—" }}</td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% macro agent_card(a, root) %}
+<li class="agent-card accent-{{ a.slug }}">
+  <a class="ac-link" href="{{ root }}{{ a.page }}">
+    <span class="ac-n" aria-hidden="true">{{ icon(a.icon, "ac-icon-lg") }}</span>
+    <span class="ac-body">
+      <span class="ac-top"><span class="ac-name">{{ a.name }}</span><span class="ac-kind"><span class="node-kind kind-llm">LLM</span> · swing book</span></span>
+      {% if a.verdict %}<span class="ac-latest"><span class="ac-label">Latest</span><span class="ac-verdict">{{ a.verdict }}</span></span>{% endif %}
+      <span class="ac-job">{{ a.short }}</span>
+    </span>
+  </a>
+</li>
+{% endmacro %}

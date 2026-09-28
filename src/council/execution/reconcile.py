@@ -90,11 +90,21 @@ def reconcile(
     policy: Policy,
     *,
     swing_map: Any = None,
+    smoke_position_ids: Iterable[int] = (),
 ) -> ReconcileResult:
+    """`smoke_position_ids`: positions an operator smoke ticket opened (`ledger.smoke_positions`,
+    plus the fills of the smoke decision being executed). They are expected: never an unknown
+    position, even on a stock no universe line owns (S7 / S8); their stop is still required."""
     cfg = policy.risk["reconcile"]
     drift_max = float(cfg["drift_max"])
     sl_tol = float(cfg["sl_rate_tolerance"])
     achieved, unknown = line_weights(snapshot, policy, swing_map=swing_map)
+    smoke_ids = {int(i) for i in smoke_position_ids}
+    if smoke_ids:
+        smoke_symbols = {p.symbol for p in snapshot.positions if p.position_id in smoke_ids}
+        others = {p.symbol for p in snapshot.positions if p.position_id not in smoke_ids}
+        # a symbol also held by a non-smoke position that maps to no line stays unknown
+        unknown = [s for s in unknown if s not in smoke_symbols or s in others]
     drift = sum(abs(achieved.get(line, 0.0) - float(w)) for line, w in target_w.items())
     missing_sl = sorted({p.symbol for p in snapshot.positions if p.sl_rate is None or p.sl_rate <= 0})
     issues: list[str] = []

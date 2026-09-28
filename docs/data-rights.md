@@ -108,6 +108,18 @@ The swing public record (`policy/swing.yaml` `public_record`):
 Never, for a swing trade: prices, entry or exit rates, stop or target rates, units, amounts, instrument
 or position identifiers, short interest, dollar volume, or the real funding.
 
+As built (SW-7; `publish/public_models.py`, `publish/redact.py` swing section, `publish/leakscan.py`):
+
+| Document | Field | Rule as implemented |
+|---|---|---|
+| Cycle | `swing.ideas[].facts` / `facts_withheld` | Completed-bar card fields only. `move_*live*` -> `broker_data`; Alpaca-derived fields -> `unknown_source` until Q-S10; `vol_ratio_*` as a bucket; short interest, `adv_usd_20d`, `corr_60d_with` and the feed copy of the catalyst items are never listed. A key the leak scan's denylist names (money, price, units, ids) is dropped. |
+| Cycle | `swing.ideas[].catalysts` | `N:` -> the id only (`broker_feed`); `P:` -> title and its `.gov` link; `S:` -> form and item codes; `M:` -> the screen row's id. |
+| Cycle | Skeptic reasons, debate claims and arguments | Cleaned as all model text; a text that cites a live-layer id (`X:<line>:move_*live*`) also loses every number (`[value removed]`), since it may quote the live value. |
+| Cycle | carried-forward ideas (`carried_from`) | Model text is leak-scanned against the licensed feed texts of this cycle and of EVERY origin cycle (`leakscan.origin_matcher`); an overlap, or an origin whose texts were purged or never captured, withholds the text (`text_withheld`). This cycle's own swing feed texts missing -> every swing text withheld (`swing_licensed_texts_unavailable`). |
+| Cycle | `swing.ideas[].verdict.discounted` | The Skeptic's `priced_in` answer (renamed: the leak scan refuses a key naming prices). |
+| Both | `PublicSwingTrade.net_declared_pct`, `contribution_declared_bp`, `r_declared` | Net of the declared 1.25% per leg, from the watch's percent-only outcome or from the entry/exit ratio; never the actual cost. |
+| Swing | `journal/swing/latest.json` | Open and closed trades, the §8.2 metrics over closed live trades (n and 90% bootstrap interval), all seven paper groups of the funnel, the SQ-8 (PAPER) / matched index / index hold curves as base-100 indices, and the Skeptic-health line (`pass_share_20_pct`). |
+
 ## Never published, whatever the source
 
 - Money: dollar or euro amounts, account equity, cash, balances, P&L in currency.

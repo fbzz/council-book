@@ -1,0 +1,31 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% import "swing_macros.html.j2" as swm %}
+{% block title %}{{ agent.name }}{% endblock %}
+{% block toc %}
+{{ m.toc_item("job", "Its job", agent.accent) }}
+{{ m.toc_item("record", "Its record", "neutral") }}
+{{ m.toc_item("cast", "Swing agents", "neutral") }}
+{% endblock %}
+{% block hero %}
+<header class="hero">
+  <p class="eyebrow"><a href="index.html">Agents</a> / Swing book</p>
+  <div class="member">{{ m.avatar(agent.icon, agent.accent, "lg") }}<div class="member-text"><h1>{{ agent.name }}</h1><p class="lede">{{ agent.job }}</p></div></div>
+</header>
+{% endblock %}
+{% block main %}
+{% call m.section("job", 1, "Its job", agent.accent) %}
+<p>{{ agent.short }}</p>
+<p>{{ agent.more }}</p>
+<p class="small">Prompt: <a href="{{ agent.source }}"><code>{{ agent.source_path }}</code></a> · a language model; it never places an order.</p>
+{% endcall %}
+{% call m.section("record", 2, "Its record", "neutral") %}
+<dl class="strip">
+  <div class="st"><dt>Calls</dt><dd class="st-v">{{ agent.calls }}</dd><dd class="st-sub">published swing runs only</dd></div>
+  <div class="st"><dt>Usable</dt><dd class="st-v st-v-sm">{{ agent.ok_pct }}</dd><dd class="st-sub">{{ agent.ok }} of {{ agent.calls }} replies</dd></div>
+  <div class="st"><dt>Latest</dt><dd class="st-v st-v-sm">{{ agent.verdict or "—" }}</dd><dd class="st-sub">{% if agent.last %}<a href="../cycles/{{ agent.last.doc.cycle_id }}.html#swing-ideas">{{ agent.last.doc.slot | short_when }}</a>{% else %}not yet{% endif %}</dd></div>
+</dl>
+<p class="small"><a href="../swing/index.html#sw-funnel">The idea funnel</a> compares what the Skeptic passed, rejected and sent to wait, all tracked on paper.</p>
+{% endcall %}
+<ul class="cast sw-cast" id="cast">{% for a in swing_agents %}{{ swm.agent_card(a, "../") }}{% endfor %}</ul>
+{% endblock %}

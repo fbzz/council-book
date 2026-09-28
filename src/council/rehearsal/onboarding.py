@@ -266,7 +266,8 @@ class Sandbox:
         return CycleContext(
             policy=self.policy, settings=Settings(role="dev", mode=mode), ledger=self.ledger,  # type: ignore[arg-type]
             gateway=StubGateway(hold_reference_stub()), registry=PromptRegistry(),
-            sources=Sources(history=synthetic_history, events=lambda s, e: ([], []), news=news, broker=broker),
+            sources=Sources(history=synthetic_history, events=lambda s, e: ([], []), news=news, broker=broker,
+                            swing=_fixture_swing(self.policy)),
             publisher=Publisher(self.clone, push=True), notifier=self.notifier, clock=self.clock.now,
             state_dir=self.state_dir, canaries=tuple(self.canaries()))
 
@@ -616,5 +617,16 @@ def dress_cli_context(state_dir: Path | None = None, *, clock: Callable[[], date
     return CycleContext(
         policy=policy, settings=replace(settings, mode="live"), ledger=ledger,
         gateway=StubGateway(hold_reference_stub()), registry=PromptRegistry(),
-        sources=Sources(history=synthetic_history, events=lambda s, e: ([], []), news=news, broker=broker),
+        sources=Sources(history=synthetic_history, events=lambda s, e: ([], []), news=news, broker=broker,
+                        swing=_fixture_swing(policy)),
         publisher=Publisher(clone, push=True), notifier=None, state_dir=root, **extra)
+
+
+def _fixture_swing(policy: Any) -> Any:
+    """The sandbox's swing sources: deterministic and offline (`swing.sources.fixture_swing_sources`),
+    so a rehearsal cycle at a swing slot runs the swing stages end to end on paper."""
+    from council.context import swing_sources
+    from council.settings import Settings
+
+    return swing_sources(policy, Settings(role="dev", mode="stub"), kind="fixture", broker=None,
+                         state_dir=Path("."), news=None, ledger=None, live=False)

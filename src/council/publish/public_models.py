@@ -454,13 +454,264 @@ class PublicCall(PublicModel):
     error_kind: ErrorKind | None = None
 
 
+# ------------------------------------------------------------------------------------ swing book
+# Swing-book ids (swing-book.md rev 2, §7.2): a fact-card field `X:<line>:<field>`, a public-domain
+# news item `P:`, a broker feed item `N:` (id only), an SEC filing `S:`, a movers-screen row `M:` and
+# the core desk's F/V/C/E/K ids. The id names a field, never its value.
+SWING_EVIDENCE_ID_PATTERN = (
+    r"^(?:X:[A-Z0-9](?:[A-Z0-9_]{0,10}[A-Z0-9])?:[a-z0-9_]{1,48}|N:[0-9a-f]{8}|P:[0-9a-f]{8}"
+    r"|S:[A-Za-z0-9_.:@#+-]{1,80}|M:[A-Za-z0-9_.:@-]{1,60}|[FVCEK]:[A-Za-z0-9_.:@#+-]{1,80})$"
+)
+SwingEvidenceId = Annotated[str, Field(pattern=SWING_EVIDENCE_ID_PATTERN)]
+SwingSide = Literal["long", "short"]
+SwingStage = Literal["dropped_by_code", "skeptic", "waiting", "debate", "pm", "risk", "planned",
+                     "approved", "executed", "missed", "expired"]
+SwingTradeState = Literal["open", "open_tp_missing", "exit_pending", "closed_stop", "closed_target",
+                          "closed_time", "closed_exit", "closed_halt", "closed_external"]
+PaperGroup = Literal["executed", "pm_passed", "skeptic_rejected", "skeptic_wait", "code_dropped",
+                     "paper_only", "missed"]
+SwingText = Annotated[str, Field(max_length=440)]      # thesis (400) + slack
+SwingClaimText = Annotated[str, Field(max_length=135)]  # catalyst claim (120) + slack
+SwingFactValue = bool | FiniteFloat | Annotated[str, Field(max_length=40)]
+
+
+class PublicSwingCatalyst(PublicModel):
+    """One catalyst chip. `N:` (a broker feed item): the id only, never its title. `P:` (public
+    domain): the title and its publisher's link. `S:`: the filing's form and item codes (SEC
+    metadata). `M:`: a movers-screen row, id only."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"title", "link", "source", "form", "items"})
+
+    id: SwingEvidenceId
+    kind: Literal["broker_feed", "public_news", "filing", "screen"]
+    title: str | None = Field(default=None, max_length=160)
+    link: str | None = Field(default=None, max_length=300, pattern=r"^https://[A-Za-z0-9.-]+\.gov/\S*$")
+    source: str | None = Field(default=None, max_length=24)
+    form: str | None = Field(default=None, max_length=16)
+    items: list[Annotated[str, Field(max_length=8)]] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def _feed_is_id_only(self) -> PublicSwingCatalyst:
+        if self.kind == "broker_feed" and (self.title or self.link or self.form or self.items):
+            raise ValueError("a broker feed catalyst is published by id only")
+        if self.kind == "broker_feed" and not self.id.startswith("N:"):
+            raise ValueError("a broker feed catalyst has an N: id")
+        return self
+
+
+class PublicSwingReason(PublicModel):
+    text: ReasonText
+    evidence: list[SwingEvidenceId] = Field(default_factory=list, max_length=4)
+
+
+class PublicSkepticVerdict(PublicModel):
+    """The Skeptic's verdict on one idea (it judged blind: no thesis, no setup, no levels).
+    `verdict` is the code's final word; `said` what the model itself wrote when code overrode it.
+    `discounted` is the role's `priced_in` answer (a key naming prices is refused by the leak scan)."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"said", "code_override", "second_order"})
+
+    ref: str = Field(pattern=r"^idea:[0-9]{1,2}$")
+    verdict: Literal["pass", "wait", "reject", "failed"]
+    said: Literal["pass", "wait", "reject"] | None = None
+    discounted: Literal["no", "partly", "mostly", "fully", "unknown"] = "unknown"   # the role's `priced_in`
+    news_status: Literal["new", "follow_up", "stale", "restated", "unknown"] = "unknown"
+    regime: Literal["supports", "neutral", "against", "unknown"] = "unknown"
+    crowding: Literal["low", "medium", "high", "unknown"] = "unknown"
+    catalyst_supports_claim: bool | None = None
+    claim_supports_side: bool | None = None
+    code_override: Code | None = None
+    model_family: Annotated[str, Field(pattern=r"^[a-z0-9_.-]{0,32}$")] = ""
+    same_family: bool = False
+    reasons: list[PublicSwingReason] = Field(default_factory=list, max_length=5)
+    what_would_change_my_mind: ReasonText = ""
+    second_order: ReasonText | None = None
+
+
+class PublicSwingVotes(PublicModel):
+    """The swing PM's replicates on one idea: `enter` of `replicates` (2 of 3 enters)."""
+
+    enter: int = Field(ge=0, le=3)
+    replicates: int = Field(ge=0, le=3)
+    failed: int = Field(default=0, ge=0, le=3)
+
+
+class PublicSwingIdea(PublicModel):
+    """One Scout idea and how far it got. Distances are % of the entry (never a price); `facts`
+    holds completed-bar fields only, `facts_withheld` says why a field shows no value
+    (`broker_data` for the private live layer, `unknown_source` until the Alpaca row is widened).
+    `carried_from`: earlier cycles the idea came from (a wait, a missed entry, a re-proposal);
+    `text_withheld`: its model text overlapped licensed feed text of one of them (or could not be
+    checked) and is not shown."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"drop_code", "verdict", "votes", "carried_from", "text_withheld",
+                                   "facts_withheld", "flags"})
+
+    ref: str = Field(pattern=r"^idea:[0-9]{1,2}$")
+    ticker: Line
+    side: SwingSide
+    setup: Annotated[str, Field(pattern=r"^[a-z][a-z_]{0,31}$")]
+    live_setup: bool
+    catalysts: list[PublicSwingCatalyst] = Field(default_factory=list, max_length=4)
+    catalyst_claim: SwingClaimText = ""
+    thesis: SwingText = ""
+    stop_pct: Pct
+    target_pct: Pct
+    time_stop_days: int = Field(ge=0, le=30)
+    facts: dict[Annotated[str, Field(pattern=r"^[a-z0-9_]{1,48}$")], SwingFactValue] = Field(default_factory=dict)
+    facts_withheld: dict[Annotated[str, Field(pattern=r"^[a-z0-9_]{1,48}$")], Withheld] = Field(default_factory=dict)
+    stage_reached: SwingStage
+    drop_code: Code | None = None
+    verdict: PublicSkepticVerdict | None = None
+    votes: PublicSwingVotes | None = None
+    carried_from: list[CycleId] = Field(default_factory=list, max_length=8)
+    text_withheld: bool = False
+    flags: list[Code] = Field(default_factory=list, max_length=8)
+
+
+class PublicSwingClaim(PublicModel):
+    claim_id: str = Field(pattern=r"^c\d{1,2}$")
+    ref: str = Field(pattern=r"^(idea:[0-9]{1,2}|trade:[A-Za-z0-9_\-]{1,64})$")
+    text: ClaimText
+    evidence: list[SwingEvidenceId] = Field(default_factory=list, max_length=6)
+
+
+class PublicSwingRebuttal(PublicModel):
+    claim_id: str = Field(pattern=r"^c\d{1,2}$")
+    verdict: Literal["concede", "refute"]
+    text: RebuttalText
+    evidence: list[SwingEvidenceId] = Field(default_factory=list, max_length=4)
+
+
+class PublicSwingCase(PublicModel):
+    argument: Argument = ""
+    claims: list[PublicSwingClaim] = Field(default_factory=list, max_length=8)
+    rebuttals: list[PublicSwingRebuttal] = Field(default_factory=list, max_length=8)
+
+
+class PublicSwingTrade(PublicModel):
+    """A swing trade, percent-only. `weight_x`: its size at entry as a multiple of NAV;
+    `stop_pct` / `target_pct`: planned distances from the entry; results are net of the DECLARED
+    cost (1.25% of the position per leg, §7.3), never of the actual one."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"closed_cycle", "exit_kind", "r_declared", "net_declared_pct",
+                                   "contribution_declared_bp", "live"})
+
+    trade_id: str = Field(pattern=r"^trade:[A-Za-z0-9_\-]{1,64}$")
+    ticker: Line
+    side: SwingSide
+    weight_x: X
+    opened_cycle: CycleId | None = None
+    closed_cycle: CycleId | None = None
+    days_held: int = Field(ge=0, le=400)
+    stop_pct: Pct
+    target_pct: Pct
+    tp_at_broker: bool
+    time_stop_date: date | None = None
+    state: SwingTradeState
+    exit_kind: Literal["stop", "target", "time", "exit", "halt", "external"] | None = None
+    r_declared: Annotated[float, Field(ge=-50.0, le=50.0, allow_inf_nan=False)] | None = None
+    net_declared_pct: Pct | None = None
+    contribution_declared_bp: Bp | None = None
+    live: bool = True
+
+
+class PublicSkepticHealth(PublicModel):
+    """The Skeptic's health line: the weekly canary (a past event whose move was already in the
+    price: `pass` misses it), the pass rate over its last 20 verdicts and its rejects in the last 10."""
+
+    canary_last: Literal["caught", "missed", "none_yet"] = "none_yet"
+    canaries_caught_total: int = Field(default=0, ge=0)
+    canaries_missed_total: int = Field(default=0, ge=0)
+    pass_share_20_pct: Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)] | None = None
+    rejects_last_10: int = Field(default=0, ge=0, le=10)
+    alarm: bool = False
+
+
+class PublicSwingSection(PublicModel):
+    """The swing book's part of one cycle (a swing slot), sealed with the cycle."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"bull", "bear", "trades", "health", "flags"})
+
+    live: bool
+    ideas: list[PublicSwingIdea] = Field(default_factory=list, max_length=5)
+    bull: PublicSwingCase | None = None
+    bear: PublicSwingCase | None = None
+    trades: list[PublicSwingTrade] = Field(default_factory=list, max_length=12)
+    health: PublicSkepticHealth | None = None
+    declared_cost_pct_per_leg: Annotated[float, Field(ge=0.0, le=10.0)] = 1.25
+    flags: list[Code] = Field(default_factory=list)
+
+
+class PublicInterval(PublicModel):
+    mean: FiniteFloat | None = None
+    low: FiniteFloat | None = None
+    high: FiniteFloat | None = None
+    n: int = Field(default=0, ge=0)
+
+
+class PublicFunnelGroup(PublicModel):
+    """One idea group with its PAPER outcome at the slot-time reference and the declared cost."""
+
+    group: PaperGroup
+    ideas: int = Field(ge=0)
+    closed: int = Field(ge=0)
+    r_declared: PublicInterval = Field(default_factory=PublicInterval)
+    hit_rate_pct: Pct | None = None
+
+
+class PublicSwingMetrics(PublicModel):
+    """The pre-registered forward metrics (§8.2) over closed live trades, net of the declared cost."""
+
+    n_closed: int = Field(default=0, ge=0)
+    hit_rate_pct: Pct | None = None
+    expectancy_r: PublicInterval = Field(default_factory=PublicInterval)
+    payoff: FiniteFloat | None = None
+    contribution_declared_bp: Bp = 0.0
+    matched_contribution_declared_bp: Bp | None = None
+    vs_matched_pct: Pct | None = None
+    exit_mix_pct: dict[Literal["stop", "target", "time", "discretionary", "external"], Pct] = Field(
+        default_factory=dict)
+    avg_days_held: FiniteFloat | None = None
+    standard_error_r: FiniteFloat | None = None
+
+
+class PublicBenchmarkPoint(PublicModel):
+    """Base-100 indices: the SQ-8 mechanical rule (PAPER), the matched index (beta x sector ETF over
+    the swing trades' windows) and the index held."""
+
+    day: date
+    sq8: IndexValue | None = None
+    matched_index: IndexValue | None = None
+    index_hold: IndexValue | None = None
+
+
+class PublicSwingBook(PublicModel):
+    """The swing page's document (journal/swing/latest.json)."""
+
+    schema_id: Literal["council-book/swing/v1"] = "council-book/swing/v1"
+    as_of: UtcDatetime
+    live: bool = False
+    live_since: date | None = None
+    paper_since: date | None = None
+    declared_cost_pct_per_leg: Annotated[float, Field(ge=0.0, le=10.0)] = 1.25
+    open_trades: list[PublicSwingTrade] = Field(default_factory=list, max_length=12)
+    closed_trades: list[PublicSwingTrade] = Field(default_factory=list, max_length=2000)
+    metrics: PublicSwingMetrics = Field(default_factory=PublicSwingMetrics)
+    funnel: list[PublicFunnelGroup] = Field(default_factory=list, max_length=7)
+    benchmarks: list[PublicBenchmarkPoint] = Field(default_factory=list, max_length=4000)
+    health: PublicSkepticHealth = Field(default_factory=PublicSkepticHealth)
+    flags: list[Code] = Field(default_factory=list)
+
+
 class PublicCycleV1(PublicModel):
     """One council cycle, as revealed after its decision is final.
 
     Added after the first cycles were sealed (omitted while empty): `macro`, the macro analyst's
-    output; `facts`, the evidence table of the pack the agents saw."""
+    output; `facts`, the evidence table of the pack the agents saw; `swing`, the swing book's part
+    of a swing slot."""
 
-    OMIT_WHEN_DEFAULT = frozenset({"macro", "facts"})
+    OMIT_WHEN_DEFAULT = frozenset({"macro", "facts", "swing"})
 
     schema_id: Literal["council-book/cycle/v1"] = "council-book/cycle/v1"
     cycle_id: CycleId
@@ -491,6 +742,7 @@ class PublicCycleV1(PublicModel):
     calls: list[PublicCall] = Field(default_factory=list)
     flags: list[Code] = Field(default_factory=list)
     facts: list[PublicFact] = Field(default_factory=list, max_length=4000)
+    swing: PublicSwingSection | None = None
 
 
 # ----------------------------------------------------------------------------- commit and reveal
@@ -659,5 +911,5 @@ class PublicIncident(PublicModel):
 
 PUBLIC_MODELS: tuple[type[PublicModel], ...] = (
     PublicCycleV1, PublicCommitment, PublicReveal, PublicStatus, PublicBook, PublicOpsRow,
-    PublicPerformancePoint, PublicExecution, PublicIncident,
+    PublicPerformancePoint, PublicExecution, PublicIncident, PublicSwingBook,
 )

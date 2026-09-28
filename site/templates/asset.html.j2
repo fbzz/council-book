@@ -1,5 +1,6 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
+{% import "swing_macros.html.j2" as swm %}
 {% block title %}{{ a.asset.ticker }} · {{ a.asset.name }}{% endblock %}
 {% block toc %}
 {% set x = a.asset %}
@@ -9,6 +10,7 @@
 {{ m.toc_item("said", "What the agents said (" ~ (a.said | sum(attribute="notes", start=[]) | length) ~ ")", "neutral") }}
 {{ m.toc_item("trades", "Trades (" ~ (a.trades | length) ~ ")", "neutral") }}
 {{ m.toc_item("facts", "Latest facts", "neutral") }}
+{% if swing %}{{ m.toc_item("swing", "Swing ideas and trades", "scout") }}{% endif %}
 {% set rest = others | rejectattr("page", "equalto", x.page) | list %}
 {{ m.toc_group("Other lines", "toc-desk") }}
 <li class="toc-lines toc-desk">{% for o in rest %}<a class="toc-line{% if not o.held %} not-held{% endif %}" href="../{{ o.page }}">{{ o.ticker }}</a>{% endfor %}</li>
@@ -174,4 +176,5 @@
 <p class="muted">No fact about this line has been published yet.</p>
 {% endif %}
 {% endcall %}
+{% if swing %}{% set s = swing %}{% include "swing_asset_block.html.j2" %}{% endif %}
 {% endblock %}

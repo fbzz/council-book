@@ -1,5 +1,6 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
+{% import "swing_macros.html.j2" as swm %}
 {% block title %}Agents{% endblock %}
 {% block toc %}
 {% set ns = namespace(group="") %}
@@ -7,6 +8,7 @@
 {% if a.spec.group != ns.group %}{% set ns.group = a.spec.group %}{{ m.toc_group(a.spec.group) }}{% endif %}
 {{ m.toc_item("ag-" ~ a.slug, a.name, a.accent, a.stats.worst) }}
 {% endfor %}
+{% if swing_agents %}{{ m.toc_group("Swing book") }}{{ m.toc_item("swing-agents", "Scout and Skeptic", "skeptic") }}{% endif %}
 {% endblock %}
 {% block toc_foot %}<p class="toc-legend">The mark is the worst status over the published runs.</p>{{ m.toc_legend() }}{% endblock %}
 {% block hero %}
@@ -56,6 +58,14 @@
   </tr>
 {% endfor %}
 {% if ns.group %}</tbody></table></div></section>{% endif %}
+
+{% if swing_agents %}
+<section class="card accent-skeptic" id="swing-agents" aria-labelledby="swing-agents-h">
+<h2 id="swing-agents-h"><span class="num" aria-hidden="true">{{ ns.n + 1 }}</span>Swing book</h2>
+<p>Two more language-model agents work on the <a href="../swing/index.html">swing book</a>, a small experiment in short trades on the news. The swing bull, bear and manager are the council's own, run on the swing ideas.</p>
+<ul class="cast sw-cast">{% for a in swing_agents %}{{ swm.agent_card(a, "../") }}{% endfor %}</ul>
+</section>
+{% endif %}
 
 <p class="small muted">Usable counts a call whose reply could be used, including one fixed by its single correction turn. Each failure links to its place in the run. The error text itself is never published, only a fixed code. "Did what it asked" compares the call the used manager attempt made with the advocate's final proposal (keeping the reference counts); "named" is the side the manager wrote down.</p>
 {% endblock %}

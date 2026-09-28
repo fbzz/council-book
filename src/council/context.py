@@ -4,6 +4,13 @@
   dry_run  — no broker (or the read token if present), real data and LLM, publishes to
              site-preview/ only (never pushes, never notifies).
   stub     — no network at all: canned LLM replies and caller-supplied data sources (tests).
+  paper    — `council cycle --paper` (SW-5c): a dry run with `no_broker` in its own state dir
+             (`<state>/paper`), real data and LLM, publishes nothing; the swing book runs on paper.
+
+Swing sources (`swing_sources`, SW-5c): a stubbed LLM (stub mode, `--stub-llm`, the rehearsal
+sandbox) gets the deterministic offline fixtures; every other context the SW-1 data layer
+(`swing.sources.real_swing_sources`: SEC, Alpaca, FINRA, the READ broker's eligibility), failing
+closed with `swing_source_unavailable:<source>` when a Keychain item is missing.
 
 A live context loads policy from a snapshot of the committed `HEAD:policy/` (runtime.
 head_policy_snapshot), never from the working tree. When git cannot provide it, a live context runs
@@ -88,12 +95,55 @@ def hold_reference_stub() -> dict[str, Any]:
                                                      "evidence_id": _first_fact_id(user)},
                 "sided_with": "reference", "dismissed": [], "no_change_reason": "stub: hold reference"}
 
+    from council.swing.sources import swing_stub_replies
+
     return {
         "news": {"cards": []},
         "macro": {"regime": "neutral", "drivers": [], "sleeve_tilts": {}, "cards": []},
         "bull_open": advocate, "bear": bear, "bull_rebuttal": advocate,
         "pm": pm, "single_agent": pm,
+        # the swing roles (SW-5c): match `swing.sources.fixture_swing_sources`; used only when a
+        # context carries swing sources (the Skeptic's reply lives on its own fixture gateway)
+        **swing_stub_replies(),
     }
+
+
+def make_skeptic_gateway(policy: Policy, settings: Settings, *, stub: bool) -> Any:
+    """The Skeptic's own gateway on `policy/swing.yaml` `llm.skeptic_model` (Q-S9: another model
+    family); the fixture Skeptic when stubbed. None without a swing policy."""
+    sp = getattr(policy, "swing", None)
+    if sp is None:
+        return None
+    if stub:
+        from council.swing.sources import fixture_skeptic_gateway
+
+        return fixture_skeptic_gateway(policy)
+    from council.llm.gateway import OllamaGateway
+
+    c = policy.council
+    return OllamaGateway(settings.ollama_host, str(sp.llm.skeptic_model),
+                         calls_per_min=int(c["limiter"]["calls_per_min"]),
+                         concurrency=int(c["limiter"]["concurrency"]),
+                         timeouts=tuple(float(t) for t in c["timeouts_s"]),
+                         num_ctx=int(c["num_ctx"]))
+
+
+def swing_sources(policy: Policy, settings: Settings, *, kind: Literal["real", "fixture"], broker: Any | None,
+                  state_dir: Path, news: Any | None, ledger: Any | None, live: bool) -> Any:
+    """The swing stage's sources (SW-5c): `fixture` = deterministic and offline (stub LLM, stub
+    mode, rehearsal sandboxes); `real` = the SW-1 data layer (`swing.sources.real_swing_sources`;
+    a missing Alpaca or SEC credential fails closed with `swing_source_unavailable:<source>`).
+    A paper run (not live, no broker) may pass SEC-resolved ideas unverified. None without a swing
+    policy."""
+    if getattr(policy, "swing", None) is None:
+        return None
+    from council.swing import sources as ss
+
+    if kind == "fixture":
+        return ss.fixture_swing_sources(skeptic_gateway=make_skeptic_gateway(policy, settings, stub=True))
+    return ss.real_swing_sources(policy, state_dir=state_dir, broker=broker, news=news, ledger=ledger,
+                                 skeptic_gateway=make_skeptic_gateway(policy, settings, stub=False),
+                                 allow_unverified=not live and broker is None)
 
 
 def make_gateway(policy: Policy, settings: Settings, *, stub: bool) -> Any:
@@ -211,6 +261,19 @@ def news_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path |
     return news, broker_feed
 
 
+def memo_by_slot(fn: Any) -> Any:
+    """`fn(slot)` computed once per slot (the core news role and the swing Scout share one fetch)."""
+    held: dict[datetime, Any] = {}
+
+    def once(slot: datetime) -> Any:
+        if slot not in held:
+            held.clear()
+            held[slot] = fn(slot)
+        return held[slot]
+
+    return once
+
+
 def data_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path | None = None,
                  public_news: Any | None = None) -> Sources:
     from council.data.cache import FileCache
@@ -240,6 +303,7 @@ def data_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path |
             return gather_fundamentals(policy, now=slot, state_dir=state_dir)
 
     news, broker_feed = news_sources(policy, broker=broker, state_dir=state_dir, public=public_news)
+    news = memo_by_slot(news)
 
     earnings = None
     if has_stocks:
@@ -448,7 +512,7 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
                   publish: PublishMode = "preview", sources: Sources | None = None,
                   state_dir: Path | None = None, settings: Settings | None = None,
                   publisher_dir: Path | None = None, policy_from_head: bool | None = None,
-                  policy_fallback: bool | None = None) -> CycleContext:
+                  policy_fallback: bool | None = None, no_broker: bool = False) -> CycleContext:
     """`policy_from_head` (default: `mode == "live"`) loads policy from the committed HEAD, never
     the working tree: the runner's own checkout in live mode; for the operator's approval path, the
     installed release (`<state dir>/releases/current`, what the launchd jobs run) when there is one.
@@ -458,7 +522,9 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
     no verified snapshot exists. Once the sleeve is live (`invariants.STOCK_SLEEVE_LIVE`), a sleeve
     that is not the blob at its `stocks-<quarter>` tag yields a satellite-scoped
     `sleeve_policy_untagged` blocker, and a stock line whose eligibility was never checked a
-    satellite-scoped `stock_eligibility_unchecked` one (`eligibility_blockers`, every mode)."""
+    satellite-scoped `stock_eligibility_unchecked` one (`eligibility_blockers`, every mode).
+    `no_broker` (a paper run, `council cycle --paper`) never loads a broker token, whatever the
+    settings say: real data and models, no snapshot, no plan, no decision."""
     from council.ledger.db import Ledger
     from council.llm.prompts import PromptRegistry
 
@@ -481,10 +547,13 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
     ledger.migrate()
 
     broker = None
+    stubbed = stub_llm or mode == "stub"
     if sources is None:
-        if mode == "live" or (mode == "dry_run" and settings.agent_portfolio_id):
+        if not no_broker and (mode == "live" or (mode == "dry_run" and settings.agent_portfolio_id)):
             broker = read_broker(settings)
         sources = data_sources(policy, broker=broker, state_dir=root)
+        sources.swing = swing_sources(policy, settings, kind="fixture" if stubbed else "real", broker=broker,
+                                      state_dir=root, news=sources.news, ledger=ledger, live=mode == "live")
 
     publisher = None
     if publish == "preview":

@@ -182,7 +182,7 @@ def test_text_colours_meet_wcag_aa_on_every_surface():
     assert "background-size: 12px 100%" in short_rule and "no-repeat" in short_rule and "padding-left: 20px" in short_rule
     assert not re.search(r"--tile-(fund|stock|crypto|commodity|fx|other):", css)       # no asset-class hues
     seats = [k for k in t if k.startswith("--seat-") and k != "--seat-none"]
-    assert len(seats) == 14
+    assert len(seats) == 16          # 14 council seats + the swing Scout and Skeptic (user, 2026-09-28)
     for fg in seats:
         for bg in surfaces:
             assert _contrast(t[fg], t[bg]) >= 3.0, (fg, bg, round(_contrast(t[fg], t[bg]), 2))

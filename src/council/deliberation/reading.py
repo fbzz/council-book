@@ -9,13 +9,18 @@ For every news item an agent read, code (not a model) says what happened to it:
     else `not_cited`; `used` is True for the first two;
   - `why`: one fixed-template sentence (no model writes it). A later triage (news.md v2, T4) adds
     the analyst's own verdict and reason code for items it did not use.
-Every read item appears exactly once, in reading order (newest first). The private viewer reads
+Every read item appears exactly once, in reading order (newest first).
+The swing Scout's reading list (swing-book.md §7.1) uses the same logic with its own words:
+`idea` (a Scout idea cites it as a catalyst), `cited` (a later swing role cites it: the Skeptic's
+reasons, a debate claim or rebuttal, a PM action) or `not_used` (`scout_reading_list`, citations
+from the private swing record by `swing_citations`). The private viewer reads
 the capture (`reads_from_inputs`); the redaction layer and cycles without a capture rebuild the same
 list from the fact pack (`reads_from_pack`). Pure: no I/O.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -23,8 +28,10 @@ from typing import Any, Literal
 from council.deliberation.capture import section_parts
 from council.models.inputs import CycleInputs, LicensedInputs
 
-Disposition = Literal["card", "cited", "not_cited"]
-CitationKind = Literal["card", "claim", "rebuttal", "strongest", "driver", "deviation", "decisive"]
+Disposition = Literal["card", "cited", "not_cited", "idea", "not_used"]
+CitationKind = Literal["card", "claim", "rebuttal", "strongest", "driver", "deviation", "decisive",
+                       "idea", "verdict", "action"]
+SWING_ROLES = ("scout", "skeptic", "swing_bull", "swing_bear", "swing_pm")
 SPEAKERS = ("bull_open", "bear", "bull_rebuttal")
 
 
@@ -273,3 +280,121 @@ def with_links(readings: Sequence[Reading], links: Mapping[str, str]) -> list[Re
 
     return [replace(r, link=links[r.id]) if r.id in links and r.id.startswith("P:") else r
             for r in readings]
+
+
+# ----------------------------------------------------------------------------- the swing Scout
+def swing_citations(swing: Mapping[str, Any] | None) -> list[Citation]:
+    """Every citation in a private swing record (`CycleRecord.extras["swing"]`,
+    `council.swing.record`): Scout idea catalysts, Skeptic reasons, debate claims, rebuttals and
+    strongest-opposing facts, and PM actions."""
+    out: list[Citation] = []
+    swing = swing or {}
+    for idea in swing.get("ideas") or []:
+        ref = str(idea.get("ref", ""))
+        out.append(Citation(f"scout:{ref}", "idea", "scout",
+                            _ids([c.get("id") for c in idea.get("catalysts") or [] if isinstance(c, Mapping)])))
+        body = ((idea.get("verdict") or {}).get("verdict") or {})
+        for k, reason in enumerate(body.get("reasons") or [], start=1):
+            out.append(Citation(f"skeptic:{ref}:r{k}", "verdict", "skeptic", _ids(reason.get("evidence_ids"))))
+    for role in ("bull", "bear"):
+        case = swing.get(role) or {}
+        speaker = f"swing_{role}"
+        for claim in case.get("claims") or []:
+            out.append(Citation(f"{speaker}:{claim.get('claim_id')}", "claim", speaker, _ids(claim.get("evidence_ids"))))
+        for reb in case.get("rebuttals") or []:
+            out.append(Citation(f"{speaker}:rebuttal:{reb.get('claim_id')}", "rebuttal", speaker,
+                                _ids(reb.get("evidence_ids"))))
+        if case.get("strongest_opposing_fact_id"):
+            out.append(Citation(f"{speaker}:strongest", "strongest", speaker, _ids(case.get("strongest_opposing_fact_id"))))
+    for action in swing.get("actions") or []:
+        out.append(Citation(f"swing_pm:{action.get('ref')}", "action", "swing_pm", _ids(action.get("evidence_ids"))))
+    return [c for c in out if c.ids]
+
+
+def _scout_why(disposition: str, ideas: Sequence[str], cited: Sequence[str], read_by: Sequence[str]) -> str:
+    if disposition == "idea":
+        others = [c for c in cited if c not in ideas]
+        text = f"catalyst of {', '.join(i.split(':', 1)[1] for i in ideas)}"
+        return text + (f"; also cited by {', '.join(others)}" if others else "")
+    if disposition == "cited":
+        return f"no idea; cited by {', '.join(cited)}"
+    return f"read by {', '.join(read_by) if read_by else 'no agent'}; no idea, verdict, claim or action cited it"
+
+
+def scout_reading_list(
+    items: Sequence[NewsRead],
+    read_by: Mapping[str, Sequence[str]],
+    citations: Sequence[Citation],
+) -> list[Reading]:
+    """The Scout's reading list: one `Reading` per distinct item, `idea` / `cited` / `not_used`."""
+    out: list[Reading] = []
+    seen: set[str] = set()
+    for item in items:
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        cited = tuple(dict.fromkeys(c.by for c in citations if item.id in c.ids))
+        ideas = tuple(dict.fromkeys(c.by for c in citations if c.kind == "idea" and item.id in c.ids))
+        disposition: Disposition = "idea" if ideas else "cited" if cited else "not_used"
+        roles = tuple(read_by.get(item.id, ()))
+        out.append(Reading(
+            id=item.id, source=item.source, licence=item.licence, title=item.title, summary=item.summary,
+            symbols=item.symbols, age=item.age, available=item.available, read_by=roles, cited_by=cited,
+            cards=ideas, disposition=disposition, used=disposition != "not_used",
+            why=_scout_why(disposition, ideas, cited, roles),
+        ))
+    return out
+
+
+def scout_counts(readings: Sequence[Reading]) -> dict[str, int]:
+    """{"read": n, "idea": n, "cited": n, "not_used": n} for the Scout's summary line."""
+    out = {"read": len(readings), "idea": 0, "cited": 0, "not_used": 0}
+    for r in readings:
+        if r.disposition in out:
+            out[r.disposition] += 1
+    return out
+
+
+_SWING_ROW = re.compile(r"^- ([PNSM]:\S+?): (.*)$")
+_SWING_READING = ("READING LIST", "MOVERS SCREEN")
+
+
+def swing_reads_from_inputs(
+    inputs: CycleInputs, licensed: LicensedInputs | None = None
+) -> tuple[list[NewsRead], dict[str, tuple[str, ...]]]:
+    """The Scout's reading list and movers rows from a private capture (the swing sections are
+    plain text blocks: `- <id>: <line>` under READING LIST / MOVERS SCREEN), and every swing role
+    whose input mentions each id. A purged licensed section yields its ids with `available=False`."""
+    from council.deliberation.capture import section_text
+
+    rows: dict[str, NewsRead] = {}
+    readers: dict[str, list[str]] = {}
+    texts: dict[str, tuple[str, bool]] = {}
+    for call in inputs.calls:
+        if call.role not in SWING_ROLES:
+            continue
+        for key in call.sections:
+            sec = inputs.sections.get(key)
+            if sec is None:
+                continue
+            if key not in texts:
+                texts[key] = section_text(sec, licensed)
+            text, available = texts[key]
+            block = ""
+            for line in text.splitlines():
+                if line and not line.startswith("- "):
+                    block = line
+                    continue
+                m = _SWING_ROW.match(line)
+                if m is None:
+                    continue
+                rid, body = m.group(1), m.group(2)
+                if call.role == "scout" and block.startswith(_SWING_READING) and rid not in rows:
+                    source = "broker_feed" if rid.startswith("N:") else "movers_screen" if rid.startswith("M:") else "public"
+                    rows[rid] = NewsRead(id=rid, source=source,
+                                         licence="broker_licensed" if rid.startswith("N:") else "public",
+                                         title=body[:200], available=available)
+                roles = readers.setdefault(rid, [])
+                if call.role not in roles:
+                    roles.append(call.role)
+    return list(rows.values()), {k: tuple(v) for k, v in readers.items()}

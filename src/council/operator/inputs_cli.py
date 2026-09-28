@@ -3,6 +3,10 @@
 Commands (registered on the main CLI by `register(app)`):
   council inputs <cycle> [--role bear] [--replicate 0] [--attempt 0] [--section desk.full.lines]
                          [--system] [--replies] [--reading] [--html] [--rehearsal]
+      Swing roles (swing-book.md §7.1): --role scout | skeptic | swing_bull | swing_bear | swing_pm.
+      With --role scout (or no role on a swing slot) the Scout's reading list follows, one
+      disposition per item: idea (a Scout idea's catalyst), cited (by a later swing role) or
+      not_used; citations come from the ledger record's private swing record.
       Prints the exact private input of every call (the user message byte for byte, the system
       prompt with --system, the correction turn, the raw replies with --replies) and the news
       reading list (one disposition per item: used / ignored and why). --html writes a local page
@@ -46,12 +50,17 @@ from council.deliberation.capture import (
     write_private,
 )
 from council.deliberation.reading import (
+    SWING_ROLES,
     Reading,
     citations_from_record,
     counts,
     public_links,
     reading_list,
     reads_from_inputs,
+    scout_counts,
+    scout_reading_list,
+    swing_citations,
+    swing_reads_from_inputs,
     with_links,
 )
 from council.models.inputs import CallInput, CycleInputs, LicensedInputs
@@ -99,6 +108,15 @@ def readings_for(inputs: CycleInputs, licensed: LicensedInputs | None,
     return with_links(readings, public_links(record))
 
 
+def scout_readings_for(inputs: CycleInputs, licensed: LicensedInputs | None,
+                       record: Mapping[str, Any] | None) -> list[Reading]:
+    """The swing Scout's reading list (empty when the cycle had no swing slot)."""
+    items, read_by = swing_reads_from_inputs(inputs, licensed)
+    swing = ((record or {}).get("extras") or {}).get("swing") if isinstance(record, Mapping) else None
+    readings = scout_reading_list(items, read_by, swing_citations(swing if isinstance(swing, Mapping) else None))
+    return with_links(readings, public_links(record))
+
+
 def select_calls(inputs: CycleInputs, *, role: str | None = None, replicate: int | None = None,
                  attempt: int | None = None) -> list[CallInput]:
     return [c for c in inputs.calls
@@ -141,6 +159,7 @@ def render_text(
     system: bool = False,
     replies: bool = False,
     readings: Sequence[Reading] | None = None,
+    scout_readings: Sequence[Reading] | None = None,
 ) -> str:
     calls = select_calls(inputs, role=role, replicate=replicate, attempt=attempt)
     out = [BANNER, f"cycle {inputs.cycle_id} · captured {inputs.captured_at:%Y-%m-%d %H:%M} UTC · "
@@ -187,7 +206,22 @@ def render_text(
                 out += [f"[reply {i}]", reply]
     if readings is not None:
         out += ["", *reading_text(readings)]
+    if scout_readings:
+        out += ["", *scout_reading_text(scout_readings)]
     return "\n".join(out) + "\n"
+
+
+def scout_reading_text(readings: Sequence[Reading]) -> list[str]:
+    c = scout_counts(readings)
+    out = [f"--- swing Scout reading list: {c['read']} read · {c['idea']} became ideas · "
+           f"{c['cited']} cited later · {c['not_used']} not used ---"]
+    for r in readings:
+        mark = f" ({ETORO_MARK})" if r.source in BROKER_LABELS else ""
+        out.append(f"{r.id} {r.source}{mark}: {r.title}")
+        out.append(f"    {'USED' if r.used else 'IGNORED'} ({r.disposition}): {r.why}")
+        if r.link:
+            out.append(f"    link: {r.link}")
+    return out
 
 
 def reading_text(readings: Sequence[Reading]) -> list[str]:
@@ -427,7 +461,8 @@ def _load_or_exit(root: Path, cycle_id: str) -> tuple[CycleInputs, LicensedInput
 @inputs_app.command("show")
 def show_command(
     cycle_id: Annotated[str, typer.Argument(help="Cycle id, e.g. 2026-10-01T1440Z.")],
-    role: Annotated[str | None, typer.Option(help="Only this role's calls (news, bear, pm, ...).")] = None,
+    role: Annotated[str | None, typer.Option(help="Only this role's calls (news, bear, pm, scout, skeptic, "
+                                                   "swing_bull, swing_bear, swing_pm, ...).")] = None,
     replicate: Annotated[int | None, typer.Option(help="Only this replicate.")] = None,
     attempt: Annotated[int | None, typer.Option(help="Only this stage attempt.")] = None,
     section: Annotated[str | None, typer.Option(help="Print one section, e.g. desk.full.lines.")] = None,
@@ -448,9 +483,11 @@ def show_command(
                           role=role)
         typer.echo(f"{BANNER}\nwrote {path}")
         return
+    scout = scout_readings_for(inputs, licensed, record) if role in (None, "scout") or reading else []
     typer.echo(render_text(inputs, licensed, role=role, replicate=replicate, attempt=attempt,
                            section=section, system=system, replies=replies,
-                           readings=readings if reading or role in (None, "news") else None), nl=False)
+                           readings=readings if (reading or role in (None, "news")) and role not in SWING_ROLES else None,
+                           scout_readings=scout), nl=False)
 
 
 @inputs_app.command("verify")

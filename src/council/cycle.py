@@ -77,7 +77,8 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from council import clock
@@ -105,6 +106,9 @@ from council.runtime import (
     material_fingerprint,
     material_fingerprints,
     window,
+)
+from council.swing.sources import (
+    SwingSources,  # noqa: F401 - re-exported (the swing stage's inputs)
 )
 
 REDACT_ERROR = "redact_error"             # flag prefix and URGENT kind when public_cycle raises (V11)
@@ -1286,27 +1290,6 @@ SWING_ENTRY_VALID = timedelta(minutes=60)     # S16: a swing entry leg's own app
 
 
 @dataclass
-class SwingSources:
-    """The swing stage's inputs (SW-1 data layer, injected; no network of its own here).
-
-    `inputs(slot, open_trades, code_exits)` -> `swing.council.SwingInputs`; `gate` the code gate
-    (resolve + fact card); `reference_price(ticker)` the slot-time reference for paper tracking;
-    `candidate_extras(idea)` what code knows beyond the card (sector, correlations, listing days);
-    `daily_bars(tickers, day)` completed daily bars for `paper.settle`; `benchmark_returns(day)`
-    the SQ-8 names' and SPX's returns of that close; `matched_legs(day)` the open trades as
-    `benchmark.sq8.MatchedLeg`s."""
-
-    inputs: Any
-    gate: Any
-    skeptic_gateway: Any = None
-    reference_price: Any = None
-    candidate_extras: Any = None
-    daily_bars: Any = None
-    benchmark_returns: Any = None
-    matched_legs: Any = None
-
-
-@dataclass
 class SwingEntry:
     trade_id: str
     idea_id: str
@@ -1361,6 +1344,10 @@ async def run_swing(ctx: CycleContext, rec: CycleRecord, *, snapshot: Any, kill_
         out.flags += settle_swing(ctx.ledger, now)
         stage = "daily"
         out.flags += swing_daily(ctx, slot, now)
+        src = getattr(ctx.sources, "swing", None)
+        if src is not None and getattr(src, "prepare", None) is not None and not src.unavailable:
+            stage = "prepare"
+            out.flags += src.prepare(slot, now)          # the after-close screen, once per session
         stage = "slot"
         from council.swing.slots import is_swing_slot
 
@@ -1384,6 +1371,10 @@ async def run_swing(ctx: CycleContext, rec: CycleRecord, *, snapshot: Any, kill_
         logging.getLogger("council.cycle").exception("swing stage failed")
         out.flags.append(f"swing_error:{stage}:{type(exc).__name__}")
         out.lines, out.orders, out.entries = [], [], []
+    finally:
+        src = getattr(ctx.sources, "swing", None)
+        if src is not None and hasattr(src, "drain"):
+            out.flags += [f for f in src.drain() if f not in out.flags]
     if not out.live:
         out.lines, out.orders = [], []
     return out
@@ -1401,6 +1392,10 @@ def settle_swing(ledger: Any, now: datetime) -> list[str]:
         trades = ledger.swing_trades(states=["proposed", "exit_pending"])
     except Exception:  # noqa: BLE001 - an old ledger: nothing to settle
         return flags
+    try:
+        expire_stale_ideas(ledger, now)
+    except Exception as exc:  # noqa: BLE001 - an idea housekeeping failure never stops settling
+        flags.append(f"swing_idea_expiry_error:{type(exc).__name__}")
     for t in trades:
         try:
             if t.state == "proposed" and t.decision_id:
@@ -1420,25 +1415,20 @@ def settle_swing(ledger: Any, now: datetime) -> list[str]:
 
 
 def _settle_exit(ledger: Any, t: Any, now: datetime, dead: tuple[str, ...]) -> list[str]:
-    from council import watch
+    """The fallback of the executor's own close (`swing.exits.close_filled_exit`, idempotent): a
+    filled exit closes the trade; a rejected / expired exit returns it to where it was."""
+    from council.swing.exits import close_filled_exit
 
     detail = t.detail or {}
     decision_id = detail.get("exit_decision")
     if not isinstance(decision_id, str):
         return []
+    if close_filled_exit(ledger, t.trade_id, decision_id, now) is not None:
+        return []
     d = ledger.get_decision(decision_id)
     legs = [r for r in ledger.legs(decision_id) if r.kind == "close" and (r.detail or {}).get("swing_trade_id") == t.trade_id]
     filled = [r for r in legs if r.state == "filled"]
     back = str(detail.get("pre_exit_state") or "open")
-    if legs and len(filled) == len(legs):
-        kind = str(detail.get("exit_kind") or "exit")
-        state = {"time": "closed_time", "halt": "closed_halt"}.get(kind, "closed_exit")
-        rates = [float(r.detail.get("fill_price") or r.detail.get("fill_rate") or r.detail.get("avg_price") or 0) for r in filled]
-        rate = rates[0] if rates and rates[0] > 0 else None
-        ledger.update_swing_trade(t.trade_id, detail=watch.trade_outcome_detail(t, rate, kind, now), now=now)
-        ledger.transition_swing_trade(t.trade_id, state, close_rate=rate, reason=f"exit_filled:{kind}",
-                                      cycle_id=d.cycle_id, now=now)
-        return []
     if d.state in dead or (d.state in ("completed", "completed_partial", "blocked") and not filled
                            and all(r.state in ("planned", "skipped", "rejected") for r in legs)):
         ledger.transition_swing_trade(t.trade_id, back, reason=f"exit_{d.state}"[:64], cycle_id=d.cycle_id, now=now)
@@ -1539,10 +1529,11 @@ def _swing_cost_fn(ctx: CycleContext, snapshot: Any, slot: datetime) -> Any:
         cfg = None
 
     def cost(side: str, size: float, sessions: int) -> float | None:
-        if snapshot is None or cfg is None:
+        if cfg is None or (snapshot is None and account is None):
             return None
         try:
-            nav = float(snapshot.equity_usd)
+            # no snapshot = a paper run (never live): the funded NAV stands in (NAV-invariant, D18)
+            nav = float(snapshot.equity_usd) if snapshot is not None else float(account.funded_real_nav_usd)  # type: ignore[union-attr]
             return sc.round_trip(side, size_nav=size, real_nav_usd=nav, virtual_nav_usd=nav,  # type: ignore[arg-type]
                                  account=account, cfg=cfg, entry_day=slot.astimezone(NEW_YORK).date(),
                                  time_stop_sessions=sessions).total_pct
@@ -1570,6 +1561,50 @@ def _swing_ledger_idea(ledger: Any, cycle_id: str, idea: Any, status: str, now: 
     return iid
 
 
+REPROPOSAL_SESSIONS = 3          # §4.3: at most `entry_guard.max_reproposals` re-proposals within 3 sessions
+
+
+def _idea_sessions(row: Mapping[str, Any], now: datetime) -> int:
+    from council.clock import NEW_YORK
+    from council.swing.rules import sessions_until
+
+    created = row.get("created_at")
+    try:
+        born = created if isinstance(created, datetime) else datetime.fromisoformat(str(created))
+    except ValueError:
+        return REPROPOSAL_SESSIONS + 1          # unreadable: treat as too old (fail closed)
+    if born.tzinfo is None:
+        born = born.replace(tzinfo=UTC)
+    return sessions_until(born.astimezone(NEW_YORK).date(), now.astimezone(NEW_YORK).date())
+
+
+def reproposal_refused(ledger: Any, policy: Any, ticker: str, side: str, now: datetime) -> bool:
+    """§4.3: a missed entry returns to `pending`; the Scout may re-propose it at most
+    `entry_guard.max_reproposals` times within REPROPOSAL_SESSIONS sessions of the first proposal,
+    then it is `expired`. True (and the pending idea -> `expired`) when this re-proposal is over the
+    limit. A ticker/side with no pending idea is a fresh idea (False)."""
+    limit = int(policy.swing.entry_guard.max_reproposals)
+    for row in ledger.swing_ideas(status="pending"):
+        if row["ticker"] != ticker or row["side"] != side:
+            continue
+        carried = [c for c in row.get("carry_cycles") or [] if c != row.get("origin_cycle")]
+        if len(carried) >= limit or _idea_sessions(row, now) > REPROPOSAL_SESSIONS:
+            ledger.update_swing_idea(row["idea_id"], status="expired", now=now)
+            return True
+        return False
+    return False
+
+
+def expire_stale_ideas(ledger: Any, now: datetime) -> list[str]:
+    """Pending ideas older than REPROPOSAL_SESSIONS sessions -> `expired` (never re-proposed)."""
+    out = []
+    for row in ledger.swing_ideas(status="pending"):
+        if _idea_sessions(row, now) > REPROPOSAL_SESSIONS:
+            ledger.update_swing_idea(row["idea_id"], status="expired", now=now)
+            out.append(str(row["idea_id"]))
+    return out
+
+
 async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, snapshot: Any, kill_state: str,
                          nav: Any, slot: datetime, now: datetime, econ: Any, sink: Any) -> None:
     from council.broker.instruments import InstrumentMap
@@ -1581,6 +1616,9 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
     if src is None:
         out.flags.append("swing_sources_missing")
         return
+    if getattr(src, "unavailable", ()):             # fail closed: a missing credential, no council
+        out.flags += [f for f in src.unavailable if f not in out.flags]
+        return
     views = _open_trade_views(ledger, snapshot, slot, out.exits)
     inputs = src.inputs(slot, views, list(out.exits))
     result = await run_swing_stage(ctx.gateway, ctx.registry, policy, inputs, gate=src.gate,
@@ -1590,6 +1628,11 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
     for ref in result.exits():                   # PM exits of open trades (code exits already in)
         if ref.startswith("trade:") and ref not in out.exits:
             out.exits[ref] = "exit"
+    if snapshot is None and not out.live:
+        # a paper run without a broker (SW-5c): the S-rules see a flat book at its peak and the
+        # funded NAV of the account file (costs are NAV-invariant, D18); nothing here can trade
+        nav = SimpleNamespace(drawdown=0.0)
+        out.flags.append("swing_paper_assumed_book")
     book = _book_state(ledger, policy, kill_state=kill_state, nav=nav, slot=slot, now=now)
     cost_fn = _swing_cost_fn(ctx, snapshot, slot)
     imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
@@ -1611,6 +1654,9 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
     short = _swing_short(cycle_id)
     for k, (ref, idea) in enumerate(sorted(result.ideas.items()), start=1):
         v = ok.get(ref)
+        if v is not None and reproposal_refused(ledger, policy, idea.ticker, idea.idea.side, now):
+            v = None                                    # §4.3: over the re-proposal limit -> expired
+            out.flags.append("swing_drop:reproposal_limit")
         status = "accepted" if v is not None else "dropped"
         idea_id = _swing_ledger_idea(ledger, cycle_id, idea, status, now)
         verdict = idea.verdict.verdict if idea.verdict is not None else None
@@ -1628,6 +1674,7 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
                         "target_pct": round(float(v.target_pct or 0), 6),
                         "beta": float(beta) if isinstance(beta, int | float) else None,
                         "sigma_daily": float(sigma) / 100.0 if isinstance(sigma, int | float) else None,
+                        "sector_etf": card.get("sector_etf") if isinstance(card.get("sector_etf"), str) else None,
                         "skeptic": verdict.verdict if verdict is not None else None,
                         "priced_in": verdict.priced_in if verdict is not None else None,
                         "regime": verdict.regime if verdict is not None else None,
@@ -1647,8 +1694,8 @@ def _paper_group(result: Any, ref: str, idea: Any, accepted: bool, live: bool) -
     if outcome is not None and outcome.stage == "skeptic":
         status = idea.verdict.status if idea.verdict is not None else None
         return "skeptic_wait" if status == "wait" else "skeptic_rejected"
-    if outcome is not None and outcome.stage == "pm":
-        return "pm_passed"
+    if outcome is not None and outcome.stage == "pm" and outcome.code is not None:
+        return "pm_passed"              # the PM passed; a PM entry the S-rules dropped is code_dropped
     return "code_dropped"
 
 

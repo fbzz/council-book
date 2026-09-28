@@ -578,7 +578,8 @@ def _num(value: Any) -> float | None:
 
 
 def record_swing_close(ledger: Any, read: Any, trade_id: str, position_id: int | None, *, now: datetime,
-                       state_dir: Any = None, route_ok: bool | None = None) -> str | None:
+                       state_dir: Any = None, route_ok: bool | None = None,
+                       sector_bars: Any = None) -> str | None:
     """Classify and record one swing trade the broker closed (its SL / TP, or outside them). The
     closed-trade record is read only when `closed_trade_route` is proven. Returns the new state, or
     None when the trade is unknown, already closed, or still holds another live position."""
@@ -592,8 +593,11 @@ def record_swing_close(ledger: Any, read: Any, trade_id: str, position_id: int |
     record = closed_trade_record(read, position_id) if ok else None
     state, rate = classify_swing_close(trade.side, trade.sl_rate, trade.tp_rate,
                                        dict(record) if record is not None else None)
+    from council.swing.exits import sector_etf_return
+
+    sector = sector_etf_return(trade.detail or {}, trade.opened_at, now, sector_bars)
     ledger.update_swing_trade(trade_id, detail=trade_outcome_detail(trade, rate, state.removeprefix("closed_"),
-                                                                    now), now=now)
+                                                                    now, sector_etf_ret=sector), now=now)
     ledger.transition_swing_trade(trade_id, state, close_rate=rate, now=now,
                                   reason=f"broker_close:{state.removeprefix('closed_')}")
     return state
@@ -615,8 +619,10 @@ def _swing_closed(ctx: CycleContext, v: Any, live: dict[int, Any], now: datetime
     if any(pid in live for pid in trade.position_ids):
         return [f"swing position partly closed at the broker: {v.line}"]
     try:
+        swing_src = getattr(ctx.sources, "swing", None)
         state = record_swing_close(ledger, ctx.sources.broker, trade.trade_id, v.position_id, now=now,
-                                   state_dir=ctx.state_dir, route_ok=closed_trade_route_ok(ctx.state_dir))
+                                   state_dir=ctx.state_dir, route_ok=closed_trade_route_ok(ctx.state_dir),
+                                   sector_bars=getattr(swing_src, "daily_bars", None))
     except Exception as exc:  # noqa: BLE001 - never a guessed outcome: the operator checks
         return [f"URGENT swing_close_error:{v.line}:{type(exc).__name__}"]
     if state == "closed_target":
@@ -935,8 +941,15 @@ def _final_after_wait(ctx: CycleContext, rows: list[Any], port: Any, now: dateti
     targets = {r.line: float(r.detail["weight_after"]) for r in rows if r.detail.get("weight_after") is not None}
     from council.swing.book import swing_vehicle_map
 
+    smoke_ids: set[int] = set()
+    try:            # smoke positions are expected, never unknown (S7 / S8 on a stock no line owns)
+        smoke_ids = set(ctx.ledger.smoke_positions())
+        if rows and getattr(ctx.ledger.get_decision(rows[0].decision_id), "kind", None) == "smoke":
+            smoke_ids |= {int(p) for r in rows if r.kind == "open" for p in r.position_ids}
+    except Exception:  # noqa: BLE001 - without the smoke view the plain reconcile applies (fail closed)
+        smoke_ids = set()
     rec = reconcile(snapshot_from_portfolio(port, now), targets, expected, ctx.policy,
-                    swing_map=swing_vehicle_map(ctx.ledger, ctx.policy))
+                    swing_map=swing_vehicle_map(ctx.ledger, ctx.policy), smoke_position_ids=smoke_ids)
     rec, corporate_notes = _corporate_reconcile(ctx, rec, port)
     reasons += corporate_notes
     if not rec.protected:

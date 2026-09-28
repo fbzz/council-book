@@ -987,11 +987,19 @@ def public_cycle(
     *,
     lines: Iterable[LineSpec] | Universe | Mapping[str, LineSpec] | None,
     install_key: bytes | None = None,
+    swing_texts: Mapping[str, Sequence[str] | None] | None = None,
+    swing_trades: Iterable[Any] = (),
+    swing_health: Any = None,
 ) -> PublicCycleV1:
     """Build the public cycle document from the private record (and the pack, for licensed-text,
     FRED, news-source and cost-source checks). `install_key` (`council.publish.install_key`) keys
     the material-change fingerprint. Raises pydantic.ValidationError if anything falls outside
-    the allow-list."""
+    the allow-list.
+
+    Swing slot (`rec.extras["swing"]`, `council.swing.record`): `swing_texts` = {cycle id: the
+    licensed feed texts its agents saw} for this cycle and every origin of a carried idea
+    (`council.swing.record.origin_texts`); `swing_trades` = the ledger's swing trades (the book at
+    seal time); `swing_health` = `public_skeptic_health(...)`. Without the record: no swing part."""
     lm = LineMap(lines)
     text = _Text(licensed_texts(pack))
     ev = _Evidence(pack)
@@ -1055,6 +1063,11 @@ def public_cycle(
         "calls": _calls(rec),
         "facts": facts,
     }
+    swing = rec.extras.get("swing") if isinstance(rec.extras, Mapping) else None
+    if isinstance(swing, Mapping) and swing.get("ideas") is not None:
+        fields["swing"] = public_swing_section(
+            swing, cycle_id=rec.cycle_id, licensed_texts=licensed_texts(pack), origin_texts=swing_texts,
+            trades=swing_trades, today=rec.slot.astimezone(clock.NEW_YORK).date(), health=swing_health)
     # Counters are complete only after every field above was built.
     if lm.unmapped:
         flags.append(f"unmapped_symbols_dropped:{lm.unmapped}")
@@ -1363,4 +1376,507 @@ def public_status(
     return PublicStatus(
         state=state, last_cycle_id=last_cycle_id, last_cycle_at=last_cycle_at,
         kill_state=kill, note=clean_text(note, 200),
+    )
+
+
+# ------------------------------------------------------------------------------ swing book (SW-7)
+# swing-book.md rev 2, §7.2 / §7.3. The private record is `extras["swing"]` (`council.swing.record`);
+# every public value is re-read field by field into the allow-listed swing models:
+# - percent-only: distances from the entry, weights x NAV, R and % of the position net of the
+#   DECLARED cost (1.25% per leg), bp of NAV. Never a price, rate, unit, amount or id of the broker.
+# - the fact card's live layer (`move_*_live_*`, the broker's rate at the slot) is withheld as
+#   `broker_data`; short interest, dollar volume and correlations are never listed; Alpaca-derived
+#   fields are `unknown_source` until the data-rights row is widened (Q-S10, `alpaca_public`).
+# - a reason, claim or argument that cites a live-layer id loses every number (`scrub_numbers`):
+#   the model may have quoted the live value.
+# - an `N:` catalyst is its id only; a `P:` item keeps its title and its .gov link; `S:` its form
+#   and item codes.
+# - model text is cleaned (`clean_text`) and withheld on an 8-word overlap with the licensed feed
+#   texts of THIS cycle's swing reading and of EVERY cycle a carried-forward idea came from (H9,
+#   `leakscan.origin_matcher`); texts that cannot be checked (a purged origin) are withheld.
+SWING_WITHHELD = "[withheld: carried from an earlier cycle; its feed text cannot be shown]"
+SWING_DECLARED_COST_PCT = 1.25
+_SWING_LIVE = re.compile(r"^move_[a-z_]*live[a-z_]*$")
+_SWING_NEVER = frozenset({"adv_usd_20d", "short_interest_pct_float", "short_interest_basis", "days_to_cover",
+                          "short_interest_settlement", "catalyst_items_feed", "corr_60d_with"})
+_SWING_ID = re.compile(r"^(?:X:[A-Z0-9](?:[A-Z0-9_]{0,10}[A-Z0-9])?:[a-z0-9_]{1,48}|N:[0-9a-f]{8}|P:[0-9a-f]{8}"
+                       r"|S:[A-Za-z0-9_.:@#+-]{1,80}|M:[A-Za-z0-9_.:@-]{1,60}|[FVCEK]:[A-Za-z0-9_.:@#+-]{1,80})$")
+_NUMBER = re.compile(r"[-+±]?\d[\d,]*(?:\.\d+)?\s?(?:%|σ|sigma\b|pct\b|percent\b|bps?\b|x\b)?")
+_GOV_LINK = re.compile(r"^https://[A-Za-z0-9.-]+\.gov/\S*$")
+_SETUP_RE = re.compile(r"^[a-z][a-z_]{0,31}$")
+_FACT_KEY = re.compile(r"^[a-z0-9_]{1,48}$")
+_SWING_TRADE_STATES = {
+    "open": "open", "partial": "open", "open_tp_missing": "open_tp_missing", "exit_pending": "exit_pending",
+    "closed_stop": "closed_stop", "closed_target": "closed_target", "closed_time": "closed_time",
+    "closed_exit": "closed_exit", "closed_halt": "closed_halt", "closed_external": "closed_external",
+    "closed_unclassified": "closed_external",
+}
+_EXIT_KIND = {"closed_stop": "stop", "closed_target": "target", "closed_time": "time", "closed_exit": "exit",
+              "closed_halt": "halt", "closed_external": "external"}
+
+
+def scrub_numbers(text: str) -> str:
+    """Remove every number (with its %, σ or bp) from a text that cites a live-layer value."""
+    return _NUMBER.sub("[value removed]", text)
+
+
+def swing_line(ticker: str) -> str | None:
+    """A swing ticker as a public line id (BRK.B -> BRK_B); None when it does not fit the pattern."""
+    line = re.sub(r"[.\-]", "_", str(ticker or "").upper())
+    return line if re.match(r"^[A-Z0-9](?:[A-Z0-9_]{0,10}[A-Z0-9])?$", line) else None
+
+
+def is_live_id(eid: str) -> bool:
+    return eid.startswith("X:") and bool(_SWING_LIVE.match(eid.rsplit(":", 1)[-1]))
+
+
+class _SwingText:
+    """Cleans one idea's model text: `clean_text`, then the licensed-overlap check against every
+    feed text that applies (this cycle's and the idea's origin cycles'), then (when the text cites
+    a live-layer id) the number scrub. `blocked` withholds every text (unverifiable origin)."""
+
+    def __init__(self, matcher: leakscan.LicensedMatcher, blocked: bool = False):
+        self.matcher, self.blocked = matcher, blocked
+        self.withheld = 0
+
+    def __call__(self, value: Any, max_len: int, *, live: bool = False) -> str:
+        if value is None or value == "":
+            return ""
+        if self.blocked:
+            self.withheld += 1
+            return SWING_WITHHELD[:max_len]
+        text = clean_text(str(value), max_len)
+        if self.matcher and self.matcher.hits(text):
+            self.withheld += 1
+            return WITHHELD_LICENSED[:max_len]
+        return _clip(scrub_numbers(text), max_len) if live else text
+
+
+def _swing_ids(ids: Iterable[Any], dropped: list[int]) -> list[str]:
+    out: list[str] = []
+    for raw in ids or []:
+        eid = str(raw)
+        if _SWING_ID.match(eid):
+            if eid not in out:
+                out.append(eid)
+        else:
+            dropped[0] += 1
+    return out
+
+
+def _swing_catalyst(row: Mapping[str, Any], text: _SwingText) -> Any:
+    from council.publish.public_models import PublicSwingCatalyst
+
+    cid = str(row.get("id") or "")
+    if not _SWING_ID.match(cid) or cid[:2] not in ("N:", "P:", "S:", "M:"):
+        return None
+    if cid.startswith("N:"):
+        return PublicSwingCatalyst(id=cid, kind="broker_feed")
+    if cid.startswith("M:"):
+        return PublicSwingCatalyst(id=cid, kind="screen")
+    title = clean_text(str(row.get("title") or ""), 160) or None
+    if cid.startswith("P:"):
+        link = str(row.get("link") or "")
+        return PublicSwingCatalyst(id=cid, kind="public_news", title=title,
+                                   link=link if _GOV_LINK.match(link) and len(link) <= 300 else None)
+    form = clean_text(str(row.get("form") or ""), 16) or None
+    items = [clean_text(str(i), 8) for i in (row.get("items") or [])][:8]
+    return PublicSwingCatalyst(id=cid, kind="filing", title=title, form=form, items=[i for i in items if i])
+
+
+def _swing_facts(fields: Mapping[str, Any], *, alpaca_public: bool) -> tuple[dict[str, Any], dict[str, str]]:
+    from council.swing.facts import ALPACA_FIELDS
+
+    facts: dict[str, Any] = {}
+    withheld: dict[str, str] = {}
+    for key in sorted(fields):
+        value = fields[key]
+        if not _FACT_KEY.match(key) or key in _SWING_NEVER or leakscan.key_denied(key):
+            continue
+        if _SWING_LIVE.match(key):
+            withheld[key] = "broker_data"
+            continue
+        if key in ALPACA_FIELDS and not alpaca_public:
+            withheld[key] = "unknown_source"
+            continue
+        if key.startswith("vol_ratio") and isinstance(value, int | float) and not isinstance(value, bool):
+            v = float(value)                      # §7.3: volume ratios publish as buckets only
+            facts[key] = "<1" if v < 1 else "1-2" if v < 2 else "2-4" if v < 4 else ">4"
+        elif isinstance(value, bool):
+            facts[key] = value
+        elif isinstance(value, int | float):
+            if math.isfinite(float(value)) and abs(float(value)) < 1_000_000:
+                facts[key] = round(float(value), 3)
+        elif isinstance(value, str) and value and len(value) <= 40 and literal_ok(value):
+            facts[key] = value
+    return facts, withheld
+
+
+def _skeptic_public(ref: str, v: Mapping[str, Any] | None, text: _SwingText, dropped: list[int]) -> Any:
+    from council.publish.public_models import PublicSkepticVerdict, PublicSwingReason
+    from council.swing.council import model_family
+
+    if not v:
+        return None
+    status, code = v.get("status"), v.get("code")
+    verdict = {"pass": "pass", "wait": "wait", "reject": "reject"}.get(str(status))
+    override = v.get("override")
+    if verdict is None:
+        verdict = "reject" if code == "catalyst_misread" else "failed"
+    body = v.get("verdict") or {}
+    reasons = []
+    for r in body.get("reasons") or []:
+        ids = _swing_ids(r.get("evidence_ids"), dropped)
+        reasons.append(PublicSwingReason(text=text(r.get("text"), 180, live=any(is_live_id(e) for e in ids)),
+                                         evidence=ids[:4]))
+    any_live = any(is_live_id(e) for r in reasons for e in r.evidence)
+    said = v.get("said") if v.get("said") in ("pass", "wait", "reject") else None
+    model = str(v.get("model") or "")
+    family = model_family(model) if model else ""
+    family = re.sub(r"[^a-z0-9_.-]", "", family.lower())[:32]
+    enum = lambda key, allowed: body.get(key) if body.get(key) in allowed else "unknown"  # noqa: E731
+    return PublicSkepticVerdict(
+        ref=ref, verdict=verdict, said=said if said != verdict else None,
+        discounted=enum("priced_in", ("no", "partly", "mostly", "fully")),
+        news_status=enum("news_status", ("new", "follow_up", "stale", "restated")),
+        regime=enum("regime", ("supports", "neutral", "against")),
+        crowding=enum("crowding", ("low", "medium", "high")),
+        catalyst_supports_claim=body.get("catalyst_supports_claim") if isinstance(body.get("catalyst_supports_claim"), bool) else None,
+        claim_supports_side=body.get("claim_supports_side") if isinstance(body.get("claim_supports_side"), bool) else None,
+        code_override=_code(str(override)) if override else None,
+        model_family=family, same_family="skeptic_same_model" in (v.get("flags") or []),
+        reasons=reasons[:5],
+        what_would_change_my_mind=text(body.get("what_would_change_my_mind"), 180, live=any_live),
+        second_order=text(body.get("second_order"), 180, live=any_live) or None,
+    )
+
+
+def _swing_case(case: Mapping[str, Any] | None, text: _SwingText, dropped: list[int], refs: Mapping[str, str]) -> Any:
+    from council.publish.public_models import PublicSwingCase, PublicSwingClaim, PublicSwingRebuttal
+
+    if not case:
+        return None
+    claims, live_any = [], False
+    for c in case.get("claims") or []:
+        ref = refs.get(str(c.get("ref")), str(c.get("ref")))
+        if not re.match(r"^(idea:[0-9]{1,2}|trade:[A-Za-z0-9_\-]{1,64})$", ref):
+            dropped[0] += 1
+            continue
+        ids = _swing_ids(c.get("evidence_ids"), dropped)
+        live = any(is_live_id(e) for e in ids)
+        live_any |= live
+        claims.append(PublicSwingClaim(claim_id=str(c.get("claim_id")), ref=ref,
+                                       text=text(c.get("text"), 330, live=live), evidence=ids[:6]))
+    rebuttals = []
+    for r in case.get("rebuttals") or []:
+        ids = _swing_ids(r.get("evidence_ids"), dropped)
+        live = any(is_live_id(e) for e in ids)
+        live_any |= live
+        if r.get("verdict") in ("concede", "refute"):
+            rebuttals.append(PublicSwingRebuttal(claim_id=str(r.get("claim_id")), verdict=r["verdict"],
+                                                 text=text(r.get("text"), 270, live=live), evidence=ids[:4]))
+    live_any |= is_live_id(str(case.get("strongest_opposing_fact_id") or ""))
+    return PublicSwingCase(argument=text(case.get("argument"), 1600, live=live_any), claims=claims[:8],
+                           rebuttals=rebuttals[:8])
+
+
+def public_swing_section(
+    record: Mapping[str, Any],
+    *,
+    cycle_id: str,
+    licensed_texts: Sequence[str] = (),
+    origin_texts: Mapping[str, Sequence[str] | None] | None = None,
+    trades: Iterable[Any] = (),
+    today: Any = None,
+    health: Any = None,
+    alpaca_public: bool = False,
+    declared_cost_pct_per_leg: float = SWING_DECLARED_COST_PCT,
+) -> Any:
+    """The swing part of one sealed cycle from its private record (`council.swing.record`).
+    `licensed_texts`: the cycle pack's licensed texts; `origin_texts`: {cycle id: licensed feed texts
+    its agents saw} for THIS cycle's swing reading and every origin of a carried idea (None or a
+    missing key = unverifiable, the text is withheld); `trades`: the ledger's swing trades to show
+    as the book at seal time (percent-only)."""
+    from council.publish.public_models import PublicSwingIdea, PublicSwingSection, PublicSwingVotes
+
+    origin_texts = dict(origin_texts or {})
+    flags: list[str] = []
+    dropped = [0]
+    own = origin_texts.get(cycle_id)
+    if own is None:
+        flags.append("swing_licensed_texts_unavailable")
+    base_texts = list(licensed_texts) + list(own or [])
+    ideas_out = []
+    refs: dict[str, str] = {}
+    counter = [0]
+    for row in record.get("ideas") or []:
+        ref = str(row.get("ref") or "")
+        if not re.match(r"^idea:[0-9]{1,2}$", ref):
+            dropped[0] += 1
+            continue
+        refs[ref] = ref
+        line = swing_line(str(row.get("ticker") or ""))
+        side = row.get("side")
+        if line is None or side not in ("long", "short"):
+            dropped[0] += 1
+            continue
+        origins = [c for c in (row.get("carried_from") or []) if isinstance(c, str) and re.match(CYCLE_ID_RE, c)
+                   and c != cycle_id]
+        blocked = own is None
+        if origins:
+            try:
+                leakscan.origin_matcher(origin_texts, origins)       # raises when any origin is unreadable
+            except leakscan.OriginTextsUnavailable:
+                blocked = True
+        matcher = leakscan.LicensedMatcher(base_texts + [t for c in origins for t in (origin_texts.get(c) or [])])
+        text = _SwingText(matcher, blocked=blocked)
+        claim = text(row.get("catalyst_claim"), 135)
+        thesis = text(row.get("thesis"), 440)
+        verdict = _skeptic_public(ref, row.get("verdict"), text, dropped)
+        cats = [c for c in (_swing_catalyst(x, text) for x in (row.get("catalysts") or [])) if c is not None][:4]
+        facts, withheld = _swing_facts(row.get("facts") or {}, alpaca_public=alpaca_public)
+        votes = row.get("votes")
+        setup = str(row.get("setup") or "unknown")
+        text_withheld = bool(origins) and text.withheld > 0
+        counter[0] += text.withheld
+        stage = row.get("stage") if row.get("stage") in (
+            "dropped_by_code", "skeptic", "waiting", "debate", "pm", "risk", "planned", "approved", "executed",
+            "missed", "expired") else "dropped_by_code"
+        ideas_out.append(PublicSwingIdea(
+            ref=ref, ticker=line, side=side, setup=setup if _SETUP_RE.match(setup) else "unknown",
+            live_setup=bool(row.get("live_setup")), catalysts=cats, catalyst_claim=claim, thesis=thesis,
+            stop_pct=_pct(row.get("stop_pct")), target_pct=_pct(row.get("target_pct")),
+            time_stop_days=int(row.get("time_stop_days") or 0),
+            facts=facts, facts_withheld=withheld, stage_reached=stage,
+            drop_code=_code(str(row["drop_code"])) if row.get("drop_code") else None,
+            verdict=verdict,
+            votes=PublicSwingVotes(enter=int(votes["enter"]), replicates=int(votes["replicates"]),
+                                   failed=int(votes.get("failed") or 0)) if isinstance(votes, Mapping) else None,
+            carried_from=origins[:8], text_withheld=text_withheld,
+        ))
+    # the debate cites ideas and trades of this slot: checked against this cycle's texts only, and
+    # every carried idea's origins (the advocates saw their facts, not the old feed text, but a
+    # model can repeat what it was shown before)
+    all_origins = [c for row in record.get("ideas") or [] for c in (row.get("carried_from") or [])
+                   if isinstance(c, str) and c != cycle_id]
+    try:
+        debate_matcher = leakscan.LicensedMatcher(
+            base_texts + [t for c in dict.fromkeys(all_origins) for t in (origin_texts.get(c) or [])])
+        if all_origins:
+            leakscan.origin_matcher(origin_texts, all_origins)
+        debate_text = _SwingText(debate_matcher, blocked=own is None)
+    except leakscan.OriginTextsUnavailable:
+        debate_text = _SwingText(leakscan.LicensedMatcher(base_texts), blocked=True)
+    bull = _swing_case(record.get("bull"), debate_text, dropped, refs)
+    bear = _swing_case(record.get("bear"), debate_text, dropped, refs)
+    counter[0] += debate_text.withheld
+    trades_out = [t for t in (public_swing_trade(x, today=today,
+                                                 declared_cost_pct_per_leg=declared_cost_pct_per_leg)
+                              for x in trades) if t is not None and not t.state.startswith("closed_")]
+    if dropped[0]:
+        flags.append(f"swing_ids_dropped:{dropped[0]}")
+    if counter[0]:
+        flags.append(f"swing_text_withheld:{counter[0]}")
+    for f in record.get("flags") or []:
+        f = str(f)
+        if f.startswith(("skeptic_same_model", "swing_error:", "scout_failed:", "skeptic_pass_rate",
+                         "debate_claims_dropped:", "budget_")):
+            flags.append(_code(f))
+    return PublicSwingSection(live=bool(record.get("live")), ideas=ideas_out[:5], bull=bull, bear=bear,
+                              trades=trades_out[:12], health=health,
+                              declared_cost_pct_per_leg=float(declared_cost_pct_per_leg),
+                              flags=list(dict.fromkeys(flags)))
+
+
+CYCLE_ID_RE = r"^\d{4}-\d{2}-\d{2}T\d{4}Z$"
+
+
+def _frac(v: Any) -> float | None:
+    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(float(v)) else None
+
+
+def public_swing_trade(row: Any, *, today: Any = None,
+                       declared_cost_pct_per_leg: float = SWING_DECLARED_COST_PCT) -> Any:
+    """One ledger swing trade -> `PublicSwingTrade` (None for a trade that never opened: proposed,
+    executing, unknown or missed). Results come from the watch's percent-only outcome in `detail`
+    (`r_declared`, `net_ret`) or, failing that, from the entry and exit as a RATIO only, always net
+    of the declared cost on both legs. Units, rates, amounts, instrument and position ids are
+    never read into the output."""
+    from datetime import date as _date
+
+    from council.publish.public_models import PublicSwingTrade
+    from council.swing.rules import sessions_until
+
+    state = _SWING_TRADE_STATES.get(str(getattr(row, "state", "")))
+    if state is None:
+        return None
+    line = swing_line(str(row.ticker))
+    if line is None or row.side not in ("long", "short"):
+        return None
+    d = dict(row.detail or {})
+    size = _frac(d.get("size_nav")) or 0.0
+    stop = _frac(d.get("stop_pct"))
+    target = _frac(d.get("target_pct"))
+    closed = state.startswith("closed_")
+    r = net = None
+    if closed:
+        r, net = _frac(d.get("r_declared")), _frac(d.get("net_ret"))
+        if net is None and row.open_rate and row.close_rate:
+            sign = 1.0 if row.side == "long" else -1.0
+            net = sign * (float(row.close_rate) / float(row.open_rate) - 1.0) - 2.0 * declared_cost_pct_per_leg / 100.0
+        if r is None and net is not None and stop:
+            r = net / stop
+    held = d.get("days_held")
+    if not isinstance(held, int) or isinstance(held, bool):
+        start = row.opened_at.date() if getattr(row, "opened_at", None) is not None else None
+        end = row.closed_at.date() if closed and getattr(row, "closed_at", None) is not None else today
+        held = sessions_until(start, end) if start is not None and isinstance(end, _date) else 0
+    tsd = None
+    if row.time_stop_date:
+        try:
+            tsd = _date.fromisoformat(str(row.time_stop_date)[:10])
+        except ValueError:
+            tsd = None
+    origin = row.origin_cycle if isinstance(row.origin_cycle, str) and re.match(CYCLE_ID_RE, row.origin_cycle) else None
+    closed_cycle = d.get("closed_cycle") if isinstance(d.get("closed_cycle"), str) and re.match(
+        CYCLE_ID_RE, d["closed_cycle"]) else None
+    tp_mode = str(d.get("tp_mode") or "none")
+    return PublicSwingTrade(
+        trade_id=row.trade_id, ticker=line, side=row.side, weight_x=_x(size), opened_cycle=origin,
+        closed_cycle=closed_cycle, days_held=max(0, min(400, int(held))),
+        stop_pct=_pct(stop), target_pct=_pct(target),
+        tp_at_broker=state != "open_tp_missing" and tp_mode not in ("none", ""),
+        time_stop_date=tsd, state=state, exit_kind=_EXIT_KIND.get(state),
+        r_declared=round(r, 3) if r is not None else None,
+        net_declared_pct=_pct(net) if net is not None else None,
+        contribution_declared_bp=_bp(size * net * 1e4) if net is not None else None,
+        live=bool(d.get("live", True)),
+    )
+
+
+def public_skeptic_health(canary_grades: Sequence[str] = (), model_verdicts: Sequence[str] = (), *,
+                          alarm: bool | None = None) -> Any:
+    """The Skeptic-health line from the canary grades (oldest first) and the model's own verdicts
+    (before code rules, oldest first, canaries excluded)."""
+    from council.publish.public_models import PublicSkepticHealth
+    from council.swing.canary import pass_rate_alarm
+
+    grades = [g for g in canary_grades if g in ("caught", "missed")]
+    verdicts = [v for v in model_verdicts if v in ("pass", "wait", "reject")]
+    last20, last10 = verdicts[-20:], verdicts[-10:]
+    return PublicSkepticHealth(
+        canary_last=grades[-1] if grades else "none_yet",  # type: ignore[arg-type]
+        canaries_caught_total=sum(1 for g in grades if g == "caught"),
+        canaries_missed_total=sum(1 for g in grades if g == "missed"),
+        pass_share_20_pct=round(100.0 * sum(1 for v in last20 if v == "pass") / len(last20), 1) if last20 else None,
+        rejects_last_10=sum(1 for v in last10 if v == "reject"),
+        alarm=bool(pass_rate_alarm(verdicts)) if alarm is None else bool(alarm),
+    )
+
+
+_EXIT_MIX = {"stop": "stop", "target": "target", "time": "time", "exit": "discretionary",
+             "halt": "discretionary", "external": "external"}
+
+
+def _interval(iv: Any) -> Any:
+    from council.publish.public_models import PublicInterval
+
+    r3 = lambda v: round(float(v), 3) if v is not None else None  # noqa: E731
+    return PublicInterval(mean=r3(iv.mean), low=r3(iv.low), high=r3(iv.high), n=int(iv.n))
+
+
+def _base100(rows: Sequence[Mapping[str, Any]], column: str) -> list[float | None]:
+    out: list[float | None] = []
+    level, seen = 100.0, False
+    for r in rows:
+        v = r.get(column)
+        if isinstance(v, int | float) and math.isfinite(float(v)):
+            level *= 1.0 + float(v)
+            seen = True
+        out.append(round(level, 4) if seen and level > 0 else None)
+    return out
+
+
+def public_swing_book(
+    trades: Iterable[Any],
+    *,
+    as_of: datetime,
+    paper_rows: Iterable[Mapping[str, Any]] = (),
+    benchmark_days: Sequence[Mapping[str, Any]] = (),
+    health: Any = None,
+    live: bool = False,
+    live_since: Any = None,
+    paper_since: Any = None,
+    today: Any = None,
+    declared_cost_pct_per_leg: float = SWING_DECLARED_COST_PCT,
+    resamples: int | None = None,
+) -> Any:
+    """The swing page's document: open and closed trades, the §8.2 metrics over closed live trades,
+    every paper group of the funnel (all seven, empty ones included), the three benchmark curves
+    (SQ-8 PAPER, matched index, index hold; base 100) and the Skeptic-health line."""
+    from datetime import date as _date
+
+    from council.publish.public_models import (
+        PublicBenchmarkPoint,
+        PublicFunnelGroup,
+        PublicSkepticHealth,
+        PublicSwingBook,
+        PublicSwingMetrics,
+    )
+    from council.swing import metrics as M
+    from council.swing import paper as P
+
+    kw = {"resamples": resamples} if resamples is not None else {}
+    pub = [t for t in (public_swing_trade(x, today=today, declared_cost_pct_per_leg=declared_cost_pct_per_leg)
+                       for x in trades) if t is not None]
+    open_t = [t for t in pub if not t.state.startswith("closed_")]
+    closed_t = [t for t in pub if t.state.startswith("closed_")]
+    raw = {x.trade_id: x for x in trades} if isinstance(trades, list) else {}
+    closed_live = []
+    for t in closed_t:
+        if t.r_declared is None or t.net_declared_pct is None or not t.live:
+            continue
+        d = dict(getattr(raw.get(t.trade_id), "detail", None) or {})
+        closed_live.append(M.ClosedTrade(
+            r_declared=float(t.r_declared), net_ret=float(t.net_declared_pct) / 100.0, size_nav=float(t.weight_x),
+            side=t.side, beta=_frac(d.get("beta")), sector_etf_ret=_frac(d.get("sector_etf_ret")),
+            exit_kind=_EXIT_MIX.get(t.exit_kind or "", "external"), days_held=t.days_held))
+    s = M.summarize(closed_live, declared_cost_pct_per_leg=declared_cost_pct_per_leg, **kw)
+    metrics = PublicSwingMetrics(
+        n_closed=s.n, hit_rate_pct=_pct(s.hit_rate) if s.hit_rate is not None else None,
+        expectancy_r=_interval(s.expectancy), payoff=round(s.payoff, 3) if s.payoff is not None else None,
+        contribution_declared_bp=_bp(s.contribution_bps),
+        matched_contribution_declared_bp=_bp(s.matched_contribution_bps) if s.matched_contribution_bps is not None else None,
+        vs_matched_pct=_pct(s.vs_matched) if s.vs_matched is not None else None,
+        exit_mix_pct={k: _pct(v) for k, v in s.exit_mix.items()},
+        avg_days_held=round(s.avg_days_held, 2) if s.avg_days_held is not None else None,
+        standard_error_r=(round(se, 3) if (se := M.standard_error([t.r_declared for t in closed_live])) is not None
+                          else None),
+    )
+    rows = list(paper_rows)
+    outcomes = P.closed_outcomes(rows)
+    by_group = M.funnel(outcomes, **kw)
+    funnel = []
+    for g in P.GROUPS:
+        n_ideas = sum(1 for r in rows if (r.get("record") or {}).get("group", r.get("group")) == g)
+        rs = [o["r_declared"] for o in outcomes if o["group"] == g]
+        iv = by_group.get(g)
+        funnel.append(PublicFunnelGroup(group=g, ideas=n_ideas, closed=len(rs),
+                                        r_declared=_interval(iv) if iv is not None else _interval(M.Interval(None, None, None, 0)),
+                                        hit_rate_pct=_pct(M.hit_rate(rs)) if rs else None))
+    days = sorted(benchmark_days, key=lambda r: str(r.get("day")))
+    curves = {c: _base100(days, c) for c in ("sq8_ret", "matched_idx_ret", "idx_hold_ret")}
+    bench = []
+    for i, r in enumerate(days):
+        try:
+            day = r["day"] if isinstance(r["day"], _date) else _date.fromisoformat(str(r["day"])[:10])
+        except (KeyError, ValueError):
+            continue
+        bench.append(PublicBenchmarkPoint(day=day, sq8=curves["sq8_ret"][i], matched_index=curves["matched_idx_ret"][i],
+                                          index_hold=curves["idx_hold_ret"][i]))
+    return PublicSwingBook(
+        as_of=as_of, live=bool(live), live_since=live_since, paper_since=paper_since,
+        declared_cost_pct_per_leg=float(declared_cost_pct_per_leg), open_trades=open_t[:12],
+        closed_trades=closed_t, metrics=metrics, funnel=funnel, benchmarks=bench,
+        health=health if health is not None else PublicSkepticHealth(),
     )

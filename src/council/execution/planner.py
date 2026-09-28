@@ -671,7 +671,12 @@ class _Builder:
             self.skip(order.line, "swing_unknown_action")
 
     def swing_entry(self, order: SwingOrder, positions: list[Position]) -> None:
+        from council import invariants
+
         line, direction = order.line, order.side
+        if not bool(invariants.SWING_BOOK_LIVE):      # paper-only book: never a live swing entry leg
+            self.skip(line, "swing_book_not_live")
+            return
         if positions:
             self.skip(line, "swing_line_already_open")
             return
@@ -1093,7 +1098,7 @@ def build_flatten_plan(
     b = _Builder(
         policy=policy, nav=nav_usd, vehicle_for=lambda *_: None, quotes=quotes,
         stop_distance={}, leverage_for={}, eligibility=eligibility,
-        cost_bps=cost_bps or (lambda *_: (0.0, 0.0)),
+        cost_bps=floor_cost_fn(policy, cost_bps, strict=False),
     )
     current: dict[str, float] = {}
     line_gross: dict[str, float] = {}
@@ -1114,6 +1119,43 @@ def build_flatten_plan(
         kept, current=current, line_gross=line_gross, locked_gross=0.0, locked_net=0.0,
         skipped=b.skipped,
     )
+
+
+def floor_cost_fn(policy: Policy, fallback: CostFn | None, *, strict: bool) -> CostFn:
+    """The cost function of a flatten or a smoke ticket (SW-5c). A universe line keeps the caller's
+    `fallback` (none: zero, reporting only, as before). A line no universe line owns (a swing
+    position, an S7/S8 stock smoke ticket, `UNMAPPED_<id>`) is never priced at a silent zero: the
+    single-stock floors of `policy/costs.yaml` (real long at 1x, CFD otherwise), or the fallback's
+    number when it is higher. `strict` (smoke opens): floors that cannot be read raise, so the
+    ticket fails closed (`smoke_cost_unavailable`); a flatten (risk-reducing, never cost-gated)
+    falls back to zero instead of refusing to close."""
+    from council.risk.costs import carry_bps_day, per_side_bps
+
+    owned = {ln.symbol for ln in policy.universe.lines}
+
+    def fn(line: str, symbol: str, direction: Direction, leverage: int) -> tuple[float, ...]:
+        if line in owned:
+            return fallback(line, symbol, direction, leverage) if fallback is not None else (0.0, 0.0)
+        try:
+            settlement = "real" if direction == "long" and int(leverage) == 1 else "cfd"
+            per_side = per_side_bps(settlement, "stock", None, None, policy)
+            carry = carry_bps_day(direction, settlement, int(leverage), "stock", None, policy)
+            if not all(math.isfinite(v) and v >= 0 for v in (per_side, carry)):
+                raise ValueError("stock cost floors are not finite and non-negative")
+        except Exception:
+            if strict:
+                raise SmokePlanError("smoke_cost_unavailable") from None
+            return (0.0, 0.0)
+        out: tuple[float, ...] = (per_side, carry)
+        if fallback is not None:
+            try:
+                given = _split_cost(fallback(line, symbol, direction, leverage))
+                out = (max(per_side, given[0]), max(carry, given[1]), given[2])
+            except Exception:  # noqa: BLE001 - the core table does not know this line: floors
+                pass
+        return out
+
+    return fn
 
 
 # ---------------------------------------------------------------------------------- smoke tickets
@@ -1177,7 +1219,7 @@ def build_smoke_plan(
     b = _Builder(
         policy=policy, nav=nav_usd, vehicle_for=lambda *_: None, quotes=quotes,
         stop_distance=stops, leverage_for=leverage, eligibility=eligibility,
-        cost_bps=cost_bps or (lambda *_: (0.0, 0.0)), economics=economics,
+        cost_bps=floor_cost_fn(policy, cost_bps, strict=True), economics=economics,
     )
     current: dict[str, float] = {}
     line_gross: dict[str, float] = {}

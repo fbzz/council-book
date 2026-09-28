@@ -48,6 +48,15 @@ def _nvda_row(min_tp_pct: float = 2.0) -> dict:
 
 
 @pytest.fixture(autouse=True)
+def _swing_book_live(monkeypatch):
+    """These tests model the LIVE swing path: with the switch off the planner never plans a swing
+    entry and the approval drops one (`swing_book_not_live`, tests/swing/test_sw5c_review.py)."""
+    from council import invariants
+
+    monkeypatch.setattr(invariants, "SWING_BOOK_LIVE", True)
+
+
+@pytest.fixture(autouse=True)
 def _nvda(fake):
     fake.add_instrument(NVDA, NVDA_ID, bid=BID, ask=ASK, row=_nvda_row())
 

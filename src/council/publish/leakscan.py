@@ -13,6 +13,9 @@ Rules:
   purge scrub (`council.operator.purge.LicensedFilter`) is the same class, so the gate refuses
   exactly what the purge would scrub, and redaction must withhold at least that
   (tests/redteam/test_licensed_filter_contract.py).
+- ORIGIN CYCLES (swing-book H9): a carried-forward item is scanned against the licensed texts of
+  EVERY cycle it came from (`origin_matcher`, `scan_origins`); an origin whose texts cannot be read
+  (purged, never captured) is a finding / `OriginTextsUnavailable`, never a pass.
 
 Findings never echo the secret: excerpts are masked.
 
@@ -199,6 +202,37 @@ class LicensedMatcher:
             return True
         padded = f" {' '.join(words)} "
         return any(f" {t} " in padded for t in self.titles)
+
+
+class OriginTextsUnavailable(LookupError):
+    """An origin cycle's licensed texts cannot be read (purged or never captured): fail closed."""
+
+
+def origin_matcher(origin_texts: Mapping[str, Sequence[str] | None], cycles: Iterable[str],
+                   n: int = LICENSED_NGRAM) -> LicensedMatcher:
+    """ONE licensed-text matcher over every origin cycle of a carried-forward item (swing-book H9:
+    a wait, a missed entry or a re-proposal is scanned against the feed texts of every cycle it came
+    from, not only the cycle that reveals it). Raises `OriginTextsUnavailable` when any origin's
+    texts are missing or None, so the caller withholds instead of guessing."""
+    texts: list[str] = []
+    for cid in dict.fromkeys(cycles):
+        got = origin_texts.get(cid)
+        if got is None:
+            raise OriginTextsUnavailable(cid)
+        texts += [t for t in got if t]
+    return LicensedMatcher(texts, n)
+
+
+def scan_origins(obj_or_text: Any, origin_texts: Mapping[str, Sequence[str] | None], cycles: Iterable[str], *,
+                 n: int = LICENSED_NGRAM, where: str = "") -> list[Finding]:
+    """`scan` with the licensed texts of every origin cycle; an unreadable origin is itself a finding
+    (`origin_unavailable`), never a pass."""
+    cycles = list(dict.fromkeys(cycles))
+    missing = [c for c in cycles if origin_texts.get(c) is None]
+    if missing:
+        return [Finding("origin_unavailable", where or "<root>", _mask(c)) for c in missing]
+    texts = [t for c in cycles for t in (origin_texts.get(c) or []) if t]
+    return scan(obj_or_text, licensed_texts=texts, n=n, where=where)
 
 
 def _mask(snippet: str) -> str:

@@ -180,6 +180,7 @@ def cycle(
     dry_run: bool = typer.Option(False, "--dry-run", help="No pushes, no notifications; publish to site-preview/."),
     rehearsal: bool = typer.Option(False, "--rehearsal", help="No broker: run the council and PUBLISH the cycle labelled REHEARSAL (own ledger, nothing traded)."),
     stub_llm: bool = typer.Option(False, "--stub-llm", help="Canned replies that hold the reference (no model calls)."),
+    paper: bool = typer.Option(False, "--paper", help="Paper run: real data and models, NO broker token, own state dir (<state>/paper), publishes nothing. Needs COUNCIL_MODE=dry_run."),
     force: bool = typer.Option(False, help="Re-run a slot that already has a record."),
 ) -> None:
     """Run the council cycle for the current 4-hour slot."""
@@ -190,6 +191,8 @@ def cycle(
     sandbox = _dress_context()
     if sandbox is not None:
         ctx = sandbox                         # [REHEARSAL] shell: stub model, fake broker, sandbox remote
+    elif paper:
+        ctx = paper_context(settings, stub_llm=stub_llm)
     elif rehearsal:
         from council import paths
         from council.context import build_context
@@ -203,6 +206,23 @@ def cycle(
         ctx = _ctx(mode="live", stub_llm=stub_llm, publish="push")
     outcome = run_cycle(ctx, force=force)
     typer.echo(json.dumps(outcome.__dict__, default=str, indent=1))
+
+
+PAPER_STATE = "paper"
+
+
+def paper_context(settings, *, stub_llm: bool = False):
+    """`council cycle --paper` (SW-5c): a dry-run context that never loads a broker token, in its
+    own state dir (never the live ledger, so a live slot is never consumed), publishing nothing.
+    Real data needs `COUNCIL_MODE=dry_run` (stub mode never reads the Keychain); refused in stub
+    mode unless the model is stubbed too."""
+    from council import paths
+    from council.context import build_context
+
+    if settings.mode == "stub" and not stub_llm:
+        _refuse("--paper needs COUNCIL_MODE=dry_run (stub mode reads no Keychain item, so no data)")
+    return build_context(mode="dry_run", stub_llm=stub_llm, publish="none", no_broker=True,
+                         state_dir=paths.state_dir() / PAPER_STATE)
 
 
 @app.command()

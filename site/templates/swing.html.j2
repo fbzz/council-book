@@ -1,0 +1,104 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% import "swing_macros.html.j2" as swm %}
+{% block title %}Swing book{% endblock %}
+{% block toc %}
+{{ m.toc_item("sw-what", "What this is", "neutral") }}
+{{ m.toc_item("sw-open", "Open trades (" ~ (sp.open | length) ~ ")", "scout") }}
+{{ m.toc_item("sw-closed", "Closed trades (" ~ (sp.closed | length) ~ ")", "scout") }}
+{{ m.toc_item("sw-metrics", "Pre-registered metrics", "neutral") }}
+{{ m.toc_item("sw-bench", "Benchmarks", "neutral") }}
+{{ m.toc_item("sw-funnel", "Idea funnel", "skeptic") }}
+{{ m.toc_item("sw-agents", "Scout and Skeptic", "skeptic") }}
+{{ m.toc_item("sw-runs", "Swing runs", "neutral") }}
+{% endblock %}
+{% block hero %}
+<header class="hero">
+  <p class="eyebrow">Swing book</p>
+  <h1>Short trades on the news, checked by a Skeptic</h1>
+  <p class="lede">A small experimental book of stock trades held for days to a few weeks, long or short, next to the core council. Every idea is shown, including the ones that were stopped; results are after a declared cost, never the actual one.</p>
+</header>
+{% endblock %}
+{% block main %}
+
+{% call m.section("sw-what", 1, "What this is", "neutral") %}
+{{ swm.header(sp.header) }}
+{{ swm.health(sp.health) }}
+{% if sp.book is none %}<p class="muted">No swing document is published yet: the swing book has not traded.</p>{% elif not sp.book.live %}<p>{{ swm.paper() }} The swing book is not trading yet: everything on this page is tracked on paper.</p>{% endif %}
+{% endcall %}
+
+{% call m.section("sw-open", 2, "Open trades", "scout") %}
+{% if sp.open %}
+<p class="small">The bar puts the entry in the middle: the stop to one side, the target to the other, on one scale for the whole table. Sizes are a share of the portfolio.</p>
+{{ swm.book(sp.open, "../") }}
+{% else %}{{ m.empty("No open swing trade", "When the swing book holds a trade it is listed here with its stop and target.") }}{% endif %}
+{% endcall %}
+
+{% call m.section("sw-closed", 3, "Closed trades", "scout") %}
+{% if sp.closed %}
+<p class="small">R is the result in units of the planned stop distance, after the declared cost of {{ sp.header.cost }}% of the position on each leg. "Net" is the same in % of the position; "Book" its contribution in basis points of the portfolio.</p>
+{{ swm.book(sp.closed, "../", closed=true) }}
+{% else %}{{ m.empty("No closed swing trade yet", "Results appear here once a trade closes.") }}{% endif %}
+{% endcall %}
+
+{% call m.section("sw-metrics", 4, "Pre-registered metrics", "neutral") %}
+{% set mt = sp.metrics %}
+{% if mt %}
+<dl class="strip">
+  <div class="st"><dt>Closed trades</dt><dd class="st-v">{{ mt.m.n_closed }}</dd><dd class="st-sub">several hundred are needed to tell skill from luck</dd></div>
+  <div class="st"><dt>Expectancy</dt><dd class="st-v st-v-sm">{{ mt.expectancy }}</dd><dd class="st-sub">mean R with its 90% bootstrap interval (n = {{ mt.m.expectancy_r.n }}) · standard error {{ mt.se }}</dd></div>
+  <div class="st"><dt>Hit rate</dt><dd class="st-v st-v-sm">{{ mt.hit }}</dd><dd class="st-sub">share of trades above 0R · payoff {{ mt.payoff }}</dd></div>
+  <div class="st"><dt>Book contribution</dt><dd class="st-v st-v-sm">{{ mt.contrib }}</dd><dd class="st-sub">matched index {{ mt.matched }} · mean vs matched {{ mt.vs_matched }}</dd></div>
+</dl>
+<p class="small">Average days held {{ mt.days }}. Exit mix: {% for k, v in mt.mix %}{{ k }} {{ v }}{% if not loop.last %} · {% endif %}{% else %}—{% endfor %}. The review comes at 30 closed trades or 90 days after going live; new entries pause at the first review with 20 closed trades if the mean R is at or below zero or the book trails its matched index. <a href="{{ sp.header.prereg }}">The rules</a>.</p>
+{% endif %}
+{% endcall %}
+
+{% call m.section("sw-bench", 5, "Benchmarks", "neutral") %}
+{% if sp.chart %}
+<figure class="chart">
+  {% for ch, cls in ((sp.chart, "chart-wide"), (sp.chart_narrow, "chart-narrow")) %}
+  <svg class="{{ cls }}" viewBox="0 0 {{ ch.width }} {{ ch.height }}" role="img" aria-label="The three swing benchmarks, base 100 at the start">
+    {% for g in ch.grid %}
+    <line class="{{ 'chart-base' if g.base else 'chart-grid' }}" x1="{{ ch.x0 }}" x2="{{ ch.x1 }}" y1="{{ g.y }}" y2="{{ g.y }}"></line>
+    <text class="chart-tick" x="{{ ch.x0 - 6 }}" y="{{ g.y }}" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>
+    {% endfor %}
+    {% for s in ch.series %}
+    <polyline class="series series-{{ s.css }}" points="{{ s.points }}"><title>{{ s.label }}: {{ "%.1f" | format(s.last) }}</title></polyline>
+    {% if ch.labels %}<text class="series-end" x="{{ s.end_x }}" y="{{ s.label_y }}" dominant-baseline="middle">{{ s.short }} {{ "%.1f" | format(s.last) }}</text>{% endif %}
+    {% endfor %}
+  </svg>
+  {% endfor %}
+  <figcaption class="small">Index, base 100 at the start ({{ sp.chart.first }} to {{ sp.chart.last }}), all after the same declared cost.</figcaption>
+</figure>
+<ul class="legend">{% for s in sp.chart.series %}<li><span class="swatch sw-line sw-{{ s.css }}"></span>{{ s.label }} <span class="n">{{ "%.1f" | format(s.last) }}</span> <span class="small muted">{{ s.what }}</span></li>{% endfor %}</ul>
+{% else %}{{ m.empty("No benchmark data yet", "The SQ-8 paper rule, the matched index and the index hold are recorded once a day after the US close.") }}{% endif %}
+{% endcall %}
+
+{% call m.section("sw-funnel", 6, "Idea funnel", "skeptic") %}
+<p>Every group of ideas is tracked on paper the same way: entered at the reference price when the decision was sealed, exited on completed daily bars at its own stop, target or time stop, after the declared cost on both legs. So the Skeptic's rejects and waits are measured next to what was traded.</p>
+{% if sp.funnel %}
+{{ m.wrap_open("Idea funnel (scrolls sideways)") }}
+<table class="wide stack sw-funnel">
+  <thead><tr><th scope="col">Group</th><th scope="col" class="n">Ideas</th><th scope="col" class="n">Closed on paper</th><th scope="col" class="n">Mean R [90% interval]</th><th scope="col" class="n">Hit rate</th></tr></thead>
+  <tbody>
+  {% for f in sp.funnel %}
+  <tr><td>{{ f.label }} {{ swm.paper() }}</td><td class="n" data-label="Ideas">{{ f.g.ideas }}</td><td class="n" data-label="Closed">{{ f.g.closed }}</td><td class="n" data-label="Mean R">{{ f.r }}</td><td class="n" data-label="Hit rate">{{ f.hit }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}<p class="muted">No idea tracked yet.</p>{% endif %}
+{% endcall %}
+
+{% call m.section("sw-agents", 7, "Scout and Skeptic", "skeptic") %}
+<ul class="cast sw-cast">{% for a in sp.agents %}{{ swm.agent_card(a, "../") }}{% endfor %}</ul>
+<p class="small">The swing bull, bear and manager are the council's advocates and manager, run on the swing ideas; code checks every swing rule and a person approves every trade.</p>
+{% endcall %}
+
+{% call m.section("sw-runs", 8, "Swing runs", "neutral") %}
+{% if sp.runs %}
+<ul class="runlist">{% for r in sp.runs %}<li><a href="../cycles/{{ r.cv.doc.cycle_id }}.html#swing-ideas">{{ r.cv.doc.slot | when }}</a> · {{ plural(r.ideas, "idea") }} · {{ r.planned }} planned</li>{% endfor %}</ul>
+{% else %}<p class="muted">No swing slot published yet.</p>{% endif %}
+{% endcall %}
+{% endblock %}

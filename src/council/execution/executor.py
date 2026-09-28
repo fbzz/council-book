@@ -374,6 +374,7 @@ class Executor:
         symbol_for: Mapping[int, str] | Callable[[int], str | None] | None = None,
         whole_units: Mapping[str, bool] | None = None,
         lock_path: Path | None = None,
+        sector_bars: Callable[..., Any] | None = None,
         _skip_guard_for_tests: bool = False,
     ) -> None:
         if write is not None and not _skip_guard_for_tests:
@@ -396,6 +397,7 @@ class Executor:
         self._symbols: dict[int, str] = {}
         self._symbol_fn: Callable[[int], str | None] | None = None
         self.lock_path = lock_path
+        self._sector_bars = sector_bars      # completed daily bars for a closed trade's sector ETF (optional)
         self._v2l = vehicle_to_line(self.policy.universe)
         self._exposure_tol = float(self.policy.risk["approval"]["post_fill_exposure_tolerance"])
         self._sl_tol = float(self.policy.risk["reconcile"]["sl_rate_tolerance"])
@@ -1171,7 +1173,7 @@ class Executor:
                 raise _NoPortfolio
             snapshot = snapshot_from_portfolio(after, now)
             rec = reconcile(snapshot, self._targets(run.decision_id), run.expected, self.policy,
-                            swing_map=self._swing_map())
+                            swing_map=self._swing_map(), smoke_position_ids=self._smoke_ids(run))
             rec = self._corporate_reconcile(run, rec, after.positions)
             self.ledger.record_positions(now, after.positions, decision_id=run.decision_id, source="post_execution")
             self.ledger.add_equity_mark(now, after.equity_usd, credit_usd=after.credit_usd, source="post_execution")
@@ -1209,6 +1211,21 @@ class Executor:
                       if r.state in LEG_ACTIVE_STATES | {WAITING_STATE, "planned"}]
         return bool(unresolved) and all(_row_is_swing(r) for r in unresolved)
 
+    def _smoke_ids(self, run: _Run) -> set[int]:
+        """Positions a smoke ticket opened (this decision's fills when it is a smoke decision, and
+        every smoke position the ledger still counts open): expected, never unknown (S7 / S8)."""
+        ids: set[int] = set()
+        try:
+            ids |= set(self.ledger.smoke_positions())
+            if getattr(self.ledger.get_decision(run.decision_id), "kind", None) == "smoke":
+                ids |= {e.position_id for e in run.expected}
+                for row in self.ledger.legs(run.decision_id):
+                    if row.kind == "open":
+                        ids |= {int(p) for p in row.position_ids}
+        except LedgerError:
+            pass
+        return ids
+
     def _swing_map(self) -> Any:
         from council.swing.book import swing_vehicle_map
 
@@ -1244,6 +1261,8 @@ class Executor:
                             reason=f"take-profit not at the broker after {run.decision_id}:{row.seq}",
                             cycle_id=self.ledger.get_decision(run.decision_id).cycle_id)
                         run.reason(f"{row.vehicle_symbol}: take-profit missing at the broker (open_tp_missing)")
+                elif row.kind == "close" and row.state == "filled":
+                    self._close_swing_trade(run, row)
                 elif row.kind == "set_tp" and row.state == "filled" and leg.swing_trade_id:
                     trade = self.ledger.swing_trade(leg.swing_trade_id)
                     if trade is not None and trade.state == "open_tp_missing":
@@ -1253,6 +1272,39 @@ class Executor:
                             cycle_id=self.ledger.get_decision(run.decision_id).cycle_id)
             except (LedgerError, IllegalTransition) as exc:
                 run.reason(f"{row.vehicle_symbol}: swing trade update failed ({type(exc).__name__})")
+        marked = {r.seq for r in rows}
+        for row in self.ledger.legs(run.decision_id):     # e.g. a flatten: closes not marked swing
+            if row.seq not in marked and row.kind == "close" and row.state == "filled" and row.position_id is not None:
+                try:
+                    self._close_swing_trade(run, row)
+                except (LedgerError, IllegalTransition) as exc:
+                    run.reason(f"{row.vehicle_symbol}: swing trade update failed ({type(exc).__name__})")
+
+    def _close_swing_trade(self, run: _Run, row: LegRow) -> None:
+        """A filled close of a swing position closes its trade at once (`swing.exits.
+        close_filled_exit`, idempotent; the cycle's `settle_swing` is the fallback)."""
+        from council.swing.exits import close_filled_exit
+        from council.swing.models import ACTIVE_STATES
+
+        trade_id = row.detail.get("swing_trade_id")
+        if not trade_id:
+            try:
+                trade_id = next((t.trade_id for t in self.ledger.swing_trades(states=sorted(ACTIVE_STATES))
+                                 if row.position_id in (t.position_ids or ())), None)
+            except LedgerError:
+                trade_id = None
+        if not trade_id:
+            return
+        decision = self.ledger.get_decision(run.decision_id)
+        kind = "halt" if getattr(decision, "kind", None) == "flatten" else None
+        try:
+            from council.operator import capabilities
+
+            route_ok = capabilities.load().has("closed_trade_route")
+        except Exception:  # noqa: BLE001 - unproven = unused
+            route_ok = False
+        close_filled_exit(self.ledger, str(trade_id), run.decision_id, self.clock(), read=self.read,
+                          route_ok=route_ok, kind=kind, sector_bars=self._sector_bars, actor=ACTOR)
 
     def _resumed_state(self, trade: Any) -> str:
         """`partial` when the trade's entry leg filled only in part, else `open`."""

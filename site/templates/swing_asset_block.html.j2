@@ -1,0 +1,12 @@
+{# The swing part of an asset page: the ticker's ideas (newest first) and trades. `s` holds them. #}
+{% call m.section("swing", "S", "Swing ideas and trades", "scout") %}
+{% if s.trades %}
+{{ swm.book(s.trades | rejectattr("closed") | list, "../") if s.trades | rejectattr("closed") | list else "" }}
+{% set done = s.trades | selectattr("closed") | list %}
+{% if done %}{{ swm.book(done, "../", closed=true) }}{% endif %}
+{% endif %}
+{% for x in s.ideas %}
+<p class="small"><a href="../cycles/{{ x.cv.doc.cycle_id }}.html#sw-{{ x.v.i.ref | replace(':', '-') }}">{{ x.cv.doc.slot | when }}</a></p>
+{{ swm.idea(x.v, "../") }}
+{% endfor %}
+{% endcall %}

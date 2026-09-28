@@ -76,6 +76,8 @@ from council.publish.public_models import (
     PublicPMReplicate,
     PublicReveal,
     PublicStatus,
+    PublicSwingBook,
+    PublicSwingSection,
 )
 from council.publish.redact import _clip
 
@@ -565,6 +567,11 @@ class JournalView:
     ops: list[PublicOpsRow] = field(default_factory=list)
     copies: dict[str, Path] = field(default_factory=dict)   # site path -> journal source file
     commitments: dict[str, PublicCommitment] = field(default_factory=dict)   # every sealed run, revealed or not
+    swing: PublicSwingBook | None = None                     # journal/swing/latest.json (swing-book §7.4)
+
+    @property
+    def has_swing(self) -> bool:
+        return self.swing is not None or any(cv.doc.swing is not None for cv in self.cycles)
 
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:
@@ -618,6 +625,10 @@ def load_journal(journal_dir: Path) -> JournalView:
         commitment = PublicCommitment.model_validate_json(file.read_text())
         view.commitments[commitment.cycle_id] = commitment
         view.copies[f"journal/{file.relative_to(journal_dir).as_posix()}"] = file
+    swing_file = journal_dir / "swing" / "latest.json"
+    if swing_file.exists():
+        view.swing = PublicSwingBook.model_validate_json(swing_file.read_text())
+        view.copies["journal/swing/latest.json"] = swing_file
     book_file = journal_dir / "book" / "latest.json"
     if book_file.exists():
         view.book = PublicBook.model_validate_json(book_file.read_text())
@@ -1321,6 +1332,10 @@ CALL_AGENT = {
     "bull_open": ("Bull · opening", "bull", "a-bull"), "bear": ("Bear", "bear", "a-bear"),
     "bull_rebuttal": ("Bull · rebuttal", "bull", "a-rebuttal"), "pm": ("Portfolio manager", "pm", "a-pm"),
     "single_agent": ("Control", "control", "a-control"),
+    # the swing book's roles (swing-book §7.4): their run-page section is "Swing ideas"
+    "scout": ("Scout", "scout", "swing-ideas"), "skeptic": ("Skeptic", "skeptic", "swing-ideas"),
+    "swing_bull": ("Bull · swing", "bull", "swing-ideas"), "swing_bear": ("Bear · swing", "bear", "swing-ideas"),
+    "swing_pm": ("Manager · swing", "pm", "swing-ideas"),
 }
 
 # Call status -> (glyph, word, css). The glyph is decoration; the word is always shown or read.
@@ -4106,15 +4121,16 @@ def _merge_status(sections: list[dict[str, Any]]) -> dict[str, str]:
 GRID_STEPS = (0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0)
 
 
-def performance_chart(points: list[PublicPerformancePoint], width: int = 690, height: int = 240,
-                      labels: bool = True) -> dict[str, Any] | None:
+def performance_chart(points: list[Any], width: int = 690, height: int = 240,
+                      labels: bool = True, spec: tuple[tuple[str, ...], ...] | None = None) -> dict[str, Any] | None:
     """Polylines for each control with at least two values, a recessive grid at round index values
     and a label at the end of each line (identity never by colour alone). Without `labels` (the
     phone shape) the end labels are left out and the legend under the chart names every line."""
     if len(points) < 2:
         return None
     pad_l, pad_r, pad_y = 44, (150 if labels else 12), 14
-    values = [getattr(p, key) for p in points for key, *_ in CONTROL_SERIES if getattr(p, key) is not None]
+    spec = spec or CONTROL_SERIES
+    values = [getattr(p, key) for p in points for key, *_ in spec if getattr(p, key) is not None]
     if not values:
         return None
     lo, hi = min(values + [100.0]), max(values + [100.0])
@@ -4133,7 +4149,7 @@ def performance_chart(points: list[PublicPerformancePoint], width: int = 690, he
         return pad_y + plot_h * (1 - (v - lo) / span)
 
     series = []
-    for key, name, css, short, what in CONTROL_SERIES:
+    for key, name, css, short, what in spec:
         coords = [(fx(i), fy(getattr(p, key))) for i, p in enumerate(points) if getattr(p, key) is not None]
         if len(coords) < 2:
             continue
@@ -4161,6 +4177,260 @@ def performance_chart(points: list[PublicPerformancePoint], width: int = 690, he
         "x0": pad_l, "x1": width - pad_r, "base_y": f"{fy(100.0):.1f}",
         "first": fmt_day(points[0].as_of), "last": fmt_day(points[-1].as_of), "labels": labels,
     }
+
+
+# ------------------------------------------------------------------------------ swing book (SW-7)
+# swing-book.md rev 2, §7.4 / §8.4. Pages exist only once the journal holds a swing document or a
+# run with a swing part (so a core-only record builds exactly as before). Every value is a
+# percentage, an R multiple or a word; PAPER-only rows (a paper-only setup, a paper trade, the
+# SQ-8 benchmark, every funnel group) say PAPER in a chip, never by colour alone.
+SWING_NAV = {"key": "swing", "href": "swing/index.html", "label": "Swing"}
+PREREG_URL = f"{REPO_URL}/blob/main/docs/swing-book-prereg.md"
+SWING_AGENT_SPECS: tuple[AgentSpec, ...] = (
+    AgentSpec("scout", "Scout", "LLM", "scout", "Swing book",
+              "Reads the news and proposes swing ideas: a stock, long or short, held for days to a few weeks.",
+              roles=("scout",), source="prompts/scout.md",
+              more="It must cite the news item or filing behind each idea by its id. Code then checks the ticker, "
+                   "builds a fact card from completed daily bars and drops ideas that chase a move already made.",
+              short="Reads the news and proposes swing ideas.", phase="swing"),
+    AgentSpec("skeptic", "Skeptic", "LLM", "skeptic", "Swing book",
+              "Checks, without seeing the pitch, whether the move is already in the price, and looks at the bigger "
+              "picture.",
+              roles=("skeptic",), source="prompts/skeptic.md",
+              more="It runs on a different model family and sees only the ticker, the side, the cited items, a one-line "
+                   "factual claim and the fact card: never the thesis or the levels. It answers pass, wait or reject; "
+                   "code turns a 'mostly priced in' pass into a wait. A weekly canary (a past event whose move was "
+                   "already in the price) checks that it still says no.",
+              short="Checks, blind to the pitch, whether the news is already priced in.", phase="swing"),
+)
+SWING_ROLES_ALL = ("scout", "skeptic", "swing_bull", "swing_bear", "swing_pm")
+SWING_ROLE_WORDS = {"scout": ("Scout", "scout"), "skeptic": ("Skeptic", "skeptic"),
+                    "swing_bull": ("Bull · swing", "bull"), "swing_bear": ("Bear · swing", "bear"),
+                    "swing_pm": ("Manager · swing", "pm")}
+SWING_STAGE = {   # stage -> (words, chip css)
+    "dropped_by_code": ("dropped by code", "stone"), "skeptic": ("stopped by the Skeptic", "halted"),
+    "waiting": ("waiting (Skeptic)", "warn"), "debate": ("debated", "proposed"), "pm": ("manager passed", "stone"),
+    "risk": ("stopped by a swing rule", "stone"), "planned": ("planned", "proposed"),
+    "approved": ("approved", "executed"), "executed": ("executed", "executed"), "missed": ("missed", "stone"),
+    "expired": ("expired", "stone"),
+}
+VERDICT_CSS = {"pass": "executed", "wait": "warn", "reject": "halted", "failed": "stone"}
+DROP_WORDS = {
+    "setup_paper_only": "a paper-only setup: tracked on paper, never traded",
+    "skeptic_wait": "the Skeptic said wait", "skeptic_reject": "the Skeptic rejected it",
+    "skeptic_failed": "the Skeptic's reply could not be used", "catalyst_misread": "the cited item does not support the claim",
+    "chased": "the move since the news was already too large", "not_best_3": "not among the best three ideas",
+    "budget_no_skeptic": "no Skeptic call left in the slot's budget", "budget_no_pm": "no manager call left",
+    "pm_pass": "the manager passed", "swing_book_paper_only": "the swing book is paper-only for now",
+    "stage_aborted": "the slot stopped before this step", "no_facts": "no fact card (stale or missing bars)",
+    "catalyst_not_admitted": "the cited item was not in the slot's reading list",
+    "catalyst_not_about_ticker": "the cited item is not about this company",
+}
+OVERRIDE_WORDS = {"skeptic_mostly_wait": "code: mostly priced in → wait", "skeptic_stale_wait": "code: old news → wait",
+                  "skeptic_prior_wait": "code: big move, no independent fact → wait",
+                  "skeptic_incoherent": "code: fully priced in → reject", "catalyst_misread": "code: catalyst misread"}
+EXIT_WORDS = {"stop": "stop", "target": "target", "time": "time stop", "exit": "decision", "halt": "kill switch",
+              "external": "outside"}
+GROUP_WORDS = {"executed": "Executed", "pm_passed": "Manager passed", "skeptic_rejected": "Skeptic rejected",
+               "skeptic_wait": "Skeptic said wait", "code_dropped": "Dropped by code (eligible names)",
+               "paper_only": "Paper-only setups", "missed": "Missed entries"}
+SWING_SERIES = (
+    ("sq8", "SQ-8 mechanical rule (PAPER)", "c3", "SQ-8", "the stock rule we did not adopt (it failed its test)"),
+    ("matched_index", "Matched index (beta x sector)", "c4a", "Matched", "the same trades' sector-and-beta benchmark"),
+    ("index_hold", "Index held", "c2", "Index", "the index, held"),
+)
+REACTION_FACTS = (   # (field, label, unit)
+    ("news_age_sessions", "news age", "sessions"), ("gap_pct", "gap", "%"),
+    ("move_since_news_close_pct", "move since the news", "%"), ("move_since_news_close_sigma", "in sigma", "σ"),
+    ("move_since_news_live_pct", "move today (live)", "%"), ("move_since_news_live_sigma", "live, in sigma", "σ"),
+    ("vol_ratio_since", "volume vs normal", "x"), ("rel_move_since_pct", "vs sector and beta", "%"),
+    ("sector_move_since_pct", "sector move", "%"), ("trend", "trend", ""), ("atr14_pct", "ATR 14", "%"),
+    ("dist_52w_high_pct", "from 52-week high", "%"), ("earnings_next", "next earnings", ""),
+)
+SWING_WITHHELD_WORDS = {"broker_data": "withheld: broker data", "unknown_source": "withheld until the data licence is widened",
+                        "licensed_series": "withheld: licensed", "not_publishable": "withheld"}
+SWING_WINDOW_DAYS = 90
+
+
+def swing_header(book: PublicSwingBook | None, closed: int) -> dict[str, Any]:
+    """The §8.4 sentence block, built from fixed words and the document's dates and counts."""
+    live_since = fmt_day(book.live_since) if book is not None and book.live_since else ""
+    paper_since = fmt_day(book.paper_since) if book is not None and book.paper_since else ""
+    cost = book.declared_cost_pct_per_leg if book is not None else 1.25
+    return {"live_since": live_since, "paper_since": paper_since, "closed": closed,
+            "cost": trim_number(cost, 2), "prereg": PREREG_URL, "live": bool(book is not None and book.live)}
+
+
+def _fact_value(key: str, value: Any, unit: str) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, int | float):
+        digits = 0 if unit == "sessions" else 2
+        text = f"{value:+.{digits}f}" if unit in ("%", "σ") else f"{value:.{digits}f}"
+        return f"{text}{'' if unit in ('', 'sessions') else unit if unit != 'x' else 'x'}" + (" sessions" if unit == "sessions" else "")
+    return str(value).replace("_", " ")
+
+
+def swing_idea_view(i: Any) -> dict[str, Any]:
+    facts = []
+    withheld: dict[str, list[str]] = {}
+    for key, label, unit in REACTION_FACTS:
+        if key in i.facts:
+            facts.append({"label": label, "value": _fact_value(key, i.facts[key], unit)})
+        elif key in i.facts_withheld:
+            withheld.setdefault(SWING_WITHHELD_WORDS.get(i.facts_withheld[key], "withheld"), []).append(label)
+    cats = []
+    for c in i.catalysts:
+        if c.kind == "broker_feed":
+            cats.append({"label": c.id, "note": "broker news item, id only", "href": "", "css": "feed"})
+        elif c.kind == "public_news":
+            cats.append({"label": c.title or c.id, "note": c.id, "href": c.link or "", "css": "event"})
+        elif c.kind == "filing":
+            label = " ".join(x for x in (c.form or "filing", ", ".join(c.items)) if x)
+            cats.append({"label": label, "note": c.id, "href": "", "css": "event"})
+        else:
+            cats.append({"label": "movers screen", "note": c.id, "href": "", "css": "market"})
+    v = i.verdict
+    verdict = None
+    if v is not None:
+        verdict = {"word": v.verdict, "css": VERDICT_CSS.get(v.verdict, "stone"), "priced_in": v.discounted,
+                   "news": v.news_status.replace("_", " "), "regime": v.regime, "crowding": v.crowding,
+                   "said": v.said, "override": OVERRIDE_WORDS.get(v.code_override or "", (v.code_override or "").replace("_", " ")),
+                   "reasons": v.reasons, "mind": v.what_would_change_my_mind, "same_family": v.same_family,
+                   "family": v.model_family}
+    stage_words, stage_css = SWING_STAGE.get(i.stage_reached, (i.stage_reached, "stone"))
+    return {"i": i, "facts": facts, "withheld": sorted(withheld.items()), "cats": cats, "verdict": verdict, "stage": stage_words, "stage_css": stage_css,
+            "drop": DROP_WORDS.get(i.drop_code or "", (i.drop_code or "").replace("_", " ")),
+            "setup": i.setup.replace("_", " "), "paper": not i.live_setup}
+
+
+def swing_trade_view(t: Any, geo: Geometry, scale: float) -> dict[str, Any]:
+    """A trade with its stop and target on one axis (the entry in the middle): widths in % of half
+    the track, `scale` = the largest distance on the page."""
+    half = 50.0 / scale if scale > EPS else 0.0
+    return {"t": t, "stop_cls": geo.cls("width", t.stop_pct * half), "target_cls": geo.cls("width", t.target_pct * half),
+            "exit": EXIT_WORDS.get(t.exit_kind or "", ""), "closed": t.state.startswith("closed_"),
+            "state": t.state.replace("_", " "), "paper": not t.live,
+            "r": f"{t.r_declared:+.2f}R".replace("-", "−") if t.r_declared is not None else "—",
+            "net": fmt_signed(t.net_declared_pct) if t.net_declared_pct is not None else "—",
+            "contrib": fmt_bp(t.contribution_declared_bp).replace("-", "−") if t.contribution_declared_bp is not None else "—",
+            "r_css": "up" if (t.r_declared or 0) > 0 else "down" if (t.r_declared or 0) < 0 else "flat"}
+
+
+def _trade_scale(trades: list[Any]) -> float:
+    return max([max(t.stop_pct, t.target_pct) for t in trades] + [1.0])
+
+
+def health_view(h: Any) -> dict[str, Any] | None:
+    if h is None:
+        return None
+    canary = {"caught": ("last canary caught", "executed"), "missed": ("last canary MISSED", "halted"),
+              "none_yet": ("no canary yet", "stone")}[h.canary_last]
+    return {"h": h, "canary": canary[0], "canary_css": canary[1],
+            "pass_rate": f"{h.pass_share_20_pct:.0f}%" if h.pass_share_20_pct is not None else "—",
+            "alarm": h.alarm}
+
+
+def swing_run_view(sec: PublicSwingSection | None, geo: Geometry, book: PublicSwingBook | None) -> dict[str, Any] | None:
+    if sec is None:
+        return None
+    scale = _trade_scale(sec.trades)
+    closed = book.metrics.n_closed if book is not None else 0
+    return {"sec": sec, "ideas": [swing_idea_view(i) for i in sec.ideas],
+            "trades": [swing_trade_view(t, geo, scale) for t in sec.trades],
+            "bull": sec.bull, "bear": sec.bear, "health": health_view(sec.health),
+            "header": swing_header(book, closed), "paper": not sec.live, "flags": sec.flags,
+            "cost": trim_number(sec.declared_cost_pct_per_leg, 2)}
+
+
+def _interval_words(iv: Any, unit: str = "R") -> str:
+    if iv.mean is None:
+        return "—"
+    text = f"{iv.mean:+.2f}{unit}"
+    if iv.low is not None and iv.high is not None:
+        text += f" [{iv.low:+.2f}, {iv.high:+.2f}]"
+    return text
+
+
+def swing_page_view(view: JournalView, geo: Geometry) -> dict[str, Any]:
+    book = view.swing
+    open_t = list(book.open_trades) if book is not None else []
+    closed_t = list(book.closed_trades) if book is not None else []
+    scale = _trade_scale(open_t)
+    m = book.metrics if book is not None else None
+    funnel = []
+    for g in (book.funnel if book is not None else []):
+        funnel.append({"g": g, "label": GROUP_WORDS.get(g.group, g.group), "r": _interval_words(g.r_declared),
+                       "hit": fmt_pct1(g.hit_rate_pct) if g.hit_rate_pct is not None else "—"})
+    points = [SimpleNamespace(as_of=p.day, sq8=p.sq8, matched_index=p.matched_index, index_hold=p.index_hold)
+              for p in (book.benchmarks if book is not None else [])]
+    chart = performance_chart(points, width=1000, height=260, spec=SWING_SERIES)
+    chart_narrow = performance_chart(points, width=360, height=240, labels=False, spec=SWING_SERIES)
+    runs = [cv for cv in view.cycles if cv.doc.swing is not None]
+    metrics = None
+    if m is not None:
+        metrics = {"m": m, "expectancy": _interval_words(m.expectancy_r),
+                   "hit": fmt_pct1(m.hit_rate_pct) if m.hit_rate_pct is not None else "—",
+                   "payoff": f"{m.payoff:.2f}" if m.payoff is not None else "—",
+                   "contrib": fmt_bp(m.contribution_declared_bp),
+                   "matched": fmt_bp(m.matched_contribution_declared_bp) if m.matched_contribution_declared_bp is not None else "—",
+                   "vs_matched": fmt_signed(m.vs_matched_pct) if m.vs_matched_pct is not None else "—",
+                   "days": f"{m.avg_days_held:.1f}" if m.avg_days_held is not None else "—",
+                   "se": f"{m.standard_error_r:.2f}R" if m.standard_error_r is not None else "—",
+                   "mix": [(EXIT_WORDS.get(k, k) if k != "discretionary" else "decision", fmt_pct1(v)) for k, v in m.exit_mix_pct.items()]}
+    return {"book": book, "open": [swing_trade_view(t, geo, scale) for t in open_t],
+            "closed": [swing_trade_view(t, geo, 1.0) for t in reversed(closed_t)],
+            "metrics": metrics, "funnel": funnel, "chart": chart, "chart_narrow": chart_narrow,
+            "health": health_view(book.health if book is not None else None),
+            "header": swing_header(book, m.n_closed if m is not None else 0),
+            "runs": [{"cv": cv, "ideas": len(cv.doc.swing.ideas),
+                      "planned": sum(1 for i in cv.doc.swing.ideas if i.stage_reached in ("planned", "approved", "executed"))}
+                     for cv in runs[:20]],
+            "agents": swing_agent_cards(view)}
+
+
+def swing_agent_cards(view: JournalView) -> list[dict[str, Any]]:
+    """The Scout's and the Skeptic's cards: job, calls and usable share over every swing run."""
+    out = []
+    for spec in SWING_AGENT_SPECS:
+        calls = [call_view(x) for cv in view.cycles for x in cv.doc.calls if x.role in spec.roles]
+        ok = sum(1 for x in calls if not x["failed"])
+        last = next((cv for cv in view.cycles if cv.doc.swing is not None), None)
+        verdict = ""
+        if last is not None and spec.slug == "scout":
+            verdict = plural(len(last.doc.swing.ideas), "idea")
+        elif last is not None:
+            words = [i.verdict.verdict for i in last.doc.swing.ideas if i.verdict is not None]
+            verdict = ", ".join(f"{words.count(w)} {w}" for w in ("pass", "wait", "reject") if words.count(w)) or "no verdict"
+        out.append({"spec": spec, "slug": spec.slug, "name": spec.name, "accent": spec.accent,
+                    "icon": {"scout": "file-search", "skeptic": "flask-conical"}[spec.slug], "kind": spec.kind,
+                    "short": spec.short, "job": spec.job, "more": spec.more, "calls": len(calls), "ok": ok,
+                    "ok_pct": f"{100.0 * ok / len(calls):.0f}%" if calls else "—", "verdict": verdict,
+                    "last": last, "source": f"{REPO_URL}/blob/main/{spec.source}", "source_path": spec.source,
+                    "page": f"agents/{spec.slug}.html"})
+    return out
+
+
+def swing_assets(view: JournalView, now: datetime) -> dict[str, dict[str, Any]]:
+    """{line id: its swing ideas and trades}, for a ticker with an idea or a trade in the last 90 days."""
+    since = now - timedelta(days=SWING_WINDOW_DAYS)
+    out: dict[str, dict[str, Any]] = {}
+    for cv in view.cycles:
+        if cv.doc.swing is None or cv.doc.slot < since:
+            continue
+        for i in cv.doc.swing.ideas:
+            row = out.setdefault(i.ticker, {"ticker": i.ticker, "ideas": [], "trades": []})
+            row["ideas"].append({"cv": cv, "v": swing_idea_view(i)})
+    trades = []
+    if view.swing is not None:
+        trades = list(view.swing.open_trades) + list(view.swing.closed_trades)
+    for t in trades:
+        opened = parse_cycle_id(t.opened_cycle) if t.opened_cycle else None
+        if t.state.startswith("closed_") and (opened is None or opened < since):
+            continue
+        row = out.setdefault(t.ticker, {"ticker": t.ticker, "ideas": [], "trades": []})
+        row["trades"].append(swing_trade_view(t, Geometry(), 1.0))
+    return out
 
 
 # ------------------------------------------------------------------------------ rendering
@@ -4205,6 +4475,7 @@ def make_env(lines: Lines | list[str] | None = None) -> Environment:
         ring_cls=Geometry().ring,        # replaced by the build's own geometry in build()
         ring_css=ring_css,
         how_words=HOW_WORDS,
+        swing_page=lambda k: "",         # replaced in build() once the swing asset pages are known
     )
     return env
 
@@ -4314,9 +4585,12 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     disclaimer = load_disclaimer(policy_dir.parent)
     if status["prelive"]:
         disclaimer = prelive_disclaimer(disclaimer, rehearsal=status["mode"] == "rehearsal")
+    nav = list(NAV)
+    if view.has_swing:                          # the swing page joins the menu once there is a swing record
+        nav.insert(2, SWING_NAV)
     common = {
         "csp": Markup(CSP),               # a constant; single quotes must not be entity-escaped
-        "nav": NAV,
+        "nav": tuple(nav),
         "status": status,
         "disclaimer": disclaimer,
         "kill": risk.get("killswitch", {}),
@@ -4365,6 +4639,9 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     sealed = sealed_runs(view)
     holdings = build_holdings(view, lines, geo, risk.get("killswitch", {}), status)
     assets = build_assets(view, lines, holdings, geo, linked)
+    sw_assets = swing_assets(view, now) if view.has_swing else {}
+    asset_pages = {a["asset"]["line"] for a in assets} | {k for k in sw_assets if asset_page(k)}
+    env.globals["swing_page"] = lambda k: asset_page(k) if k in asset_pages else ""
     roster = build_roster(latest, runs[latest.doc.cycle_id] if latest else None,
                           transcripts[latest.doc.cycle_id] if latest else None, lines)
     render("index.html.j2", "index.html", "", "portfolio", latest=latest, bmap=book_map(holdings, geo),
@@ -4382,15 +4659,27 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
            cycles=[(cv, runs[cv.doc.cycle_id], transcripts[cv.doc.cycle_id]) for cv in view.cycles])
     for cv in view.cycles:
         render("cycle.html.j2", f"cycles/{cv.doc.cycle_id}.html", "../", "runs", cv=cv, c=cv.doc,
-               run=runs[cv.doc.cycle_id], tr=transcripts[cv.doc.cycle_id])
+               run=runs[cv.doc.cycle_id], tr=transcripts[cv.doc.cycle_id],
+               sw=swing_run_view(cv.doc.swing, geo, view.swing))
+    swing_cards = swing_agent_cards(view) if view.has_swing else []
     render("agents.html.j2", "agents/index.html", "../", "agents", agents=agents, cycles_count=len(view.cycles),
-           model=str(council_cfg.get("model", "")), think=bool(council_cfg.get("think", False)))
+           model=str(council_cfg.get("model", "")), think=bool(council_cfg.get("think", False)),
+           swing_agents=swing_cards)
     for agent in agents:
         render("agent.html.j2", f"agents/{agent['slug']}.html", "../", "agents", agent=agent, agents=agents)
+    for card in swing_cards:
+        render("swing_agent.html.j2", card["page"], "../", "agents", agent=card, swing_agents=swing_cards)
     for a in assets:
         render("asset.html.j2", a["asset"]["page"], "../", "portfolio", a=a, book_target=holdings["target"],
                others=[{"page": x["asset"]["page"], "ticker": x["asset"]["ticker"], "ac": x["asset"]["ac"],
-                        "held": bool(x["row"] and abs(x["row"]["weight"]) > EPS)} for x in assets])
+                        "held": bool(x["row"] and abs(x["row"]["weight"]) > EPS)} for x in assets],
+               swing=sw_assets.get(a["asset"]["line"]))
+    have = {a["asset"]["line"] for a in assets}
+    for k, row in sorted(sw_assets.items()):
+        if k not in have and asset_page(k):
+            render("swing_asset.html.j2", asset_page(k), "../", "swing", s=row)
+    if view.has_swing:
+        render("swing.html.j2", "swing/index.html", "../", "swing", sp=swing_page_view(view, geo))
     render("how.html.j2", "how.html", "", "how", roster=load_roster(prompts_dir, policy_dir))
     render("rules.html.j2", "rules.html", "", "rules", rules=load_rules(policy_dir))
     render("record.html.j2", "record.html", "", "record", incidents=view.incidents, withdrawn=load_withdrawn())

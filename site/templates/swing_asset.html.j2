@@ -1,0 +1,17 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% import "swing_macros.html.j2" as swm %}
+{% block title %}{{ s.ticker | ticker }} · swing{% endblock %}
+{% block toc %}
+{{ m.toc_item("swing", "Swing ideas and trades", "scout") }}
+{% endblock %}
+{% block hero %}
+<header class="hero hero-asset">
+  <p class="eyebrow"><a href="../swing/index.html">Swing book</a> / Stock</p>
+  <h1><span class="asset-tk">{{ s.ticker | ticker }}</span></h1>
+  <p class="lede">This page exists while the ticker has a swing idea or trade in the last 90 days. It is not part of the core book.</p>
+</header>
+{% endblock %}
+{% block main %}
+{% include "swing_asset_block.html.j2" %}
+{% endblock %}

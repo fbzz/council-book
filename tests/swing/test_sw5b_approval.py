@@ -38,6 +38,15 @@ TRADE, IDEA = "trade:t1", "idea:c1_1"
 SLOT = None   # the fake clock's start (2026-10-01 14:40 UTC, a Thursday in EDT)
 
 
+@pytest.fixture(autouse=True)
+def _swing_book_live(monkeypatch):
+    """These tests model the LIVE swing path: with the switch off the planner never plans a swing
+    entry and the approval drops one (`swing_book_not_live`, tests/swing/test_sw5c_review.py)."""
+    from council import invariants
+
+    monkeypatch.setattr(invariants, "SWING_BOOK_LIVE", True)
+
+
 @pytest.fixture
 def mkt(fake, fclock, tmp_path):
     fake.add_instrument(NVDA, NVDA_ID, bid=BID, ask=ASK, row=eligibility_row(NVDA, NVDA_ID, configs=[

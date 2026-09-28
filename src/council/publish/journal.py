@@ -8,6 +8,7 @@ Layout (every path is under `journal/`; `cycle_id` is the only key):
   journal/executions/YYYY/MM/<cycle>.json          final outcome of an executed decision
   journal/book/latest.json
   journal/performance/index.jsonl                  one row per day (as_of)
+  journal/swing/latest.json                        the swing book (swing-book.md §7.4), percent-only
   journal/ops/cycles.jsonl                         one row per cycle
   journal/incidents/INC-####.md
 
@@ -40,12 +41,14 @@ from council.publish.public_models import (
     PublicPerformancePoint,
     PublicReveal,
     PublicStatus,
+    PublicSwingBook,
 )
 
 JOURNAL = "journal"
 STATUS_PATH = f"{JOURNAL}/status.json"
 BOOK_PATH = f"{JOURNAL}/book/latest.json"
 PERFORMANCE_PATH = f"{JOURNAL}/performance/index.jsonl"
+SWING_PATH = f"{JOURNAL}/swing/latest.json"
 OPS_PATH = f"{JOURNAL}/ops/cycles.jsonl"
 INCIDENTS_DIR = f"{JOURNAL}/incidents"
 _CYCLE_ID = re.compile(CYCLE_ID_PATTERN)
@@ -128,6 +131,10 @@ def status_files(status: PublicStatus) -> dict[str, bytes]:
 
 def book_files(book: PublicBook) -> dict[str, bytes]:
     return {BOOK_PATH: dump_json(book)}
+
+
+def swing_files(book: PublicSwingBook) -> dict[str, bytes]:
+    return {SWING_PATH: dump_json(book)}
 
 
 def execution_files(execution: PublicExecution) -> dict[str, bytes]:

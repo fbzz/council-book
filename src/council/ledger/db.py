@@ -942,11 +942,16 @@ class Ledger:
         stamp = self._now(now)
         with self._tx() as conn:
             row = conn.execute(
-                "SELECT state, detail_json FROM legs WHERE decision_id = ? AND seq = ?", (decision_id, seq)
+                "SELECT state, detail_json, amount_usd FROM legs WHERE decision_id = ? AND seq = ?", (decision_id, seq)
             ).fetchone()
             if row is None:
                 raise LedgerError(f"unknown leg {decision_id}:{seq}")
             current = row["state"]
+            if "amount_usd" in fields:        # the entry guard may only REDUCE a planned leg's amount
+                new_amount, old_amount = fields["amount_usd"], row["amount_usd"]
+                if current != "planned" or new_amount is None or (
+                        old_amount is not None and float(new_amount) > float(old_amount) * (1 + 1e-9)):
+                    raise LedgerError(f"leg {decision_id}:{seq}: amount_usd may only be reduced on a planned leg")
             if current in LEG_TERMINAL_STATES:
                 raise InvalidTransition(f"leg {decision_id}:{seq} is terminal ({current})")
             if state is not None and state != current and not can_transition_leg(current, state):

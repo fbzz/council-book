@@ -1,5 +1,6 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
+{% import "swing_macros.html.j2" as swm %}
 {% block title %}Run {{ run.when }}{% endblock %}
 {% block toc %}
 {{ m.toc_item("glance", "At a glance", "neutral") }}
@@ -10,6 +11,10 @@
 {% endfor %}
 {{ m.toc_group("Outcome") }}
 {{ m.toc_item("a-decision", "Human approval" ~ (" and execution" if cv.execution else ""), "human", tr.decision_status) }}
+{% if sw %}{{ m.toc_group("Swing book") }}
+{{ m.toc_item("swing-ideas", "Swing ideas (" ~ (sw.ideas | length) ~ ")", "scout") }}
+{{ m.toc_item("swing-book", "Swing book (" ~ (sw.trades | length) ~ ")", "skeptic") }}
+{% endif %}
 {{ m.toc_item("facts", "Facts the council saw", "neutral") }}
 {{ m.toc_item("seal", "Seal and call log", "neutral") }}
 {% endblock %}
@@ -484,6 +489,37 @@
 {% if ex.flags %}<p class="small">Flags: {% for f in ex.flags %}<code>{{ f }}</code> {% endfor %}</p>{% endif %}
 {% endif %}
 </section>
+
+{% if sw %}
+{% set ns.n = ns.n + 1 %}
+{% call m.section("swing-ideas", ns.n, "Swing ideas", "scout") %}
+{{ swm.header(sw.header) }}
+{% if sw.paper %}<p>{{ swm.paper() }} The swing book did not trade in this run: every idea below was tracked on paper only.</p>{% endif %}
+<p class="small">Every idea the Scout proposed in this swing slot, including the ones code, the Skeptic or the manager stopped. Distances are percentages from the entry; no price is published.</p>
+{% for v in sw.ideas %}{{ swm.idea(v, "../") }}{% else %}<p class="muted">The Scout proposed no idea in this slot.</p>{% endfor %}
+{% if sw.bull or sw.bear %}
+<details class="more"><summary>The swing debate ({{ (sw.bull.claims | length if sw.bull else 0) + (sw.bear.claims | length if sw.bear else 0) }} claims)</summary>
+{% for case, who, acc in ((sw.bull, "Bull", "bull"), (sw.bear, "Bear", "bear")) %}{% if case %}
+<div class="sw-case accent-{{ acc }}"><p><span class="dot accent-{{ acc }}" aria-hidden="true"></span><strong>{{ who }}</strong>: {{ case.argument }}</p>
+<ul>{% for c in case.claims %}<li><code>{{ c.claim_id }}</code> on <code>{{ c.ref }}</code>: {{ c.text }}{% for e in c.evidence %} <code class="small">{{ e }}</code>{% endfor %}</li>{% endfor %}
+{% for r in case.rebuttals %}<li>{{ r.verdict }} <code>{{ r.claim_id }}</code>: {{ r.text }}</li>{% endfor %}</ul></div>
+{% endif %}{% endfor %}
+</details>
+{% endif %}
+{{ swm.health(sw.health) }}
+{% if sw.flags %}<p class="small">Swing flags: {% for f in sw.flags %}<code>{{ f }}</code> {% endfor %}</p>{% endif %}
+{% endcall %}
+{% set ns.n = ns.n + 1 %}
+{% call m.section("swing-book", ns.n, "Swing book", "skeptic") %}
+{% if sw.trades %}
+<p class="small">Open swing trades when this run was sealed. The bar puts the entry in the middle: the stop to one side, the target to the other, on one scale for the whole table.</p>
+{{ swm.book(sw.trades, "../") }}
+{% else %}
+<p class="muted">No swing trade was open when this run was sealed.</p>
+{% endif %}
+<p class="small"><a href="../swing/index.html">The swing page</a> has closed trades, their results after the declared {{ sw.cost }}% cost per leg, the pre-registered metrics and the idea funnel.</p>
+{% endcall %}
+{% endif %}
 
 {% set ns.n = ns.n + 1 %}
 {% call m.section("facts", ns.n, "Facts the council saw", "neutral") %}

@@ -11,7 +11,8 @@
 
    Colour (a word always says it too):
    seats   code officers share a slate family (data, reference, volatility, event) · news amber ·
-           macro lime · bull teal · bear coral · manager violet · control berry · the checks share a
+           macro lime · bull teal · bear coral · manager violet · control berry · swing Scout cyan ·
+           swing Skeptic magenta · the checks share a
            steel family (auditor, risk engine, plan & costs) · human ivory · not an agent: grey
    book    long teal · short coral (the bull's and the bear's hues, on purpose); up teal · down
            coral, always with a sign and an arrow. The map's "Colour by" toggle: the 1-day move
@@ -73,6 +74,10 @@
   --seat-risk: #7fa7c9;
   --seat-costs: #6a93ba;
   --seat-human: #e4d7bc;
+  /* the swing book's two agents (user-chosen, 2026-09-28): Scout cyan, Skeptic magenta; both meet
+     AA as text on --bg, --card, --raised and --inset (a test checks it) */
+  --seat-scout: #3fb8e6;
+  --seat-skeptic: #e05fb0;
   --seat-none: #5d6781;          /* a section that is not an agent */
 
   /* the book */
@@ -190,6 +195,8 @@
 .accent-risk { --accent: var(--seat-risk); }
 .accent-costs { --accent: var(--seat-costs); }
 .accent-human { --accent: var(--seat-human); }
+.accent-scout { --accent: var(--seat-scout); }
+.accent-skeptic { --accent: var(--seat-skeptic); }
 .accent-neutral, .accent-code, .accent-proposed, .accent-stone, .accent-long, .accent-halted { --accent: var(--seat-none); }
 
 /* ------------------------------------------------------------------ base */
@@ -1355,4 +1362,45 @@ body.moved p { max-width: 40rem; margin: 48px auto; padding: 0 16px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-delay: 0s !important; }
+}
+
+
+/* ================================================================== SWING BOOK (swing-book §7.4) */
+/* An idea is a card in the run's "Swing ideas" section; the Skeptic's verdict is a magenta-ruled
+   block inside it. The book's bar puts the entry in the middle: the stop one side (coral), the
+   target the other (teal). Widths come from geometry.css; every bar also prints its numbers. */
+.sw-head { border-left: 3px solid var(--seat-scout); padding: var(--sp-2) 0 var(--sp-2) var(--sp-4); margin: 0 0 var(--sp-4); }
+.sw-head p { margin: 0 0 var(--sp-2); line-height: 1.55; }
+.sw-head p:last-child { margin-bottom: 0; color: var(--muted); font-size: var(--fs-1); }
+.sw-health { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); font-size: var(--fs-1); color: var(--ink); }
+.sw-idea { border: 1px solid var(--line); border-left: 3px solid var(--seat-scout); border-radius: var(--radius); background: var(--raised); padding: var(--sp-4); margin: 0 0 var(--sp-4); min-width: 0; }
+.sw-idea-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.sw-idea-head .mono { font-size: var(--fs-3); color: var(--ink-strong); }
+.sw-ref { font-size: var(--fs-label) !important; color: var(--muted) !important; }
+.sw-stage { margin-left: auto; }
+.sw-drop { margin: 0 0 var(--sp-2); color: var(--muted); }
+.sw-row { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: var(--sp-3); padding: var(--sp-1) 0; border-top: 1px solid var(--line-soft); font-size: var(--fs-1); }
+.sw-k { color: var(--muted); font: 600 var(--fs-label)/1.6 var(--font-body); text-transform: uppercase; letter-spacing: 0.08em; }
+.sw-v { min-width: 0; overflow-wrap: break-word; }
+.sw-v .ev { margin: 0 var(--sp-1) var(--sp-1) 0; }
+.sw-facts { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); }
+.sw-fact { white-space: nowrap; }
+.sw-withheld { display: block; margin-top: 2px; }
+.sw-skeptic { margin-top: var(--sp-3); padding: var(--sp-3) var(--sp-3) var(--sp-2); border-left: 3px solid var(--seat-skeptic); background: color-mix(in srgb, var(--seat-skeptic) 6%, var(--card)); border-radius: 0 var(--radius) var(--radius) 0; }
+.sw-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-2); margin: 0 0 var(--sp-2); }
+.sw-reasons { margin: 0 0 var(--sp-2); padding-left: 1.2em; font-size: var(--fs-1); line-height: 1.5; }
+.sw-votes { margin: var(--sp-2) 0 0; }
+.sw-paper { letter-spacing: 0.08em; }
+.sw-case { border-left: 3px solid var(--accent); padding-left: var(--sp-3); margin: var(--sp-3) 0; font-size: var(--fs-1); }
+.sw-bar { position: relative; display: block; width: 100%; min-width: 120px; height: 8px; margin: 2px 0 6px; border-radius: 4px; background: var(--track); }
+.sw-stop, .sw-target { position: absolute; top: 0; bottom: 0; }
+.sw-stop { right: 50%; background: var(--down); border-radius: 4px 0 0 4px; }
+.sw-target { left: 50%; background: var(--up); border-radius: 0 4px 4px 0; }
+.sw-entry { position: absolute; left: 50%; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--ink-strong); }
+.sw-book td, .sw-funnel td { vertical-align: top; }
+.sw-cast { margin-top: var(--sp-3); }
+.ac-icon-lg { width: 28px; height: 28px; }
+@media (max-width: 699px) {
+  .sw-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .sw-stage { margin-left: 0; }
 }

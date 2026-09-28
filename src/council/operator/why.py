@@ -21,6 +21,10 @@ An unrevealed cycle has no public document, and its trail would show the council
 the human decision, so outside the operator's terminal it is refused (exit 2) before anything is
 read. Both sources print the same fixed words (engine notes and plan skips go through
 `publish.trace_rules`, so no size floor, fee or broker-derived number is ever shown).
+Swing book (swing-book.md §7.1): `council why <cycle> <TICKER>` also prints the swing chain of
+an idea or trade on that ticker (`council.swing.trail`): scout -> code gate -> skeptic -> debate
+-> PM votes -> S-rules -> engine -> plan -> approval -> fill -> exits, from the private swing record
+in the operator's terminal, else from the revealed public swing section.
 This module reads files only; it never imports the broker, the writer or the gateway.
 """
 
@@ -339,11 +343,72 @@ def run_why(
                  "trail is shown only in the operator's terminal")
             return 2
         header = f"{cycle_id} · why each line moved · source: revealed public record"
+    swing_text = None
+    if line is not None:
+        swing_text = swing_why(cycle_id, line, operator=operator and header.endswith(PRIVATE_NOTE),
+                               state_dir=Path(state_dir) if state_dir is not None else paths.state_dir(),
+                               journal_dir=journal_root)
     if line is not None and line not in {t.line for t in found}:
+        if swing_text:
+            echo(swing_text)
+            return 0
         echo(f"no line {line} in cycle {cycle_id}")
         return 1
     echo(trail.render_text(found, header=header, line=line).rstrip("\n"))
+    if swing_text:
+        echo(swing_text)
     return 0
+
+
+def swing_why(cycle_id: str, ticker: str, *, operator: bool, state_dir: Path, journal_dir: Path) -> str | None:
+    """The swing chain for `ticker` in one cycle, or None: from the private ledger record (operator
+    only) or from the revealed public document."""
+    from council.swing import trail as swing_trail
+
+    lines = None
+    source = ""
+    if operator:
+        from council.ledger.db import LEDGER_FILE, Ledger
+
+        path = Path(state_dir) / LEDGER_FILE
+        if path.is_file():
+            ledger = Ledger(path)
+            raw = ledger.get_cycle(cycle_id)
+            if raw is not None:
+                decision = legs = None
+                hold: list[str] = list(((raw.get("risk") or {}).get("hold_reasons")) or [])
+                try:
+                    decision = ledger.get_decision(raw["decision_id"]) if raw.get("decision_id") else None
+                    legs = ledger.legs(raw["decision_id"]) if raw.get("decision_id") else []
+                except Exception:  # noqa: BLE001 - an older ledger: the chain stops at the plan
+                    decision, legs = None, []
+                try:
+                    trades, events = ledger.swing_trades(), ledger.swing_events()
+                except Exception:  # noqa: BLE001 - a ledger without the swing tables
+                    trades, events = [], []
+                lines = swing_trail.ledger_lines(raw, ticker, hold_reasons=hold, legs=legs or [],
+                                                 decision=decision, trades=trades, events=events)
+                source = f"source: ledger\n{PRIVATE_NOTE}"
+    if lines is None:
+        doc = _public_doc(journal_dir, cycle_id)
+        lines = swing_trail.public_lines(getattr(doc, "swing", None), ticker) if doc is not None else None
+        source = "source: revealed public record"
+    if not lines:
+        return None
+    return "\n".join([f"{cycle_id} · swing chain for {ticker.upper()} · {source}", *lines]).rstrip("\n")
+
+
+def _public_doc(journal_dir: Path, cycle_id: str) -> Any:
+    from council.publish import journal
+    from council.publish.public_models import PublicCycleV1
+
+    path = Path(journal_dir).parent / journal.cycle_path(cycle_id)
+    if not path.is_file():
+        return None
+    try:
+        return PublicCycleV1.model_validate_json(path.read_text())
+    except ValueError:
+        return None
 
 
 def why_command(
@@ -368,5 +433,5 @@ def register(app: typer.Typer) -> None:
 __all__ = [
     "NO_TRAIL", "PRIVATE_NOTE", "SEALED_NOTE", "WhyError", "cycle_of", "decision_why", "journal_outcome",
     "journal_trails", "leg_row", "ledger_state", "ledger_trails", "operator_context_ok", "register",
-    "run_why", "sealed_document", "sealed_trails", "why_command",
+    "run_why", "sealed_document", "sealed_trails", "swing_why", "why_command",
 ]

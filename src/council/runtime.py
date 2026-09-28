@@ -79,6 +79,7 @@ class Sources:
     news: NewsFn | None = None
     broker: BrokerRead | None = None          # None = AWAITING ACCOUNT (no snapshot, no plan)
     fundamentals: FundamentalsFn | None = None   # stock lines' F:<line>:<field> facts (SEC)
+    swing: Any = None                         # swing.sources.SwingSources (None: swing_sources_missing)
 
 
 @dataclass
