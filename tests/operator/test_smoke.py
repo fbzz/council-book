@@ -432,7 +432,7 @@ def test_a_v3_ledger_admits_the_smoke_kind_and_keeps_its_rows(tmp_path):
     assert again.get_decision("d-old").kind == "rebalance"
     again.create_decision(decision_id="2026-10-01T0905Z-smoke-S1", kind="smoke",
                           valid_until=NOW + timedelta(hours=1))
-    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 4
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_smoke_ids_never_match_the_cycle_pattern():

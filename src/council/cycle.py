@@ -548,8 +548,9 @@ def evidence_lines(policy: Any, pack: Any, blockers: list[str]) -> list[str]:
     consumes it (`runtime.consume_fingerprints`): admitted by the pack (usable, fresh data and an
     open session), minus every line under a whole-book blocker, minus the satellite under a
     satellite-scoped one."""
-    from council.ledger.states import SATELLITE_BLOCKER_PREFIX
+    from council.ledger.states import SATELLITE_BLOCKER_PREFIX, SWING_BLOCKER_PREFIX
 
+    blockers = [b for b in blockers if not str(b).startswith(SWING_BLOCKER_PREFIX)]  # swing entries only
     scoped = [str(b).startswith(SATELLITE_BLOCKER_PREFIX) for b in blockers]
     if not all(scoped):
         return []
@@ -672,8 +673,11 @@ def _snapshot_and_kill(ctx: CycleContext, now: datetime) -> tuple[Any, str, Any]
     ledger, policy = ctx.ledger, ctx.policy
     payload = ctx.sources.broker.pnl()  # type: ignore[union-attr]
     imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
-    snapshot = snapshot_from_pnl(payload, vehicle_by_instrument=imap.symbols_by_id(),
-                                 line_by_vehicle=vehicle_to_line(policy.universe), now=now)
+    from council.swing.book import swing_vehicle_map
+
+    smap = swing_vehicle_map(ledger, policy)      # swing positions are swing lines, not UNMAPPED (§1.9)
+    snapshot = snapshot_from_pnl(payload, vehicle_by_instrument=smap.merged_symbols(imap.symbols_by_id()),
+                                 line_by_vehicle=smap.merged_lines(vehicle_to_line(policy.universe)), now=now)
     # M-3 (M5-D2): while a smoke ticket is pending, in flight or holds a position, the NAV state and
     # the lifetime peaks are read but never initialised or raised; after the token-day tickets they
     # restart once, at the first smoke-free read before any live proposal
@@ -780,7 +784,7 @@ def _council_extras(code_cards, bands_fn, call_log: list | None = None, sink: An
 # ------------------------------------------------------------------------------- risk
 def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands, states, snapshot, unit,
               kill_state, quotes, pack, material_changed, basis, slot, returns, nav,
-              econ=None, extra_blockers=()) -> RiskDecision:
+              econ=None, extra_blockers=(), extra_lines=()) -> RiskDecision:
     from council.risk.engine import RiskEngine
     from council.risk.held_levels import ledger_held_levels
 
@@ -809,6 +813,7 @@ def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands,
         pending_w=pending, held_levels=held,
         copy_min_share=econ.copy_floor_share if econ is not None else 0.0,
         cost_30d_fee_bps=float(fee_30d),
+        extra_lines=extra_lines,          # swing-book §1.1: the pinned swing lines (none until run_swing)
     )
 
 

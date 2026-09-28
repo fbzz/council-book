@@ -231,25 +231,30 @@ def _scrub(value: object, flt: LicensedFilter, hits: list[int]) -> object:
 
 
 def _scrub_ledger(run: _Run, root: Path, cycle_id: str, flt: LicensedFilter) -> None:
-    """Replace every string of the cycle's ledger record that copies a licensed text."""
+    """Replace every string of the cycle's ledger record, and of the swing rows keyed by that
+    origin cycle (`council.ledger.purge`, SW-2b), that copies a licensed text."""
     from council.ledger.db import LEDGER_FILE, Ledger
+    from council.ledger.purge import scrub_swing_rows
 
     path = root / LEDGER_FILE
     if not path.is_file():
         return
     ledger = Ledger(path)
+    swing_hits = scrub_swing_rows(ledger, cycle_id, flt.hits, REPLY_PLACEHOLDER, dry_run=run.dry_run)
     record = ledger.get_cycle(cycle_id)
-    if record is None:
-        return
     hits: list[int] = []
-    keep = {k: record[k] for k in ("cycle_id", "slot", "status") if k in record}
-    scrubbed = _scrub(record, flt, hits)
-    if not hits:
+    scrubbed: object = None
+    if record is not None:
+        keep = {k: record[k] for k in ("cycle_id", "slot", "status") if k in record}
+        scrubbed = _scrub(record, flt, hits)
+        if hits and not run.dry_run and isinstance(scrubbed, dict):
+            ledger.record_cycle({**scrubbed, **keep}, now=run.now)
+    total = len(hits) + swing_hits
+    if not total:
         return
-    run.receipt.add("ledger_strings_scrubbed", len(hits))
+    run.receipt.add("ledger_strings_scrubbed", total)
     run.scrubbed_roots.add(root)
-    if not run.dry_run and isinstance(scrubbed, dict):
-        ledger.record_cycle({**scrubbed, **keep}, now=run.now)
+    if not run.dry_run:
         _compact(path)
 
 

@@ -50,8 +50,8 @@ def test_migrate_creates_wal_schema(ledger):
         "cycles", "role_calls", "decisions", "decision_events", "legs", "positions_observed",
         "broker_events", "equity_marks", "runtime_state",
     } <= tables
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
-    assert ledger.migrate() == 4                     # idempotent
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert ledger.migrate() == 5                     # idempotent
     columns = {r[1] for r in conn.execute("PRAGMA table_info(decision_events)")}
     assert {"actor", "process_role"} <= columns
     columns = {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
@@ -364,14 +364,14 @@ def test_migrates_a_v1_ledger_in_place(tmp_path, fclock):
     """)
     conn.close()
     ledger = Ledger(path, clock=fclock.now)
-    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 4
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 5
     (legacy,) = ledger.events("old")
     assert legacy["actor"] == "unrecorded" and legacy["process_role"] is None
     old = ledger.get_decision("old")
     assert old.policy_sha is None and old.blocker_scope is None       # v3 columns, NULL on old rows
     ledger.transition("old", "approved", "ok", actor="operator")
     assert ledger.events("old")[-1]["actor"] == "operator"
-    assert ledger.migrate() == 4
+    assert ledger.migrate() == 5
 
 
 # ------------------------------------------------------------------------------ leg lines

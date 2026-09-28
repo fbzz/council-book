@@ -472,9 +472,15 @@ def _stop_hits(ctx: CycleContext, snapshot: Any, now: datetime) -> list[str]:
     ours |= set(ledger.smoke_positions())       # M-3: a smoke position never feeds R4d cool-off
     raw_sigma = ledger.get_runtime(STOCK_SIGMA_4H_KEY, {})
     sigma = {str(k): _positive(v) for k, v in raw_sigma.items()} if isinstance(raw_sigma, dict) else {}
-    vanished = corporate.classify_vanished_positions(seen, live, ours, ctx.policy, sigma_4h=sigma)
+    from council.swing.book import swing_vehicle_map
+
+    vanished = corporate.classify_vanished_positions(seen, live, ours, ctx.policy, sigma_4h=sigma,
+                                                     swing_map=swing_vehicle_map(ledger, ctx.policy))
     alerts = []
     for v in vanished:
+        if v.outcome == corporate.SWING_CLOSED:
+            alerts.append(f"swing position closed at the broker: {v.line}")   # never a core R4d stop hit
+            continue
         if v.outcome == corporate.STOP_HIT:
             ledger.record_stop_hit(line=v.line, symbol=v.symbol, position_id=v.position_id, at=now)
             alerts.append(f"URGENT stop-loss hit on {v.line}")
@@ -730,7 +736,10 @@ def _final_after_wait(ctx: CycleContext, rows: list[Any], port: Any, now: dateti
         for pid in r.position_ids
     ]
     targets = {r.line: float(r.detail["weight_after"]) for r in rows if r.detail.get("weight_after") is not None}
-    rec = reconcile(snapshot_from_portfolio(port, now), targets, expected, ctx.policy)
+    from council.swing.book import swing_vehicle_map
+
+    rec = reconcile(snapshot_from_portfolio(port, now), targets, expected, ctx.policy,
+                    swing_map=swing_vehicle_map(ctx.ledger, ctx.policy))
     rec, corporate_notes = _corporate_reconcile(ctx, rec, port)
     reasons += corporate_notes
     if not rec.protected:

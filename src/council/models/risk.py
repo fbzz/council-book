@@ -79,6 +79,7 @@ class RiskDecision(Strict):
     hold_reasons: list[str] = Field(default_factory=list)
     compliance: list[str] = Field(default_factory=list)   # rule-driven risk reductions
     line_trace: dict[str, list[TraceStep]] = Field(default_factory=dict)   # additive (T5b emits it)
+    swing_dropped: dict[str, str] = Field(default_factory=dict)  # swing line -> swing_book_limit:<rule> (SW-4)
 
     @property
     def passed(self) -> bool:

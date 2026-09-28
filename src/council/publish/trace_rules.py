@@ -12,6 +12,7 @@ cost quote, so the public record never copies a note: it maps each one through t
 | R12, MC, R2, R13, R14, R21 budget trims; "R15 no cost quote / no volatility" | none (policy words only) | as written (`FIXED_LINE_TEXTS`) |
 | R15 | SR_be and its limit only when every input is public: the line's cost from the policy floors (`costs:floor`) and its volatility from Tiingo / Binance history (SR_be = (RT + carry x hold) / (sigma x hold / 365), so with sigma and hold public it gives the round trip back) | otherwise the bare `R15` |
 | R15_fee, R14_fee | never (D18: the fee in bps of NAV encodes the NAV) | the bare code |
+| Swing book (SW-4): `swing_book_limit:<rule>` (a whole swing entry removed by a book limit) and a swing S-rule drop `<rule>:<code>` (`swing.rules.public_code`) | never | as written (codes only) |
 | Anything else | never | its bare rule code, else `held` (fail closed) |
 
 The same table serves the structured trace (T5b) through `public_trace_code` / `value_allowed`:
@@ -91,6 +92,8 @@ _R10_CLIP = re.compile(
     r"^R10 level [+-]\d{1,2}\.\d{2} outside band \[[+-]\d{1,2}\.\d{2}, [+-]\d{1,2}\.\d{2}\]$")
 _R10_CAP = re.compile(r"^R10 deviation beyond the \d{1,2} allowed per cycle$")
 _R15_VALUE = re.compile(r"^R15 SR_be \d{1,4}\.\d{2} above \d{1,4}\.\d{2}$")
+_SWING_LIMIT = re.compile(r"^swing_book_limit:R\d{1,2}$")
+_SWING_RULE = re.compile(r"^(?:S\d{1,2}|SB\d{1,2}|R20):[a-z][a-z_]{0,39}$")
 _SKIP_NOTE = re.compile(r"^([A-Za-z0-9_.]{1,40}): (.+)$")
 _SKIP_WORD = re.compile(r"^[a-z][a-z_ ]{0,39}$")
 
@@ -126,14 +129,21 @@ def listed(note: str | None) -> bool:
         (code is not None and (code.startswith(R11) or code in ("R14_fee", "R15_fee")))
         or raw in FIXED_LINE_TEXTS or raw in FIXED_GENERAL_TEXTS or raw in BOX_NOTES
         or _R10_CLIP.match(raw) or _R10_CAP.match(raw) or _R15_VALUE.match(raw)
+        or swing_note(raw)
     )
+
+
+def swing_note(note: str | None) -> bool:
+    """A swing-book note that stands as written (codes only, no number)."""
+    raw = _squash(note)
+    return bool(_SWING_LIMIT.match(raw) or _SWING_RULE.match(raw))
 
 
 def _public_note(note: str, value_ok: bool) -> str:
     code = code_of(note)
     if code is not None and code.startswith(R11):
         return R11
-    if note in FIXED_LINE_TEXTS or _R10_CLIP.match(note) or _R10_CAP.match(note):
+    if note in FIXED_LINE_TEXTS or _R10_CLIP.match(note) or _R10_CAP.match(note) or swing_note(note):
         return note
     if _R15_VALUE.match(note):
         return note if value_ok else "R15"

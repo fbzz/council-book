@@ -116,8 +116,11 @@ def approve(decision_id: str, deps: ApprovalDeps) -> Any:
     kept_plan = plan.model_copy(update={"legs": kept})
 
     imap = InstrumentMap.load(deps.state_dir / "instruments.json")
-    snap = snapshot_from_pnl(deps.read.pnl(), vehicle_by_instrument=imap.symbols_by_id(),
-                             line_by_vehicle=vehicle_to_line(policy.universe), now=now)
+    from council.swing.book import approval_drift, swing_vehicle_map
+
+    smap = swing_vehicle_map(ledger, policy)      # swing positions are swing lines, not UNMAPPED (§1.9)
+    snap = snapshot_from_pnl(deps.read.pnl(), vehicle_by_instrument=smap.merged_symbols(imap.symbols_by_id()),
+                             line_by_vehicle=smap.merged_lines(vehicle_to_line(policy.universe)), now=now)
     live_ids = {p.position_id for p in snap.positions}
     for leg in kept:
         if leg.kind in ("close", "partial_close", "modify_sl") and leg.position_id not in live_ids:
@@ -125,7 +128,7 @@ def approve(decision_id: str, deps: ApprovalDeps) -> Any:
     target = _json(d.target_json if hasattr(d, "target_json") else d.target) or {}
     base = target.get("base_w", {})
     current = current_book(snap.signed_w, ledger.pending_open_weights())
-    drift = sum(abs(current.get(s, 0.0) - base.get(s, 0.0)) for s in set(current) | set(base))
+    drift = approval_drift(current, base, smap)
     if drift > float(policy.risk["approval"]["drift_l1_max"]) + 1e-9:
         raise ApprovalRefused(f"book drifted {drift:.3f} since the proposal")
     _price_guard(kept_plan, deps, imap, policy)

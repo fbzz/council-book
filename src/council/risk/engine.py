@@ -78,13 +78,14 @@ the move is above 1.0), falling back to the unlevered keys when no levered quote
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
+from typing import Any
 
 import numpy as np
 
 from council.invariants import check_policy
-from council.ledger.states import SATELLITE_BLOCKER_PREFIX
+from council.ledger.states import blocker_scope_of
 from council.models.broker import CostQuote, ExposureSnapshot
 from council.models.facts import EventItem, MarketState
 from council.models.risk import Band, RiskCheck, RiskDecision
@@ -229,6 +230,7 @@ class RiskEngine:
         held_levels: Mapping[str, float] | None = None,
         copy_min_share: float = 0.0,
         cost_30d_fee_bps: float = 0.0,
+        extra_lines: Sequence[Any] = (),
     ) -> RiskDecision:
         """Run the pipeline in the module docstring.
 
@@ -239,9 +241,10 @@ class RiskEngine:
         `cost_30d_fee_bps` is the fee part, only used to withhold the public value).
         `held_levels` are the held reference levels (`risk.held_levels`; None migrates them from
         the current book) and `copy_min_share` the real-dollar trade floor as a NAV share (both
-        private). `material_changed` is one flag, or {line: new material evidence} (MC per line)."""
-        run = _Run(
-            self,
+        private). `material_changed` is one flag, or {line: new material evidence} (MC per line).
+        `extra_lines` are the swing book's pinned runtime lines (`swing.book.SwingLine`): see
+        `_with_swing`."""
+        kw = dict(
             levels=levels, ref=ref, bands=bands, states=states, snapshot=snapshot,
             unit_weights=unit_weights, kill_state=kill_state, cost_quotes=cost_quotes,
             events=list(events), last_change=last_change, turnover_7d=turnover_7d,
@@ -254,7 +257,86 @@ class RiskEngine:
             copy_min_share=max(float(copy_min_share), 0.0),
             cost_30d_fee_bps=max(float(cost_30d_fee_bps or 0.0), 0.0),
         )
-        return run.decide()
+        lines = list(extra_lines)
+        if not lines:
+            return _Run(self, swing_lines=(), **kw).decide()
+        return self._with_swing(lines, kw)
+
+    def _with_swing(self, lines: list[Any], kw: dict[str, Any]) -> RiskDecision:
+        """Swing lines are ALL-OR-NOTHING (swing-book §1.9, §3.2): pinned at their weight, never
+        scaled. The core is first evaluated with the swing holds and exits only; then the entries (in
+        PM order) are added, and while a whole-book limit binds - a failed R1/R2/R5/R7/R8 check the
+        entry-free book does not fail, any core line moved from the entry-free result, the S10 share
+        of the equity beta cluster, or the R3 / R16 / R20 entry blocks - the LAST entry is removed.
+        The core is never shrunk to make room for a swing entry; exits and holds are never removed."""
+        held = [ln for ln in lines if ln.action != "enter"]
+        entries = [ln for ln in lines if ln.action == "enter"]
+        dropped: dict[str, str] = {}
+        if kw["kill_state"] in LATCHED:
+            decision = _Run(self, swing_lines=held + entries, **kw).flatten()
+            return decision.model_copy(update={"swing_dropped": {
+                ln.line_id: "swing_book_limit:R3" for ln in entries}})
+        entries = self._swing_entry_blocks(entries, kw, dropped)
+        core = _Run(self, swing_lines=held, **kw).decide()
+        failed0 = {c.rule_id for c in core.checks if c.kind == "policy" and not c.passed}
+        decision = core
+        while entries:
+            trial = _Run(self, swing_lines=held + entries, **kw).decide()
+            rule = self._swing_binding(trial, core, failed0, held + entries)
+            if rule is None:
+                decision = trial
+                break
+            dropped[entries[-1].line_id] = f"swing_book_limit:{rule}"
+            entries = entries[:-1]
+        if dropped:
+            reasons = [f"{lid}: {why}" for lid, why in sorted(dropped.items())]
+            decision = decision.model_copy(update={"swing_dropped": dropped,
+                                                   "hold_reasons": [*decision.hold_reasons, *reasons]})
+        return decision
+
+    def _swing_entry_blocks(self, entries: list[Any], kw: Mapping[str, Any],
+                            dropped: dict[str, str]) -> list[Any]:
+        """R3 WARN, R20 blockers (all or swing scope), R16 macro events and a missing volatility
+        remove an entry before any evaluation."""
+        blockers = [str(b) for b in kw.get("blockers", ())]
+        scopes = {blocker_scope_of(b) for b in blockers}
+        keep = []
+        for ln in entries:
+            why = None
+            if kw["kill_state"] == "WARN":
+                why = "R3"
+            elif "all" in scopes or "swing" in scopes:
+                why = "R20"
+            elif ln.sigma_ann is None or not math.isfinite(ln.sigma_ann) or ln.sigma_ann <= 0:
+                why = "R8"
+            elif event_block(_swing_spec(ln), kw["events"], kw["now"], self.policy):
+                why = "R16"
+            if why:
+                dropped[ln.line_id] = f"swing_book_limit:{why}"
+            else:
+                keep.append(ln)
+        return keep
+
+    def _swing_binding(self, trial: RiskDecision, core: RiskDecision, failed0: set[str],
+                       lines: list[Any]) -> str | None:
+        failed = {c.rule_id for c in trial.checks if c.kind == "policy" and not c.passed} - failed0
+        if failed:
+            return sorted(failed)[0]
+        swing_ids = {ln.line_id for ln in lines}
+        for s, w in core.final_w.items():
+            if s in swing_ids:
+                continue
+            if abs(trial.final_w.get(s, 0.0) - w) > 1e-9:
+                return _shrink_rule(trial, self.limits)
+        caps = self.limits.caps
+        members = [s for s in caps.equity_beta_cluster.members if s in self.specs]
+        cluster = sum(abs(trial.final_w.get(s, 0.0)) for s in members)
+        cluster0 = sum(abs(core.final_w.get(s, 0.0)) for s in members)
+        swing_longs = sum(ln.pinned_w * (ln.beta_60d if ln.beta_60d is not None else 1.0)
+                          for ln in lines if ln.pinned_w > 0)
+        if cluster + swing_longs > max(caps.equity_beta_cluster.max, cluster0) + EPS:
+            return "R5"
+        return None
 
 
 class _Run:
@@ -273,6 +355,8 @@ class _Run:
         self.__dict__.update(kw)
         if self.now.tzinfo is None:
             raise ValueError("naive datetime; council code uses aware UTC datetimes only")
+        self.swing = {ln.line_id: ln for ln in self.swing_lines}
+        self.fixed_w = {s: float(ln.pinned_w) for s, ln in self.swing.items()}
         unknown = sorted(s for s in self.levels if s not in self.specs and not is_unmapped(s))
         if unknown:
             raise ValueError(f"unknown lines in levels: {unknown}")
@@ -281,11 +365,13 @@ class _Run:
         for s, w in self.pending_w.items():      # an order held until its market opens counts as held
             if math.isfinite(float(w)) and abs(float(w)) > EPS:
                 self.cur[s] = self.cur.get(s, 0.0) + float(w)
-        self.blockers_all = [b for b in self.blockers if not str(b).startswith(SATELLITE_BLOCKER_PREFIX)]
-        self.blockers_sat = [b for b in self.blockers if str(b).startswith(SATELLITE_BLOCKER_PREFIX)]
+        # "swing:<id>" halts new swing entries only (swing-book §4.5; enforced by SW-4), never a core line
+        self.blockers_all = [b for b in self.blockers if blocker_scope_of(b) == "all"]
+        self.blockers_sat = [b for b in self.blockers if blocker_scope_of(b) == "satellite"]
+        self.blockers_swing = [b for b in self.blockers if blocker_scope_of(b) == "swing"]
         self.managed = list(self.specs)
-        self.locked = sorted(s for s in self.cur if s not in self.specs)
-        self.order = self.managed + self.locked
+        self.locked = sorted(s for s in self.cur if s not in self.specs and s not in self.swing)
+        self.order = self.managed + self.locked + sorted(self.swing)
         self.cls = {s: spec.asset_class for s, spec in self.specs.items()}
         self.unit = {s: max(float(self.unit_weights.get(s, 0.0)), 0.0) for s in self.managed}
         self.ref_level = {s: float(self.ref.get(s, 0.0)) for s in self.managed}
@@ -434,10 +520,14 @@ class _Run:
         return None
 
     def vol(self, w: Mapping[str, float]) -> float:
+        # Swing lines add their own volatility at rho = 1 (an upper bound: conservative).
+        swing = sum(abs(v) * float(self.swing[s].sigma_ann or 0.0) for s, v in w.items() if s in self.swing)
         if self.vol_fn is not None:
-            return float(self.vol_fn(dict(w)))
-        total = 0.0
+            return float(self.vol_fn({s: v for s, v in w.items() if s not in self.swing})) + swing
+        total = swing
         for s, v in w.items():
+            if s in self.swing:
+                continue
             st = self.states.get(s)
             if st is not None and st.sigma_ann:
                 total += abs(v) * st.sigma_ann
@@ -513,6 +603,7 @@ class _Run:
         self.boxes()
         target = {s: self.banded[s] * self.unit[s] for s in self.managed}
         target.update({s: self.base[s] for s in self.locked})
+        target.update(self.fixed_w)
         held: dict[str, str] = {}
         proposed: dict[str, float] | None = None
         w = dict(self.base)
@@ -667,7 +758,7 @@ class _Run:
         self.lo: dict[str, float] = {}
         self.hi: dict[str, float] = {}
         self.box_notes: dict[str, list[str]] = {}
-        self.pinned: set[str] = set(self.locked)
+        self.pinned: set[str] = set(self.locked) | set(self.swing)
         sets = ("warn", "breaker", "event", "cooloff", "nostop", "hedged", "chase_long",
                 "chase_short", "stale", "closed", "blocked", "retiring", "stale_reduce")
         self.sets: dict[str, set[str]] = {k: set() for k in sets}
@@ -752,13 +843,16 @@ class _Run:
             self.box_notes[s] = [BOX_LABELS[k] for k in limits + no_add + holds] + line_hold
         for s in self.locked:
             self.lo[s] = self.hi[s] = self.base[s]
+        for s, w in self.fixed_w.items():
+            self.lo[s] = self.hi[s] = w
 
     def project(self, target: Mapping[str, float], held: Mapping[str, str]) -> dict[str, float]:
         names = self.order
         base = self.base
         fixed = [s in held or s in self.pinned for s in names]
-        band_lo = np.array([base[s] if f else self.lo[s] for s, f in zip(names, fixed, strict=True)])
-        band_hi = np.array([base[s] if f else self.hi[s] for s, f in zip(names, fixed, strict=True)])
+        fix = {s: self.fixed_w.get(s, base[s]) for s in names}
+        band_lo = np.array([fix[s] if f else self.lo[s] for s, f in zip(names, fixed, strict=True)])
+        band_hi = np.array([fix[s] if f else self.hi[s] for s, f in zip(names, fixed, strict=True)])
         w = np.clip(np.array([target[s] for s in names]), band_lo, band_hi)
         # Hard limits outrank authority: aggregate steps may shrink a line from its band toward
         # zero (never away from it), so a [ref, ref] band cannot make a cap unreachable.
@@ -1225,6 +1319,27 @@ class _Run:
             base=carry_b,
         ))
         return rows
+
+
+def _swing_spec(ln: Any) -> LineSpec:
+    """A throwaway US stock LineSpec so R16 (macro events) can judge a swing line."""
+    from council.policy import Signal, Vehicle, Vehicles
+
+    return LineSpec(symbol=ln.line_id, name=ln.ticker, asset_class="stock", sleeve="satellite",
+                    in_reference=False, base_weight=1.0, council_deviations=False,
+                    signal=Signal(source="tiingo", ticker=ln.ticker),
+                    vehicles=Vehicles(long=[Vehicle(symbol=ln.vehicle or ln.ticker, settlement="real")]))
+
+
+def _shrink_rule(d: RiskDecision, lim: Any) -> str:
+    """Which aggregate limit made the engine move a core line once swing entries were added."""
+    if d.ex_ante_vol >= lim.ex_ante_vol_hard - 1e-6:
+        return "R8"
+    if d.gross >= lim.gross.proposal_max - 1e-6:
+        return "R1"
+    if d.margin_use >= lim.margin_use_max - 1e-6:
+        return "R7"
+    return "R2"
 
 
 def _rule_order(check: RiskCheck) -> tuple[int, str]:

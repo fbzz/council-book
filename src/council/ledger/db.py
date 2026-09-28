@@ -33,6 +33,15 @@ Rules:
   pending or in flight or a smoke-opened position is still open; live cycles refuse to seal a
   proposal meanwhile. Schema v4 admits the `smoke` kind (a v3 ledger's decisions table is rebuilt
   once, rows kept).
+- Swing book (schema v5, SW-2b; design swing-book.md rev 2 §4.5): `swing_ideas`, `swing_trades`
+  (with `position_ids`), `swing_events`, `benchmark_days`, `paper_trades`. A trade's state moves only
+  along `swing.models.TRANSITIONS` (`transition_swing_trade`, compare-and-set, one `swing_events`
+  row per move); a closed/missed trade is immutable (API and SQL trigger). `record_swing_fill`
+  creates or advances a trade from a FILLED swing open leg whatever its decision's state (blocked,
+  execution_unknown, resumed, waiting-for-market). A swing leg is one a trade row points at, or
+  whose detail says `sleeve: swing`. Swing-scoped holds are reported by `blockers()` as
+  "swing:<id>" (they halt new swing entries only; `swing_blockers()`, `swing_entries_blocked()`).
+  v5 only adds tables, indexes and triggers: every older row is kept.
 - Broker payloads are stored with credential-like keys redacted. The file never lives in the repo.
 """
 
@@ -57,16 +66,23 @@ from council.ledger.states import (
     BLOCKER_SCOPES,
     BLOCKER_STATES,
     DECISION_STATES,
+    LEG_ACTIVE_STATES,
     LEG_STATES,
     LEG_TERMINAL_STATES,
     PENDING_STATES,
     PRIORITY,
     SATELLITE_BLOCKER_PREFIX,
     SMOKE_KIND,
+    SWING_BLOCKER_PREFIX,
+    SWING_BLOCKING_STATES,
+    TRADE_CLOSED_STATES,
+    TRADE_TERMINAL_STATES,
     WAITING_STATE,
     DecisionKind,
+    IllegalTransition,
     can_transition,
     can_transition_leg,
+    check_trade_transition,
 )
 from council.models.broker import Position
 from council.models.plan import Leg
@@ -74,7 +90,7 @@ from council.paths import assert_outside_repo, state_dir
 from council.policy import Universe
 from council.risk.nav import NavState
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 LEDGER_FILE = "ledger.sqlite3"
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _SENSITIVE_KEYS = ("authorization", "api_key", "api-key", "user_key", "user-key", "token", "secret", "password")
@@ -601,7 +617,11 @@ class Ledger:
         an unknown leg. Every id holds the whole book, except "satellite:<id>" for a
         waiting_for_market decision whose blocker scope is `satellite` (stock orders only) or a
         blocked one that kept that scope (a stock-only hold that timed out; the watch resets the
-        scope to `all` on a broken fill). An unknown leg or execution_unknown holds the whole book."""
+        scope to `all` on a broken fill), and "swing:<id>" (halts new swing entries only) for a
+        decision of scope `swing` whose every unresolved leg is a swing leg, plus "swing:<trade_id>"
+        for a swing trade in entry_unknown / open_tp_missing. A swing-scoped decision that still has
+        an unresolved non-swing leg holds the whole book. Otherwise an unknown leg or
+        execution_unknown holds the whole book."""
         states = (*sorted(BLOCKER_STATES), WAITING_STATE)
         placeholders = ",".join("?" * len(states))
         with self._read() as conn:
@@ -611,14 +631,62 @@ class Ledger:
                 f"SELECT decision_id, state, blocker_scope FROM decisions WHERE state IN ({placeholders})",
                 states,
             ).fetchall()
-        out = set(unknown)
+            scopes = {r["decision_id"]: r["blocker_scope"] for r in rows}
+            for decision_id in unknown - set(scopes):
+                row = conn.execute("SELECT blocker_scope FROM decisions WHERE decision_id = ?",
+                                   (decision_id,)).fetchone()
+                scopes[decision_id] = row["blocker_scope"] if row is not None else None
+            swing_scoped = {d for d, scope in scopes.items()
+                            if scope == "swing" and self._only_swing_unresolved(conn, d)}
+            trade_holds = [r["trade_id"] for r in conn.execute(
+                f"SELECT trade_id FROM swing_trades WHERE state IN "
+                f"({','.join('?' * len(SWING_BLOCKING_STATES))})",
+                sorted(SWING_BLOCKING_STATES)).fetchall()]
+        out: set[str] = set()
+        for decision_id in unknown:
+            out.add(f"{SWING_BLOCKER_PREFIX}{decision_id}" if decision_id in swing_scoped else decision_id)
         for r in rows:
             decision_id = r["decision_id"]
             if decision_id in unknown:
                 continue
+            if decision_id in swing_scoped:
+                out.add(f"{SWING_BLOCKER_PREFIX}{decision_id}")
+                continue
             satellite = r["state"] in ("blocked", WAITING_STATE) and r["blocker_scope"] == "satellite"
             out.add(f"{SATELLITE_BLOCKER_PREFIX}{decision_id}" if satellite else decision_id)
+        out.update(f"{SWING_BLOCKER_PREFIX}{trade_id}" for trade_id in trade_holds)
         return sorted(out)
+
+    def swing_blockers(self) -> list[str]:
+        """The "swing:" blockers only (they halt new swing entries, never the core)."""
+        return [b for b in self.blockers() if b.startswith(SWING_BLOCKER_PREFIX)]
+
+    def swing_entries_blocked(self) -> bool:
+        """New swing entries are halted by ANY blocker except a satellite-only one: a swing-scoped
+        hold, or a whole-book one (a core-scoped unknown still halts everything)."""
+        return any(not b.startswith(SATELLITE_BLOCKER_PREFIX) for b in self.blockers())
+
+    @staticmethod
+    def _swing_leg_keys(conn: sqlite3.Connection, decision_id: str) -> set[int]:
+        """Seqs of the decision's swing legs: a trade row points at it, or its detail says so."""
+        seqs = {r["entry_seq"] for r in conn.execute(
+            "SELECT entry_seq FROM swing_trades WHERE decision_id = ? AND entry_seq IS NOT NULL",
+            (decision_id,)).fetchall()}
+        for r in conn.execute("SELECT seq, detail_json FROM legs WHERE decision_id = ?", (decision_id,)):
+            detail = json.loads(r["detail_json"] or "{}")
+            if detail.get("sleeve") == "swing" or detail.get("swing_trade_id"):
+                seqs.add(r["seq"])
+        return seqs
+
+    def _only_swing_unresolved(self, conn: sqlite3.Connection, decision_id: str) -> bool:
+        """True when every unresolved (active, unknown or waiting) leg of the decision is a swing leg
+        and there is at least one leg."""
+        rows = conn.execute("SELECT seq, state FROM legs WHERE decision_id = ?", (decision_id,)).fetchall()
+        if not rows:
+            return False
+        swing = self._swing_leg_keys(conn, decision_id)
+        unresolved = {r["seq"] for r in rows if r["state"] in LEG_ACTIVE_STATES | {WAITING_STATE}}
+        return unresolved <= swing
 
     def has_blocker(self) -> bool:
         return bool(self.blockers())
@@ -642,9 +710,14 @@ class Ledger:
         self._set_decision_field(decision_id, "plan_json", _dump(plan), now)
 
     def set_blocker_scope(self, decision_id: str, scope: str, *, now: datetime | None = None) -> None:
-        """`all` (hold every line) or `satellite` (hold only the satellite sleeve)."""
+        """`all` (hold every line), `satellite` (hold only the satellite sleeve) or `swing` (hold only
+        new swing entries; refused while any unresolved leg of the decision is not a swing leg)."""
         if scope not in BLOCKER_SCOPES:
             raise LedgerError(f"unknown blocker scope {scope!r}")
+        if scope == "swing":
+            with self._read() as conn:
+                if not self._only_swing_unresolved(conn, decision_id):
+                    raise LedgerError(f"{decision_id}: an unresolved non-swing leg; scope stays whole-book")
         self._set_decision_field(decision_id, "blocker_scope", scope, now)
 
     def pending_open_weights(self) -> dict[str, float]:
@@ -1203,3 +1276,404 @@ class Ledger:
                                        for k, v in fingerprints.items()):
             raise LedgerError("material fingerprints must be a non-empty map of line -> fingerprint")
         self.set_runtime(MATERIAL_FINGERPRINTS_KEY, dict(sorted(fingerprints.items())), now=now)
+
+    # ------------------------------------------------------------------ swing book (SW-2b)
+    def add_swing_idea(
+        self, idea_id: str, *, origin_cycle: str, ticker: str, side: str, status: str,
+        setup: str | None = None, record: BaseModel | Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        """One Scout idea (private; its text is scrubbed by the 7-day purge by origin cycle)."""
+        if not idea_id.startswith("idea:"):
+            raise LedgerError(f"swing idea id must start with 'idea:': {idea_id!r}")
+        stamp = self._now(now)
+        with self._tx() as conn:
+            try:
+                conn.execute(
+                    """INSERT INTO swing_ideas (idea_id, origin_cycle, ticker, side, setup, status,
+                         record_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (idea_id, origin_cycle, ticker, side, setup, status, _dump(record or {}),
+                     stamp, stamp))
+            except sqlite3.IntegrityError as exc:
+                raise LedgerError(f"swing idea {idea_id}: {exc}") from exc
+
+    def update_swing_idea(
+        self, idea_id: str, *, status: str | None = None,
+        record: BaseModel | Mapping[str, Any] | None = None, carry_cycle: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Change an idea's status / record, or note a cycle that carried it forward."""
+        with self._tx() as conn:
+            row = conn.execute("SELECT * FROM swing_ideas WHERE idea_id = ?", (idea_id,)).fetchone()
+            if row is None:
+                raise LedgerError(f"unknown swing idea {idea_id}")
+            carry = json.loads(row["carry_cycles_json"] or "[]")
+            if carry_cycle and carry_cycle != row["origin_cycle"] and carry_cycle not in carry:
+                carry.append(carry_cycle)
+            conn.execute(
+                """UPDATE swing_ideas SET status = ?, record_json = ?, carry_cycles_json = ?,
+                     updated_at = ? WHERE idea_id = ?""",
+                (status or row["status"], _dump(record) if record is not None else row["record_json"],
+                 json.dumps(carry), self._now(now), idea_id))
+        return self.swing_idea(idea_id)  # type: ignore[return-value]
+
+    def swing_idea(self, idea_id: str) -> dict[str, Any] | None:
+        with self._read() as conn:
+            row = conn.execute("SELECT * FROM swing_ideas WHERE idea_id = ?", (idea_id,)).fetchone()
+        return _swing_idea(row) if row is not None else None
+
+    def swing_ideas(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        with self._read() as conn:
+            if status is None:
+                rows = conn.execute("SELECT * FROM swing_ideas ORDER BY created_at, idea_id").fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM swing_ideas WHERE status = ? ORDER BY created_at, idea_id",
+                                    (status,)).fetchall()
+        return [_swing_idea(r) for r in rows]
+
+    def create_swing_trade(
+        self, trade_id: str, *, ticker: str, side: str, idea_id: str | None = None,
+        origin_cycle: str | None = None, decision_id: str | None = None, entry_seq: int | None = None,
+        instrument_id: int | None = None, sl_rate: float | None = None, tp_rate: float | None = None,
+        time_stop_date: str | None = None, detail: Mapping[str, Any] | None = None,
+        actor: str = SYSTEM_ACTOR, now: datetime | None = None,
+    ) -> SwingTradeRow:
+        """A proposed swing trade (state `proposed`). Fills move it with `record_swing_fill`."""
+        stamp = self._now(now)
+        with self._tx() as conn:
+            self._insert_trade(conn, {
+                "trade_id": trade_id, "idea_id": idea_id, "origin_cycle": origin_cycle,
+                "decision_id": decision_id, "entry_seq": entry_seq, "ticker": ticker,
+                "instrument_id": instrument_id, "side": side, "state": "proposed",
+                "sl_rate": sl_rate, "tp_rate": tp_rate, "time_stop_date": time_stop_date,
+                "detail_json": _dump(dict(detail or {})),
+            }, stamp)
+            self._swing_event(conn, "transition", stamp, trade_id=trade_id, idea_id=idea_id,
+                              origin_cycle=origin_cycle, to_state="proposed", reason="created",
+                              actor=actor)
+        return self.swing_trade(trade_id)  # type: ignore[return-value]
+
+    @staticmethod
+    def _insert_trade(conn: sqlite3.Connection, values: Mapping[str, Any], stamp: str) -> None:
+        if not str(values["trade_id"]).startswith("trade:"):
+            raise LedgerError(f"swing trade id must start with 'trade:': {values['trade_id']!r}")
+        if values["side"] not in ("long", "short"):
+            raise LedgerError(f"swing trade side must be long or short: {values['side']!r}")
+        columns = {**values, "created_at": stamp, "updated_at": stamp}
+        try:
+            conn.execute(
+                f"INSERT INTO swing_trades ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+                tuple(columns.values()))
+        except sqlite3.IntegrityError as exc:
+            raise LedgerError(f"swing trade {values['trade_id']}: {exc}") from exc
+
+    @staticmethod
+    def _swing_event(
+        conn: sqlite3.Connection, kind: str, stamp: str, *, trade_id: str | None = None,
+        idea_id: str | None = None, origin_cycle: str | None = None, from_state: str | None = None,
+        to_state: str | None = None, reason: str = "", payload: Mapping[str, Any] | None = None,
+        actor: str = SYSTEM_ACTOR,
+    ) -> None:
+        conn.execute(
+            """INSERT INTO swing_events (trade_id, idea_id, origin_cycle, kind, from_state, to_state,
+                 reason, payload_json, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (trade_id, idea_id, origin_cycle, kind, from_state, to_state, reason,
+             _dump(redact(dict(payload or {}))), _check_actor(actor), stamp))
+
+    def add_swing_event(
+        self, kind: str, *, trade_id: str | None = None, idea_id: str | None = None,
+        origin_cycle: str | None = None, reason: str = "", payload: Mapping[str, Any] | None = None,
+        actor: str = SYSTEM_ACTOR, now: datetime | None = None,
+    ) -> None:
+        """A watch flag (`time_stop_due`, `earnings_exit_due`, `target_reached_unplaced`) or a note."""
+        if kind == "transition":
+            raise LedgerError("transition events are written by transition_swing_trade only")
+        with self._tx() as conn:
+            self._swing_event(conn, kind, self._now(now), trade_id=trade_id, idea_id=idea_id,
+                              origin_cycle=origin_cycle, reason=reason, payload=payload, actor=actor)
+
+    def swing_events(self, trade_id: str | None = None) -> list[dict[str, Any]]:
+        with self._read() as conn:
+            if trade_id is None:
+                rows = conn.execute("SELECT * FROM swing_events ORDER BY event_id").fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM swing_events WHERE trade_id = ? ORDER BY event_id",
+                                    (trade_id,)).fetchall()
+        return [{**dict(r), "payload": json.loads(r["payload_json"] or "{}")} for r in rows]
+
+    def swing_trade(self, trade_id: str) -> SwingTradeRow | None:
+        with self._read() as conn:
+            row = conn.execute("SELECT * FROM swing_trades WHERE trade_id = ?", (trade_id,)).fetchone()
+        return _swing_trade(row) if row is not None else None
+
+    def swing_trades(self, *, states: Iterable[str] | None = None) -> list[SwingTradeRow]:
+        with self._read() as conn:
+            if states is None:
+                rows = conn.execute("SELECT * FROM swing_trades ORDER BY created_at, trade_id").fetchall()
+            else:
+                wanted = tuple(states)
+                if not wanted:
+                    return []
+                rows = conn.execute(
+                    f"SELECT * FROM swing_trades WHERE state IN ({','.join('?' * len(wanted))}) "
+                    "ORDER BY created_at, trade_id", wanted).fetchall()
+        return [_swing_trade(r) for r in rows]
+
+    def transition_swing_trade(
+        self, trade_id: str, to_state: str, *, reason: str = "", actor: str = SYSTEM_ACTOR,
+        close_rate: float | None = None, now: datetime | None = None,
+    ) -> SwingTradeRow:
+        """Move a trade along `swing.models.TRANSITIONS` (compare-and-set). Illegal moves and any
+        move of a closed/missed trade raise `IllegalTransition`."""
+        stamp = self._now(now)
+        with self._tx() as conn:
+            row = conn.execute("SELECT * FROM swing_trades WHERE trade_id = ?", (trade_id,)).fetchone()
+            if row is None:
+                raise LedgerError(f"unknown swing trade {trade_id}")
+            self._move_trade(conn, row, to_state, stamp, reason=reason, actor=actor,
+                             extra={"close_rate": close_rate} if close_rate is not None else None)
+        return self.swing_trade(trade_id)  # type: ignore[return-value]
+
+    def _move_trade(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, to_state: str, stamp: str, *,
+        reason: str, actor: str, extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        current = row["state"]
+        check_trade_transition(current, to_state)
+        columns: dict[str, Any] = {"state": to_state, "updated_at": stamp, **(extra or {})}
+        if to_state in TRADE_CLOSED_STATES:
+            columns["closed_at"] = stamp
+        assignments = ", ".join(f"{k} = ?" for k in columns)
+        cur = conn.execute(f"UPDATE swing_trades SET {assignments} WHERE trade_id = ? AND state = ?",
+                           (*columns.values(), row["trade_id"], current))
+        if cur.rowcount != 1:
+            raise IllegalTransition(f"swing trade {row['trade_id']} moved concurrently (was {current})")
+        self._swing_event(conn, "transition", stamp, trade_id=row["trade_id"], idea_id=row["idea_id"],
+                          origin_cycle=row["origin_cycle"], from_state=current, to_state=to_state,
+                          reason=reason, actor=actor)
+
+    _TRADE_FIELDS = frozenset({"position_ids", "units", "open_rate", "sl_rate", "tp_rate",
+                               "time_stop_date", "instrument_id", "detail"})
+
+    def update_swing_trade(self, trade_id: str, *, now: datetime | None = None, **fields: Any) -> SwingTradeRow:
+        """Change a live trade's execution fields (`position_ids` are merged, never dropped;
+        `detail` is merged). A closed/missed trade raises `IllegalTransition`."""
+        unknown = set(fields) - self._TRADE_FIELDS
+        if unknown:
+            raise LedgerError(f"unknown swing trade field(s): {', '.join(sorted(unknown))}")
+        with self._tx() as conn:
+            row = conn.execute("SELECT * FROM swing_trades WHERE trade_id = ?", (trade_id,)).fetchone()
+            if row is None:
+                raise LedgerError(f"unknown swing trade {trade_id}")
+            if row["state"] in TRADE_TERMINAL_STATES:
+                raise IllegalTransition(f"swing trade {trade_id} is terminal ({row['state']})")
+            columns: dict[str, Any] = {"updated_at": self._now(now)}
+            for key, value in fields.items():
+                if key == "position_ids":
+                    columns["position_ids_json"] = json.dumps(
+                        _merge_ids(json.loads(row["position_ids_json"]), value))
+                elif key == "detail":
+                    columns["detail_json"] = _dump({**json.loads(row["detail_json"] or "{}"),
+                                                    **redact(dict(value))})
+                else:
+                    columns[key] = value
+            assignments = ", ".join(f"{k} = ?" for k in columns)
+            conn.execute(f"UPDATE swing_trades SET {assignments} WHERE trade_id = ? AND state = ?",
+                         (*columns.values(), trade_id, row["state"]))
+        return self.swing_trade(trade_id)  # type: ignore[return-value]
+
+    def record_swing_fill(self, decision_id: str, seq: int, *, actor: str = SYSTEM_ACTOR,
+                          now: datetime | None = None) -> SwingTradeRow:
+        """Create or advance the swing trade of a FILLED swing open leg (design §4.5): the leg's
+        state decides, never its decision's (blocked, execution_unknown, resumed, waiting-for-market
+        are all fine). filled -> `open`, partially_filled / rejected_partial -> `partial`; a trade
+        already open keeps its state and gains the leg's position ids. The trade is the row whose
+        (decision_id, entry_seq) is this leg, else the leg detail's `swing_trade_id` (created here
+        when no row exists)."""
+        stamp = self._now(now)
+        with self._tx() as conn:
+            leg = conn.execute("SELECT * FROM legs WHERE decision_id = ? AND seq = ?",
+                               (decision_id, seq)).fetchone()
+            if leg is None:
+                raise LedgerError(f"unknown leg {decision_id}:{seq}")
+            if leg["kind"] != "open":
+                raise LedgerError(f"leg {decision_id}:{seq} is a {leg['kind']} leg, not a swing entry")
+            if leg["state"] not in FILLED_LEG_STATES:
+                raise LedgerError(f"leg {decision_id}:{seq} is {leg['state']}, not filled")
+            detail = json.loads(leg["detail_json"] or "{}")
+            row = conn.execute("SELECT * FROM swing_trades WHERE decision_id = ? AND entry_seq = ?",
+                               (decision_id, seq)).fetchone()
+            trade_id = detail.get("swing_trade_id")
+            if row is None and trade_id:
+                row = conn.execute("SELECT * FROM swing_trades WHERE trade_id = ?", (trade_id,)).fetchone()
+            target = "open" if leg["state"] == "filled" else "partial"
+            ids = _merge_ids(json.loads(leg["position_ids_json"] or "[]"),
+                             [leg["position_id"]] if leg["position_id"] is not None else [])
+            units = detail.get("units_filled", leg["units"])
+            open_rate = detail.get("fill_rate", detail.get("avg_price"))
+            if row is None:
+                if not trade_id:
+                    raise LedgerError(f"leg {decision_id}:{seq} is not a swing leg (no trade, no swing_trade_id)")
+                cycle = conn.execute("SELECT cycle_id FROM decisions WHERE decision_id = ?",
+                                     (decision_id,)).fetchone()
+                origin = cycle["cycle_id"] if cycle is not None else None
+                self._insert_trade(conn, {
+                    "trade_id": trade_id, "idea_id": detail.get("swing_idea_id"),
+                    "origin_cycle": origin, "decision_id": decision_id, "entry_seq": seq,
+                    "ticker": detail.get("ticker") or leg["vehicle_symbol"],
+                    "instrument_id": leg["instrument_id"], "side": leg["direction"], "state": target,
+                    "position_ids_json": json.dumps(ids), "units": units, "open_rate": open_rate,
+                    "sl_rate": leg["sl_rate"], "tp_rate": detail.get("tp_rate"),
+                    "time_stop_date": detail.get("time_stop_date"),
+                    "opened_at": leg["resolved_at"] or stamp, "detail_json": "{}",
+                }, stamp)
+                self._swing_event(conn, "transition", stamp, trade_id=trade_id,
+                                  idea_id=detail.get("swing_idea_id"), origin_cycle=origin,
+                                  to_state=target, reason=f"created_from_filled_leg:{decision_id}:{seq}",
+                                  actor=actor)
+                return self._trade_in(conn, trade_id)
+            trade_id = row["trade_id"]
+            if row["state"] in TRADE_TERMINAL_STATES:
+                raise IllegalTransition(f"swing trade {trade_id} is terminal ({row['state']})")
+            if row["decision_id"] is None:     # link the leg the first time a fill names this trade
+                conn.execute("UPDATE swing_trades SET decision_id = ?, entry_seq = ? WHERE trade_id = ?",
+                             (decision_id, seq, trade_id))
+            path = {"proposed": ["entry_executing", target], "entry_executing": [target],
+                    "entry_unknown": [target]}.get(row["state"], [])
+            reason = f"filled_leg:{decision_id}:{seq}"
+            for step in path:
+                self._move_trade(conn, self._trade_row(conn, trade_id), step, stamp,
+                                 reason=reason, actor=actor)
+            fresh = self._trade_row(conn, trade_id)
+            conn.execute(
+                """UPDATE swing_trades SET position_ids_json = ?, units = COALESCE(?, units),
+                     open_rate = COALESCE(open_rate, ?), opened_at = COALESCE(opened_at, ?),
+                     updated_at = ? WHERE trade_id = ?""",
+                (json.dumps(_merge_ids(json.loads(fresh["position_ids_json"]), ids)),
+                 units if path else None, open_rate, leg["resolved_at"] or stamp, stamp, trade_id))
+            return self._trade_in(conn, trade_id)
+
+    @staticmethod
+    def _trade_row(conn: sqlite3.Connection, trade_id: str) -> sqlite3.Row:
+        return conn.execute("SELECT * FROM swing_trades WHERE trade_id = ?", (trade_id,)).fetchone()
+
+    def _trade_in(self, conn: sqlite3.Connection, trade_id: str) -> SwingTradeRow:
+        return _swing_trade(self._trade_row(conn, trade_id))
+
+    # benchmark and paper tracking (SW-6 fills them; code only, no calls)
+    def record_benchmark_day(
+        self, day: str, *, sq8_ret: float | None, matched_idx_ret: float | None,
+        idx_hold_ret: float | None, detail: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        """One paper-benchmark day (returns as fractions); re-recording a day replaces it."""
+        for value in (sq8_ret, matched_idx_ret, idx_hold_ret):
+            if value is not None and not math.isfinite(float(value)):
+                raise LedgerError(f"benchmark return must be finite: {value!r}")
+        with self._tx() as conn:
+            conn.execute(
+                """INSERT INTO benchmark_days (day, sq8_ret, matched_idx_ret, idx_hold_ret, detail_json,
+                     recorded_at) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (day) DO UPDATE SET sq8_ret = excluded.sq8_ret,
+                     matched_idx_ret = excluded.matched_idx_ret, idx_hold_ret = excluded.idx_hold_ret,
+                     detail_json = excluded.detail_json, recorded_at = excluded.recorded_at""",
+                (day, sq8_ret, matched_idx_ret, idx_hold_ret, _dump(dict(detail or {})), self._now(now)))
+
+    def benchmark_days(self) -> list[dict[str, Any]]:
+        with self._read() as conn:
+            rows = conn.execute("SELECT * FROM benchmark_days ORDER BY day").fetchall()
+        return [{**dict(r), "detail": json.loads(r["detail_json"] or "{}")} for r in rows]
+
+    def add_paper_trade(
+        self, paper_id: str, *, origin_cycle: str, ticker: str, side: str, opened_at: datetime,
+        idea_id: str | None = None, entry_ref: float | None = None, stop_pct: float | None = None,
+        target_pct: float | None = None, time_stop_date: str | None = None,
+        record: Mapping[str, Any] | None = None, now: datetime | None = None,
+    ) -> None:
+        """A paper-tracked idea (every idea is paper-tracked, traded or not)."""
+        stamp = self._now(now)
+        with self._tx() as conn:
+            try:
+                conn.execute(
+                    """INSERT INTO paper_trades (paper_id, idea_id, origin_cycle, ticker, side, status,
+                         entry_ref, stop_pct, target_pct, time_stop_date, opened_at, record_json,
+                         created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (paper_id, idea_id, origin_cycle, ticker, side, entry_ref, stop_pct, target_pct,
+                     time_stop_date, ts(opened_at), _dump(dict(record or {})), stamp, stamp))
+            except sqlite3.IntegrityError as exc:
+                raise LedgerError(f"paper trade {paper_id}: {exc}") from exc
+
+    def close_paper_trade(self, paper_id: str, *, exit_reason: str, ret_pct: float,
+                          closed_at: datetime, now: datetime | None = None) -> None:
+        with self._tx() as conn:
+            cur = conn.execute(
+                """UPDATE paper_trades SET status = 'closed', exit_reason = ?, ret_pct = ?, closed_at = ?,
+                     updated_at = ? WHERE paper_id = ? AND status = 'open'""",
+                (exit_reason, ret_pct, ts(closed_at), self._now(now), paper_id))
+            if cur.rowcount != 1:
+                raise LedgerError(f"paper trade {paper_id} is unknown or already closed")
+
+    def paper_trades(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        with self._read() as conn:
+            if status is None:
+                rows = conn.execute("SELECT * FROM paper_trades ORDER BY opened_at, paper_id").fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM paper_trades WHERE status = ? ORDER BY opened_at, paper_id",
+                                    (status,)).fetchall()
+        return [{**dict(r), "record": json.loads(r["record_json"] or "{}")} for r in rows]
+
+
+def _merge_ids(existing: Iterable[Any], new: Iterable[Any]) -> list[int]:
+    """Union of broker position ids, first-seen order (a trade never loses a position id)."""
+    out: dict[int, None] = {}
+    for value in (*existing, *new):
+        if value is not None:
+            out.setdefault(int(value), None)
+    return list(out)
+
+
+@dataclass(frozen=True)
+class SwingTradeRow:
+    trade_id: str
+    idea_id: str | None
+    origin_cycle: str | None
+    decision_id: str | None
+    entry_seq: int | None
+    ticker: str
+    instrument_id: int | None
+    side: str
+    state: str
+    position_ids: list[int]
+    units: float | None
+    open_rate: float | None
+    sl_rate: float | None
+    tp_rate: float | None
+    time_stop_date: str | None
+    close_rate: float | None
+    opened_at: datetime | None
+    closed_at: datetime | None
+    detail: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+def _swing_trade(row: sqlite3.Row) -> SwingTradeRow:
+    return SwingTradeRow(
+        trade_id=row["trade_id"], idea_id=row["idea_id"], origin_cycle=row["origin_cycle"],
+        decision_id=row["decision_id"], entry_seq=row["entry_seq"], ticker=row["ticker"],
+        instrument_id=row["instrument_id"], side=row["side"], state=row["state"],
+        position_ids=json.loads(row["position_ids_json"] or "[]"), units=row["units"],
+        open_rate=row["open_rate"], sl_rate=row["sl_rate"], tp_rate=row["tp_rate"],
+        time_stop_date=row["time_stop_date"], close_rate=row["close_rate"],
+        opened_at=parse_ts(row["opened_at"]), closed_at=parse_ts(row["closed_at"]),
+        detail=json.loads(row["detail_json"] or "{}"),
+        created_at=parse_ts(row["created_at"]),  # type: ignore[arg-type]
+        updated_at=parse_ts(row["updated_at"]),  # type: ignore[arg-type]
+    )
+
+
+def _swing_idea(row: sqlite3.Row) -> dict[str, Any]:
+    out = dict(row)
+    out["record"] = json.loads(out.pop("record_json") or "{}")
+    out["carry_cycles"] = json.loads(out.pop("carry_cycles_json") or "[]")
+    return out

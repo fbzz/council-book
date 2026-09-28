@@ -64,6 +64,7 @@ RETIRED_HELD = "retired_line_held"
 CREDITED_NO_SL = "credited_no_sl"
 VANISHED_NOT_STOP = "vanished_not_stop"
 STOP_HIT = "stop_hit"
+SWING_CLOSED = "swing_closed"      # a swing position: its close is classified by the swing watch (SW-5)
 UNTRADABLE = "untradable"
 STOP_BAND_SIGMAS = 2.0
 RECORD_FILE = Path("stocks") / "corporate.json"
@@ -202,14 +203,17 @@ class Vanished:
     position_id: int
     symbol: str
     line: str
-    outcome: Literal["stop_hit", "vanished_not_stop"]
+    outcome: Literal["stop_hit", "vanished_not_stop", "swing_closed"]
 
 
 def classify_vanished_positions(seen: Mapping[int, Observation], live_ids: Iterable[int], ours: Iterable[int],
                                 policy: Policy, *, sigma_4h: Mapping[str, float | None],
-                                closed_by_sl: Mapping[int, bool] | None = None) -> list[Vanished]:
+                                closed_by_sl: Mapping[int, bool] | None = None,
+                                swing_map: Any = None) -> list[Vanished]:
     """Every expected position that vanished without one of our closes, classified. Non-stock lines
-    keep today's rule (a stop hit); `sigma_4h` is keyed by line."""
+    keep today's rule (a stop hit); `sigma_4h` is keyed by line. A position the runtime swing map
+    (`swing.book.SwingVehicleMap`) owns is `swing_closed`: never a core stop hit, never
+    `vanished_not_stop` (a long closed at its TP must not raise that URGENT alert)."""
     owners = _owner(policy)
     stocks = {ln.symbol for ln in policy.universe.stock_lines()}
     live, closes = set(live_ids), set(ours)
@@ -218,8 +222,12 @@ def classify_vanished_positions(seen: Mapping[int, Observation], live_ids: Itera
     for pid, obs in sorted(seen.items()):
         if pid in live or pid in closes:
             continue
+        swing_line = swing_map.owner(obs.symbol) if swing_map is not None else None
+        if swing_line is not None and obs.symbol not in owners:
+            out.append(Vanished(position_id=pid, symbol=obs.symbol, line=swing_line, outcome=SWING_CLOSED))
+            continue
         line = owners.get(obs.symbol, obs.symbol)
-        outcome: Literal["stop_hit", "vanished_not_stop"] = STOP_HIT
+        outcome: Literal["stop_hit", "vanished_not_stop", "swing_closed"] = STOP_HIT
         if line in stocks:
             outcome = classify_vanished(last_bid=obs.bid, sl_rate=obs.sl_rate, sigma_4h=sigma_4h.get(line),
                                         closed_by_sl=history.get(pid))

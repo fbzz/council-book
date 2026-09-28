@@ -17,6 +17,7 @@ Issue strings are public-safe: symbols and rule names only, never ids or amounts
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from typing import Any
 
 from pydantic import Field
 
@@ -56,9 +57,14 @@ class ReconcileResult(Strict):
         return not self.missing_sl and not self.unknown_positions and not self.issues
 
 
-def line_weights(snapshot: ExposureSnapshot, policy: Policy) -> tuple[dict[str, float], list[str]]:
-    """(achieved weight by line, symbols that map to no line)."""
+def line_weights(snapshot: ExposureSnapshot, policy: Policy, *,
+                 swing_map: Any = None) -> tuple[dict[str, float], list[str]]:
+    """(achieved weight by line, symbols that map to no line). `swing_map`
+    (`swing.book.SwingVehicleMap`) maps a live swing position to its swing line, so it is not an
+    unknown position (swing-book §1.9)."""
     v2l = vehicle_to_line(policy.universe)
+    if swing_map is not None:
+        v2l = swing_map.merged_lines(v2l)
     achieved: dict[str, float] = {}
     unknown: list[str] = []
     for symbol, w in snapshot.signed_w.items():
@@ -79,11 +85,13 @@ def reconcile(
     target_w: Mapping[str, float],
     expected: Iterable[ExpectedPosition],
     policy: Policy,
+    *,
+    swing_map: Any = None,
 ) -> ReconcileResult:
     cfg = policy.risk["reconcile"]
     drift_max = float(cfg["drift_max"])
     sl_tol = float(cfg["sl_rate_tolerance"])
-    achieved, unknown = line_weights(snapshot, policy)
+    achieved, unknown = line_weights(snapshot, policy, swing_map=swing_map)
     drift = sum(abs(achieved.get(line, 0.0) - float(w)) for line, w in target_w.items())
     missing_sl = sorted({p.symbol for p in snapshot.positions if p.sl_rate is None or p.sl_rate <= 0})
     issues: list[str] = []
