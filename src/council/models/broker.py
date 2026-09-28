@@ -21,6 +21,7 @@ class LeverageConfig(Strict):
     max_sl_pct: float = 100.0
     default_sl_pct: float | None = None
     allow_sl_tp: bool = True
+    min_tp_pct: float = 0.0          # minTakeProfitPercentage, percent of margin (swing TP, SW-5)
 
 
 class EligibilityRow(Strict):

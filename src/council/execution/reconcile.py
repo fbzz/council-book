@@ -7,7 +7,9 @@ Rules:
 - EVERY position must carry a stop-loss (a missing one is listed by symbol).
 - A position on a symbol that maps to no line (including UNMAPPED_<id>) is an unknown position.
 - Each expected position (from a fill) must exist with the expected direction and leverage, and
-  its stop rate must match within risk.reconcile.sl_rate_tolerance (relative).
+  its stop rate must match within risk.reconcile.sl_rate_tolerance (relative); an expected
+  take-profit (`tp_rate`, set only once the executor confirmed it at the broker: swing book, SW-5)
+  must be present and match within the same tolerance.
 - ok = drift within limit AND no missing stop AND no unknown position AND no issue. Drift is
   reported separately from `issues` (a partial execution expects drift, not a broken position).
   `protected` = no missing stop, no unknown position, no issue.
@@ -37,6 +39,7 @@ class ExpectedPosition(Strict):
     direction: Direction
     leverage: int = 1
     sl_rate: float | None = None
+    tp_rate: float | None = None
 
 
 class ReconcileResult(Strict):
@@ -107,6 +110,8 @@ def reconcile(
             issues.append(f"{exp.symbol}: leverage mismatch")
         if exp.sl_rate and pos.sl_rate and abs(pos.sl_rate / exp.sl_rate - 1) > sl_tol:
             issues.append(f"{exp.symbol}: stop-loss rate differs from the approved rate")
+        if exp.tp_rate and (not pos.tp_rate or abs(pos.tp_rate / exp.tp_rate - 1) > sl_tol):
+            issues.append(f"{exp.symbol}: take-profit rate differs from the approved rate")
     ok = drift <= drift_max + DRIFT_EPS and not missing_sl and not unknown and not issues
     return ReconcileResult(
         ok=ok, drift=drift, drift_max=drift_max, missing_sl=missing_sl,

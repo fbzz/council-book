@@ -208,10 +208,22 @@ def _same_planned_legs(rows: Sequence[LegRow], legs: Sequence[Leg], lines: Seque
             and _close(row.sl_rate, leg.sl_rate)
             and _close(row.detail.get("weight_before"), leg.weight_before)
             and _close(row.detail.get("weight_after"), leg.weight_after)
+            and row.detail.get("swing_trade_id") == leg.swing_trade_id
+            and _close(row.detail.get("tp_rate"), leg.tp_rate)
         )
         if not same:
             return False
     return True
+
+
+def _swing_detail(leg: Leg) -> dict[str, Any]:
+    """The swing marks a swing leg carries in its detail from the moment it is written (SW-5): the
+    ledger reads `sleeve` / `swing_trade_id` to scope a hold, and `record_swing_fill` reads
+    `tp_rate` / `time_stop_date`. Core legs get none of these keys."""
+    if not (leg.sleeve == "swing" or leg.swing_trade_id):
+        return {}
+    return {"sleeve": "swing", "swing_trade_id": leg.swing_trade_id, "tp_rate": leg.tp_rate,
+            "tp_mode": leg.tp_mode, "time_stop_date": leg.time_stop_date}
 
 
 def leg_origin(detail: Mapping[str, Any]) -> str:
@@ -848,6 +860,7 @@ class Ledger:
                             "valid_until": ts(leg.valid_until) if leg.valid_until else None,
                             "origin": leg.origin, "ref_level": leg.ref_level,
                             "fee_bps_nav": leg.fee_bps_nav, "fee_drag": leg.fee_drag,
+                            **_swing_detail(leg),
                         }),
                         stamp,
                     ),

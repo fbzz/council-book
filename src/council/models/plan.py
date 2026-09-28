@@ -16,6 +16,17 @@ Origin: "reference" when the leg moves its line toward the mechanical rule's tar
 council anchors before WP-K), "discretionary" otherwise; `ref_level` is the line's reference level
 at plan time, which becomes the held reference level when a reference leg fills
 (`risk.held_levels`). Legs written before these fields existed count as discretionary.
+
+Swing legs (swing-book.md rev 2, §4.2/§4.4, SW-5): `sleeve="swing"` and `swing_trade_id` on EVERY
+leg of a swing trade (the ledger treats an unresolved leg without the mark as a core leg, so it holds
+the whole book). An entry `open` carries the approved stop (`sl_rate`) and target (`tp_rate`, a
+price level) and `tp_mode`: "body" (takeProfitRate sent in the open body; the `tp_on_open` gate is
+proven), "patch" (a derived `modify_tp` leg right after the open sends it) or "none" (the target
+is below the instrument's minTakeProfitPercentage: nothing goes to the broker, the watch flags it).
+`modify_tp` (after a swing open, position from that open's fill) and `set_tp` (an open trade whose
+target never reached the broker, `open_tp_missing`) PATCH the take-profit and ALWAYS resend the
+current stop-loss (`sl_rate`). `time_stop_date` is the trade's ISO time-stop date (informational
+for the approval screen; the cycle creates the exit).
 """
 
 from __future__ import annotations
@@ -27,7 +38,9 @@ from pydantic import Field
 
 from council.models.common import Direction, Settlement, Strict
 
-LegKind = Literal["open", "close", "partial_close", "modify_sl"]
+LegKind = Literal["open", "close", "partial_close", "modify_sl", "modify_tp", "set_tp"]
+LegSleeve = Literal["core", "swing"]
+TpMode = Literal["body", "patch", "none"]
 LegOrigin = Literal["reference", "discretionary"]
 LegState = Literal[
     "planned", "submitting", "submitted", "in_flight", "filled", "partially_filled",
@@ -68,6 +81,16 @@ class Leg(Strict):
     ref_level: float | None = None              # the line's reference level at plan time
     fee_bps_nav: float = 0.0                    # PRIVATE: the fixed fee as bps of NAV
     fee_drag: float = 0.0                       # PRIVATE: extra real-account fraction of the fee
+    # swing book (see the module doc); None / "core" on every core leg
+    sleeve: LegSleeve | None = None
+    swing_trade_id: str | None = None           # trade:<id>
+    tp_rate: float | None = None                # PRIVATE: the approved take-profit rate
+    tp_mode: TpMode | None = None               # entries only
+    time_stop_date: str | None = None           # ISO date
+
+    @property
+    def is_swing(self) -> bool:
+        return self.sleeve == "swing" or bool(self.swing_trade_id)
 
 
 class Plan(Strict):

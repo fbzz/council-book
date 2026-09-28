@@ -6,6 +6,10 @@ Rules:
 - Opens are v3 market orders sized by UNITS (units × rate = exposure, unambiguous) and carry a
   fixed stopLossRate on EVERY open: a missing/invalid stop raises BEFORE any request is built.
 - A stop-loss PATCH always sets a rate; it never sends clearStopLoss.
+- Take-profit (swing book, SW-5): an open may carry `takeProfitRate` next to its stop, but only
+  when the caller passes one (the planner does so only behind the `tp_on_open` capability gate).
+  A PATCH that sets a take-profit ALWAYS sends the current stopLossRate with it, and a PATCH never
+  sends clearStopLoss / clearTakeProfit (the route accepts both; we never build them).
 - Outcome classification: 2xx → accepted payload (accepted is not executed); 4xx (including a
   clean 401/403 and 429) → DefiniteRejection; timeout / transport error / 5xx → AmbiguousWriteError.
 - This client NEVER retries. Retrying a write is the executor's decision, with a new attempt id,
@@ -90,8 +94,10 @@ def build_open_body(
     units: float,
     stop_loss_rate: float | None,
     stop_loss_type: str = "fixed",
+    take_profit_rate: float | None = None,
 ) -> dict[str, Any]:
-    """The exact v3 open body. Validates every field; the stop-loss check comes first."""
+    """The exact v3 open body. Validates every field; the stop-loss check comes first. A
+    `take_profit_rate` (optional) must sit on the profit side of the stop."""
     if not _positive_finite(stop_loss_rate):
         raise MissingStopLoss("every open carries a positive, finite stopLossRate")
     if stop_loss_type not in STOP_LOSS_TYPES:
@@ -108,7 +114,10 @@ def build_open_body(
         raise ValueError("units must be positive and finite")
     if settlement == "real" and (leverage != 1 or transaction != "buy"):
         raise ValueError("real settlement is long-only at 1x")
-    return {
+    if take_profit_rate is not None:
+        _check_take_profit(take_profit_rate, float(stop_loss_rate),  # type: ignore[arg-type]
+                           is_buy=transaction == "buy")
+    body = {
         "action": "open",
         "transaction": transaction,
         "instrumentId": instrument_id,
@@ -119,6 +128,18 @@ def build_open_body(
         "stopLossRate": float(stop_loss_rate),  # type: ignore[arg-type]
         "stopLossType": stop_loss_type,
     }
+    if take_profit_rate is not None:
+        body["takeProfitRate"] = float(take_profit_rate)
+    return body
+
+
+def _check_take_profit(take_profit_rate: Any, stop_loss_rate: float, *, is_buy: bool | None) -> None:
+    if not _positive_finite(take_profit_rate):
+        raise ValueError("takeProfitRate must be positive and finite")
+    if is_buy is True and not take_profit_rate > stop_loss_rate:
+        raise ValueError("a long's takeProfitRate must be above its stopLossRate")
+    if is_buy is False and not take_profit_rate < stop_loss_rate:
+        raise ValueError("a short's takeProfitRate must be below its stopLossRate")
 
 
 def build_close_body(*, instrument_id: int, units_to_deduct: float | None) -> dict[str, Any]:
@@ -133,15 +154,20 @@ def build_close_body(*, instrument_id: int, units_to_deduct: float | None) -> di
     }
 
 
-def build_patch_body(*, stop_loss_rate: float) -> dict[str, Any]:
-    """Stop-loss PATCH body. Never clears a stop."""
+def build_patch_body(*, stop_loss_rate: float, take_profit_rate: float | None = None) -> dict[str, Any]:
+    """Position PATCH body: the stop-loss rate ALWAYS (a take-profit is never sent without the
+    current stop), plus `takeProfitRate` when given. Never clears a stop or a take-profit."""
     if not _positive_finite(stop_loss_rate):
-        raise MissingStopLoss("a stop-loss PATCH must set a positive, finite rate")
-    return {"stopLossRate": float(stop_loss_rate), "stopLossType": "fixed"}
+        raise MissingStopLoss("a position PATCH must set a positive, finite stop-loss rate")
+    body: dict[str, Any] = {"stopLossRate": float(stop_loss_rate), "stopLossType": "fixed"}
+    if take_profit_rate is not None:
+        _check_take_profit(take_profit_rate, float(stop_loss_rate), is_buy=None)
+        body["takeProfitRate"] = float(take_profit_rate)
+    return body
 
 
 class EtoroWriteClient:
-    """open / close / patch-SL. Construct only with the WRITE token in the operator terminal."""
+    """open / close / patch-SL(+TP). Construct only with the WRITE token in the operator terminal."""
 
     # The executor cancels a held order only when this is True AND `cancel_order` exists.
     CANCEL_ROUTE_VERIFIED = CANCEL_ROUTE_VERIFIED
@@ -174,12 +200,13 @@ class EtoroWriteClient:
         units: float,
         stop_loss_rate: float | None,
         stop_loss_type: str = "fixed",
+        take_profit_rate: float | None = None,
     ) -> dict[str, Any]:
         """POST v3 market open by units. 202 = accepted (not executed): poll orders:lookup."""
         body = build_open_body(
             instrument_id=instrument_id, transaction=transaction, settlement=settlement,
             leverage=leverage, units=units, stop_loss_rate=stop_loss_rate,
-            stop_loss_type=stop_loss_type,
+            stop_loss_type=stop_loss_type, take_profit_rate=take_profit_rate,
         )
         return self._send("POST", OPEN_ORDER_PATH, body, request_id)
 
@@ -200,12 +227,14 @@ class EtoroWriteClient:
         )
 
     def patch_stop_loss(
-        self, *, request_id: str, position_id: int, stop_loss_rate: float
+        self, *, request_id: str, position_id: int, stop_loss_rate: float,
+        take_profit_rate: float | None = None,
     ) -> dict[str, Any]:
-        """Set a fixed stop-loss rate on an open position. 409 = position already closed."""
+        """Set a fixed stop-loss rate (and, when given, the take-profit rate) on an open position.
+        409 = position already closed."""
         if not _positive_int(position_id):
             raise ValueError("position_id must be a positive int")
-        body = build_patch_body(stop_loss_rate=stop_loss_rate)
+        body = build_patch_body(stop_loss_rate=stop_loss_rate, take_profit_rate=take_profit_rate)
         return self._send("PATCH", POSITION_PATH.format(position_id=position_id), body, request_id)
 
     def _send(self, method: str, path: str, body: dict[str, Any], request_id: str) -> dict[str, Any]:

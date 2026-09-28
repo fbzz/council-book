@@ -3,7 +3,8 @@
 It exists so the executor can be tortured without a network: scripted open outcomes (filled after
 K lookups, partial, rejected, in flight forever, 5xx-but-processed, 5xx-not-processed, lost 202,
 crash after processing), scripted close/patch outcomes, 429 with Retry-After, the shared 20/60 s
-execution quota, stop-loss hits and price moves. Payload shapes follow the official route specs.
+execution quota, stop-loss and take-profit hits and price moves. Payload shapes follow the official
+route specs.
 
 Rules it enforces like the real broker:
 - key-pair auth + x-request-id on every call; Authorization together with the key pair → 422.
@@ -12,6 +13,13 @@ Rules it enforces like the real broker:
   and rejected afterwards (status 4). The x-request-id is the idempotency key (`referenceId`):
   re-sending it returns the SAME order, never a second one.
 - orders:lookup and close-order info return 404 until the handle is known.
+- Take-profit (swing book, SW-5): an open body may carry `takeProfitRate` (kept on the position
+  unless `tp_on_open_supported=False`, which models a route that accepts and silently ignores it);
+  a PATCH may set it. A take-profit on the wrong side of the price, or closer than the config's
+  `minTakeProfitPercentage` (percent of margin: distance x leverage x 100), is refused with 400.
+  A position that leaves the book fully (stop, take-profit, close) leaves a closed-trade record
+  (`closed_trades`, `closed_trade(position_id)`: reason, close rate, time). The closed-trade READ
+  route is not modelled: no such route is verified yet.
 All ids are small synthetic integers. Nothing here is a real account.
 """
 
@@ -38,7 +46,8 @@ CloseOutcome = Literal[
     "close", "in_flight", "reject_after_submit", "http_4xx", "http_5xx_processed",
     "http_5xx_not_processed", "lost_200", "crash_after_processing",
 ]
-PatchOutcome = Literal["apply", "http_4xx", "http_5xx_processed", "http_5xx_not_processed", "lost_202"]
+PatchOutcome = Literal["apply", "http_4xx", "http_5xx_processed", "http_5xx_not_processed", "lost_202",
+                       "crash_before_processing"]
 
 STATUS_NAMES = {
     1: "Received", 2: "Placed", 3: "Filled", 4: "Rejected", 5: "PartiallyFilled",
@@ -124,6 +133,7 @@ class FakePosition:
     settlement: str
     opened_at: datetime
     order_id: int | None = None
+    tp_rate: float | None = None
 
 
 @dataclass
@@ -146,6 +156,7 @@ class FakeOrder:
     filled_units: float = 0.0
     fill_price: float | None = None
     error_message: str | None = None
+    tp_rate: float | None = None
 
 
 @dataclass
@@ -229,6 +240,7 @@ def leverage_config(
     max_sl_pct: float = 100.0,
     allow_sl_tp: bool = True,
     allow_edit_stop_loss: bool = True,
+    min_tp_pct: float = 5.0,
 ) -> dict[str, Any]:
     """A raw eligibility leverageConfigs entry, in broker casing."""
     return {
@@ -237,7 +249,7 @@ def leverage_config(
         "minPositionAmount": min_position_amount, "allowEditStopLoss": allow_edit_stop_loss,
         "minStopLossPercentage": min_sl_pct, "maxStopLossPercentage": max_sl_pct,
         "defaultStopLossPercentage": max_sl_pct, "allowEditTakeProfit": True,
-        "minTakeProfitPercentage": 5.0, "maxTakeProfitPercentage": 1000.0,
+        "minTakeProfitPercentage": min_tp_pct, "maxTakeProfitPercentage": 1000.0,
         "defaultTakeProfitPercentage": 1000.0, "allowStopLossTakeProfit": allow_sl_tp,
     }
 
@@ -332,6 +344,7 @@ class FakeEtoro:
         write_user_keys: Iterable[str] | None = None,
         execution_limit: int = 20,
         execution_window_s: float = 60.0,
+        tp_on_open_supported: bool = True,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
         self.credit = credit
@@ -350,7 +363,11 @@ class FakeEtoro:
         self.agent_portfolios: list[dict[str, Any]] | None = None
         self.requests: list[RecordedRequest] = []
         self.stop_hits: list[int] = []
+        self.tp_hits: list[int] = []
         self.patches: list[tuple[int, float | None]] = []
+        self.patch_bodies: list[dict[str, Any]] = []
+        self.tp_on_open_supported = tp_on_open_supported
+        self.closed_trades: list[dict[str, Any]] = []
         self._open_scripts: deque[OpenScript] = deque()
         self._close_scripts: deque[CloseScript] = deque()
         self._patch_scripts: deque[PatchScript] = deque()
@@ -401,6 +418,7 @@ class FakeEtoro:
         sl_rate: float | None = None,
         settlement: str = "cfd",
         opened_at: datetime | None = None,
+        tp_rate: float | None = None,
     ) -> FakePosition:
         inst = self.instrument(symbol)
         rate = open_rate if open_rate is not None else (inst.ask if is_buy else inst.bid)
@@ -408,6 +426,7 @@ class FakeEtoro:
             position_id=self._next_position, instrument_id=inst.instrument_id, is_buy=is_buy,
             leverage=leverage, units=units, open_rate=rate, amount=units * rate / leverage,
             sl_rate=sl_rate, settlement=settlement, opened_at=opened_at or self.now(),
+            tp_rate=tp_rate,
         )
         self._next_position += 1
         self.positions[pos.position_id] = pos
@@ -455,8 +474,19 @@ class FakeEtoro:
         pos = self.positions[position_id]
         inst = self.instruments[pos.instrument_id]
         rate = pos.sl_rate or (inst.bid if pos.is_buy else inst.ask)
-        self._realise(pos, pos.units, rate)
+        self._realise(pos, pos.units, rate, reason="stop_loss")
         self.stop_hits.append(position_id)
+
+    def hit_take_profit(self, position_id: int) -> None:
+        pos = self.positions[position_id]
+        inst = self.instruments[pos.instrument_id]
+        rate = pos.tp_rate or (inst.bid if pos.is_buy else inst.ask)
+        self._realise(pos, pos.units, rate, reason="take_profit")
+        self.tp_hits.append(position_id)
+
+    def closed_trade(self, position_id: int) -> dict[str, Any] | None:
+        """The closed-trade record of a position that left the book (None while it is open)."""
+        return next((c for c in self.closed_trades if c["positionId"] == position_id), None)
 
     def count(self, method: str, path_prefix: str) -> int:
         return sum(
@@ -481,7 +511,7 @@ class FakeEtoro:
         sign = 1.0 if pos.is_buy else -1.0
         return sign * (self._close_rate(pos) - pos.open_rate) * pos.units
 
-    def _realise(self, pos: FakePosition, units: float, rate: float) -> None:
+    def _realise(self, pos: FakePosition, units: float, rate: float, *, reason: str = "close") -> None:
         units = min(units, pos.units)
         share = units / pos.units if pos.units else 1.0
         margin = pos.amount * share
@@ -491,14 +521,26 @@ class FakeEtoro:
         pos.amount -= margin
         if pos.units <= 1e-12:
             del self.positions[pos.position_id]
+            self.closed_trades.append({
+                "positionId": pos.position_id, "instrumentId": pos.instrument_id, "isBuy": pos.is_buy,
+                "openRate": pos.open_rate, "closeRate": rate, "closeReason": reason,
+                "stopLossRate": pos.sl_rate, "takeProfitRate": pos.tp_rate,
+                "closeDateTime": _iso(self.now()),
+            })
 
     def _check_stops(self, inst: FakeInstrument) -> None:
         for pos in list(self.positions.values()):
-            if pos.instrument_id != inst.instrument_id or pos.sl_rate is None:
+            if pos.instrument_id != inst.instrument_id or pos.sl_rate is None or pos.position_id not in self.positions:
                 continue
             if (pos.is_buy and inst.bid <= pos.sl_rate) or (not pos.is_buy and inst.ask >= pos.sl_rate):
-                self._realise(pos, pos.units, pos.sl_rate)
+                self._realise(pos, pos.units, pos.sl_rate, reason="stop_loss")
                 self.stop_hits.append(pos.position_id)
+        for pos in list(self.positions.values()):
+            if pos.instrument_id != inst.instrument_id or pos.tp_rate is None:
+                continue
+            if (pos.is_buy and inst.bid >= pos.tp_rate) or (not pos.is_buy and inst.ask <= pos.tp_rate):
+                self._realise(pos, pos.units, pos.tp_rate, reason="take_profit")
+                self.tp_hits.append(pos.position_id)
 
     def _config_for(self, inst: FakeInstrument, settlement: str, is_buy: bool, leverage: int) -> dict[str, Any] | None:
         direction = "long" if is_buy else "short"
@@ -510,6 +552,21 @@ class FakeEtoro:
                 and not cfg.get("isPotential")
             ):
                 return cfg
+        return None
+
+    def _tp_error(self, inst: FakeInstrument, settlement: str, is_buy: bool, leverage: int,
+                  tp_rate: Any, price: float) -> str | None:
+        """Why a take-profit rate is refused (wrong side, below minTakeProfitPercentage), or None."""
+        try:
+            tp = float(tp_rate)
+        except (TypeError, ValueError):
+            return "invalid takeProfitRate"
+        if not math.isfinite(tp) or tp <= 0 or (is_buy and tp <= price) or (not is_buy and tp >= price):
+            return "takeProfitRate on the wrong side of the price"
+        cfg = self._config_for(inst, settlement, is_buy, leverage) or {}
+        min_pct = float(cfg.get("minTakeProfitPercentage") or 0.0)
+        if abs(tp / price - 1) * leverage * 100 < min_pct - 1e-9:
+            return "takeProfitRate below minTakeProfitPercentage"
         return None
 
     # ============================================================== transport
@@ -578,12 +635,12 @@ class FakeEtoro:
         return {
             "positionID": pos.position_id, "CID": 1, "openDateTime": _iso(pos.opened_at),
             "openRate": pos.open_rate, "instrumentID": pos.instrument_id, "isBuy": pos.is_buy,
-            "takeProfitRate": 0.0, "stopLossRate": pos.sl_rate or 0.0, "mirrorID": 0,
+            "takeProfitRate": pos.tp_rate or 0.0, "stopLossRate": pos.sl_rate or 0.0, "mirrorID": 0,
             "amount": pos.amount, "leverage": pos.leverage, "orderID": pos.order_id or 0,
             "orderType": 17, "units": pos.units, "totalFees": 0.0,
             "initialAmountInDollars": pos.amount, "isTslEnabled": False,
             "settlementTypeID": SETTLEMENT_TYPE_IDS.get(pos.settlement, 0),
-            "isNoStopLoss": pos.sl_rate is None, "isNoTakeProfit": True,
+            "isNoStopLoss": pos.sl_rate is None, "isNoTakeProfit": pos.tp_rate is None,
             "unrealizedPnL": {
                 "pnL": self._pnl(pos), "exposureInAccountCurrency": exposure,
                 "marginInAccountCurrency": pos.amount, "closeRate": close_rate,
@@ -728,6 +785,7 @@ class FakeEtoro:
             settlement=str(body["settlementType"]), leverage=int(body.get("leverage") or 1),
             units=float(body["units"]), sl_rate=body.get("stopLossRate"), script=script,
             requested_at=self.now(),
+            tp_rate=float(body["takeProfitRate"]) if body.get("takeProfitRate") and self.tp_on_open_supported else None,
             eligible=self._config_for(inst, str(body["settlementType"]), is_buy, int(body.get("leverage") or 1)) is not None,
         )
         self._next_order += 1
@@ -762,6 +820,11 @@ class FakeEtoro:
         leverage = int(body.get("leverage") or 1)
         if (leverage > 1 or body["transaction"] == "sellShort") and not body.get("stopLossRate"):
             return "stopLossRate required"
+        if body.get("takeProfitRate") is not None and self.tp_on_open_supported:
+            inst = self.instruments[int(body["instrumentId"])]
+            is_buy = body["transaction"] == "buy"
+            return self._tp_error(inst, str(body["settlementType"]), is_buy, leverage,
+                                  body["takeProfitRate"], inst.ask if is_buy else inst.bid)
         return None
 
     def _resolve_open(self, order: FakeOrder) -> None:
@@ -791,7 +854,7 @@ class FakeEtoro:
             position_id=self._next_position, instrument_id=order.instrument_id, is_buy=is_buy,
             leverage=order.leverage, units=units, open_rate=price, amount=margin,
             sl_rate=order.sl_rate, settlement=order.settlement, opened_at=self.now(),
-            order_id=order.order_id,
+            order_id=order.order_id, tp_rate=order.tp_rate,
         )
         self._next_position += 1
         self.positions[pos.position_id] = pos
@@ -827,6 +890,7 @@ class FakeEtoro:
                 "marginAccountCurrency": order.filled_units * order.fill_price / order.leverage,
                 "remainingUnits": pos.units if pos else 0.0,
                 "stopLossRate": order.sl_rate,
+                "takeProfitRate": pos.tp_rate if pos else order.tp_rate,
                 "openingData": {
                     "executionTime": _iso(order.requested_at), "units": order.filled_units,
                     "avgPrice": order.fill_price, "marketSpread": 0.0, "markup": 0.0,
@@ -936,14 +1000,27 @@ class FakeEtoro:
         if pos is None:
             return _json(409, {"error": "position closed"})
         script = self._patch_scripts.popleft() if self._patch_scripts else PatchScript()
+        if script.outcome == "crash_before_processing":
+            raise SimulatedCrash("process died before the broker processed the PATCH")
         if script.outcome == "http_4xx":
             return _json(script.status_code, {"error": "rejected by fake"})
         if script.outcome == "http_5xx_not_processed":
             return _json(503, {"error": "unavailable"})
+        if body.get("takeProfitRate") is not None and not body.get("clearTakeProfit"):
+            inst = self.instruments[pos.instrument_id]
+            error = self._tp_error(inst, pos.settlement, pos.is_buy, pos.leverage, body["takeProfitRate"],
+                                   self._close_rate(pos))
+            if error:
+                return _json(400, {"error": error})
+        self.patch_bodies.append(dict(body))
         if body.get("clearStopLoss"):
             pos.sl_rate = None
         elif body.get("stopLossRate") is not None:
             pos.sl_rate = float(body["stopLossRate"])
+        if body.get("clearTakeProfit"):
+            pos.tp_rate = None
+        elif body.get("takeProfitRate") is not None:
+            pos.tp_rate = float(body["takeProfitRate"])
         self.patches.append((pos.position_id, pos.sl_rate))
         if script.outcome == "http_5xx_processed":
             return _json(500, {"error": "internal error"})

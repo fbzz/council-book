@@ -14,13 +14,30 @@ Rules (each one has a chaos test against broker/fake.py):
 - Opens are polled on orders:lookup at the poll schedule (default 1/2/4/8/15/30/60 s = 120 s):
   3 filled; 5 partially filled once 60 s have passed; 4/7/8 rejected; 9/10 rejected_partial;
   still in flight (or never found) at the end → unknown.
-- Order: closes (plan order) → stop-loss modifications → refresh equity → opens (plan order).
+- Order: closes (plan order) → stop-loss / take-profit modifications of existing positions
+  (`modify_sl`, `set_tp`) → refresh equity → core opens → swing opens → the swing opens'
+  `modify_tp` legs (swing-book §4.4, §4.6).
   Open units are re-derived from fresh equity (approved units × equity_now / NAV at approval) but
   never above approved units × 1.02. An open whose dependencies did not fill is skipped.
 - After every open fill, exposure (filled units × fill price, and the broker-reported exposure)
   must be within risk.approval.post_fill_exposure_tolerance of the intended exposure (units sent
   × planned price); otherwise the decision is BLOCKED and nothing else is sent.
 - The first rejected open, or any rejected close, stops the remaining opens → completed_partial.
+  Scoped by sleeve (swing-book §4.6): a rejected (or held) SWING open stops only the later swing
+  opens and skips its own `modify_tp`; a rejected core open or close stops every later open.
+- Swing take-profit (swing-book §4.4, SW-5): an entry with `tp_mode="body"` sends takeProfitRate in
+  the open body and needs no PATCH. A `modify_tp` / `set_tp` leg is ledgered `submitting` with its
+  request id before its PATCH like every leg; the PATCH always resends the position's CURRENT
+  stop-loss with the take-profit (the stop is never re-anchored to the fill), and both rates are
+  re-read. A modify_sl PATCH resends the position's current take-profit. Every filled swing entry
+  creates or advances its swing trade (`ledger.record_swing_fill`) at once and again at the finish;
+  at the finish a filled entry whose target should be at the broker but whose positions do not carry
+  it (a rejected or unconfirmed PATCH, a crash between the fill and the PATCH, a body TP the broker
+  dropped) moves its trade to `open_tp_missing` (a swing-scoped blocker; the next swing slot plans a
+  `set_tp`); a filled `set_tp` moves it back. A confirmed take-profit is checked again by reconcile.
+  An execution_unknown or waiting decision whose every unresolved leg is a swing leg gets the
+  `swing` blocker scope (new swing entries halt, the core does not). The post-execution reconcile
+  maps live swing positions to their swing lines (`swing.book.swing_vehicle_map`).
 - Market hours: legs the approval dropped (`dropped`: seq → reason) are marked skipped before
   anything is sent. Every other leg's session is re-checked just before its write: closed →
   skipped `market_closed` (a close skipped this way also stops every open, the drop rule).
@@ -106,7 +123,7 @@ from council.clock import utcnow
 from council.execution.planner import vehicle_to_line
 from council.execution.ratelimit import TokenBucket
 from council.execution.reconcile import ExpectedPosition, ReconcileResult, reconcile
-from council.ledger.db import Ledger, LegRow
+from council.ledger.db import Ledger, LedgerError, LegRow
 from council.ledger.states import LEG_ACTIVE_STATES, WAITING_STATE, can_transition
 from council.models.common import Direction, Strict
 from council.models.cycle import DecisionState
@@ -131,6 +148,14 @@ CANCELLED_MARKET_CLOSED = "cancelled_market_closed"
 RESUMABLE_STATES = frozenset({"executing", "execution_unknown", "blocked"})
 
 T = TypeVar("T")
+
+
+class _NoPortfolio(Exception):  # noqa: N818 - internal flow marker
+    """The post-execution portfolio read failed (already recorded as a reason)."""
+
+
+def _row_is_swing(row: LegRow) -> bool:
+    return row.detail.get("sleeve") == "swing" or bool(row.detail.get("swing_trade_id"))
 
 
 def leg_request_id(decision_id: str, seq: int, attempt: int) -> str:
@@ -174,6 +199,7 @@ class WriteClient(Protocol):
     def open_order(
         self, *, request_id: str, instrument_id: int, transaction: Any, settlement: str,
         leverage: int, units: float, stop_loss_rate: float | None, stop_loss_type: str = "fixed",
+        take_profit_rate: float | None = None,
     ) -> dict[str, Any]: ...
 
     def close_position(
@@ -182,7 +208,8 @@ class WriteClient(Protocol):
     ) -> dict[str, Any]: ...
 
     def patch_stop_loss(
-        self, *, request_id: str, position_id: int, stop_loss_rate: float
+        self, *, request_id: str, position_id: int, stop_loss_rate: float,
+        take_profit_rate: float | None = None,
     ) -> dict[str, Any]: ...
 
     # Optional, and absent from EtoroWriteClient until the M5 route check verifies the cancel route;
@@ -247,6 +274,14 @@ class _LegCtx:
     depends_on: tuple[int, ...]
     whole_units: bool = False
     session: str | None = None
+    sleeve: str | None = None
+    swing_trade_id: str | None = None
+    tp_rate: float | None = None
+    tp_mode: str | None = None
+
+    @property
+    def is_swing(self) -> bool:
+        return self.sleeve == "swing" or bool(self.swing_trade_id)
 
     @property
     def planned_price(self) -> float | None:
@@ -262,6 +297,8 @@ class _LegCtx:
             leverage=leg.leverage, units=leg.units, amount_usd=leg.amount_usd,
             sl_rate=leg.sl_rate, position_id=leg.position_id, depends_on=tuple(leg.depends_on),
             whole_units=leg.whole_units, session=leg.session,
+            sleeve="swing" if leg.is_swing else None, swing_trade_id=leg.swing_trade_id,
+            tp_rate=leg.tp_rate, tp_mode=leg.tp_mode,
         )
 
     @classmethod
@@ -273,6 +310,9 @@ class _LegCtx:
             amount_usd=row.amount_usd, sl_rate=row.sl_rate, position_id=row.position_id,
             depends_on=tuple(row.depends_on), whole_units=bool(row.detail.get("whole_units", False)),
             session=row.detail.get("session"),
+            sleeve="swing" if (row.detail.get("sleeve") == "swing" or row.detail.get("swing_trade_id")) else None,
+            swing_trade_id=row.detail.get("swing_trade_id"), tp_rate=row.detail.get("tp_rate"),
+            tp_mode=row.detail.get("tp_mode"),
         )
 
 
@@ -287,6 +327,7 @@ class _Run:
     blocked: bool = False
     partial: bool = False
     stop_opens: bool = False
+    stop_swing: bool = False        # a swing open failed: later SWING opens stop, core ones do not
     waiting: bool = False
     writes: int = 0
     allow_cancel: bool = True       # False in resume: lookups only, never a write
@@ -395,6 +436,7 @@ class Executor:
                 self._run_closes(run)
                 self._run_modifies(run)
                 self._run_opens(run, nav_usd)
+                self._run_tp_legs(run)
                 return self._finish(run, skip_reason="not sent: execution stopped earlier")
             except Exception as exc:
                 self._fail_closed(run, exc)
@@ -437,13 +479,34 @@ class Executor:
 
     def _run_modifies(self, run: _Run) -> None:
         for leg in run.legs:
-            if leg.kind == "modify_sl":
+            if leg.kind in ("modify_sl", "set_tp"):
                 if run.unknown or run.blocked:
                     return
-                self._modify_leg(run, leg)
+                if leg.kind == "set_tp":
+                    self._tp_leg(run, leg)
+                else:
+                    self._modify_leg(run, leg)
+
+    def _run_tp_legs(self, run: _Run) -> None:
+        """The swing opens' take-profit PATCHes, after every open."""
+        for leg in run.legs:
+            if leg.kind == "modify_tp":
+                if run.unknown or run.blocked:
+                    return
+                self._tp_leg(run, leg)
+
+    @staticmethod
+    def _stop_after(run: _Run, leg: _LegCtx) -> None:
+        """A failed open stops the later opens of its sleeve: a swing open only the swing ones, a
+        core open every one (core and swing)."""
+        if leg.is_swing:
+            run.stop_swing = True
+        else:
+            run.stop_opens = True
 
     def _run_opens(self, run: _Run, nav_usd: float) -> None:
-        opens = [leg for leg in run.legs if leg.kind == "open"]
+        # core opens first, then swing opens (plan order inside each sleeve)
+        opens = sorted((leg for leg in run.legs if leg.kind == "open"), key=lambda leg: leg.is_swing)
         if not opens or run.unknown or run.blocked or run.stop_opens:
             return
         try:
@@ -457,12 +520,14 @@ class Executor:
         for leg in opens:
             if run.unknown or run.blocked or run.stop_opens:
                 return
+            if leg.is_swing and run.stop_swing:
+                continue                     # left planned: skipped at the finish
             if any(self.ledger.get_leg(run.decision_id, dep).state != "filled" for dep in leg.depends_on):
                 self._skip(run, leg, "dependency did not fill")
                 continue
             if not (leg.sl_rate and leg.sl_rate > 0) or not leg.units or leg.instrument_id is None or not leg.settlement:
                 self._skip(run, leg, "invalid open leg (stop-loss, units, instrument or settlement missing)")
-                run.stop_opens = True
+                self._stop_after(run, leg)
                 continue
             if self._market_closed(leg):
                 self._skip(run, leg, MARKET_CLOSED)
@@ -582,10 +647,11 @@ class Executor:
             self._skip(run, leg, MARKET_CLOSED)
             return
         position_id, rate = pos.position_id, float(leg.sl_rate)
+        keep_tp = {"take_profit_rate": float(pos.tp_rate)} if pos.tp_rate else {}   # resend the current TP
         sent = self._submit(
             run, leg, {},
             lambda rid: self.write.patch_stop_loss(  # type: ignore[union-attr]
-                request_id=rid, position_id=position_id, stop_loss_rate=rate
+                request_id=rid, position_id=position_id, stop_loss_rate=rate, **keep_tp
             ),
         )
         if sent.outcome in ("rejected", "invalid"):
@@ -607,6 +673,76 @@ class Executor:
             run.unknown = True
             run.reason(f"{leg.symbol}: stop-loss change unknown")
 
+    # ================================================================== take-profit PATCH (swing)
+    def _tp_leg(self, run: _Run, leg: _LegCtx) -> None:
+        """`modify_tp` (after its swing open) or `set_tp` (an open trade): PATCH the approved
+        take-profit together with the position's CURRENT stop-loss, then re-read both rates."""
+        if leg.kind == "modify_tp":
+            deps = [self.ledger.get_leg(run.decision_id, dep) for dep in leg.depends_on]
+            if not deps or any(d.state not in ("filled", "partially_filled", "rejected_partial") for d in deps):
+                self._skip(run, leg, "entry did not fill; no take-profit to set")
+                return
+            pids = sorted({pid for d in deps for pid in d.position_ids})
+        else:
+            pids = [leg.position_id] if leg.position_id else []
+        if len(pids) != 1 or not leg.tp_rate:
+            self._skip(run, leg, "take-profit not sent: needs exactly one position and a rate")
+            return
+        if self._market_closed(leg):
+            self._skip(run, leg, MARKET_CLOSED)
+            return
+        position_id, tp = pids[0], float(leg.tp_rate)
+        try:
+            pos = self._portfolio().position(position_id)
+        except BrokerError:
+            self._skip(run, leg, "portfolio unreadable; take-profit not sent")
+            return
+        if pos is None:
+            self._skip(run, leg, "position no longer open")
+            return
+        if pos.tp_rate and abs(pos.tp_rate / tp - 1) <= self._sl_tol:
+            self._resolve(run, leg, "filled", position_ids=[position_id], detail={"tp_already_set": True})
+            return
+        sl = float(pos.sl_rate) if pos.sl_rate and pos.sl_rate > 0 else float(leg.sl_rate or 0.0)
+        if sl <= 0:
+            self._skip(run, leg, "take-profit not sent: no stop-loss to resend with it")
+            return
+        sent = self._submit(
+            run, leg, {"position_id": position_id, "sl_rate_sent": sl, "tp_rate_sent": tp},
+            lambda rid: self.write.patch_stop_loss(  # type: ignore[union-attr]
+                request_id=rid, position_id=position_id, stop_loss_rate=sl, take_profit_rate=tp,
+            ),
+        )
+        if sent.outcome in ("rejected", "invalid"):
+            self._resolve(run, leg, "rejected", error=sent.error)
+            run.partial = True
+            run.reason(f"{leg.symbol}: take-profit change rejected (open_tp_missing)")
+            return
+        if sent.outcome == "accepted":
+            self._leg(run, leg, "submitted")
+        window = self._window() if sent.outcome == "accepted" else AMBIGUITY_WINDOW_S
+        if self._await_sl_tp(position_id, sl, tp, window, immediate=sent.outcome == "ambiguous"):
+            self._resolve(run, leg, "filled", position_ids=[position_id])
+        else:
+            self._resolve(run, leg, "unknown", error="take-profit change not confirmed")
+            run.unknown = True
+            run.reason(f"{leg.symbol}: take-profit change unknown (open_tp_missing)")
+
+    def _await_sl_tp(self, position_id: int, sl: float | None, tp: float, window: float, *,
+                     immediate: bool) -> bool:
+        def check() -> bool | None:
+            try:
+                pos = self._portfolio().position(position_id)
+            except BrokerError:
+                return None
+            if pos is None or not pos.tp_rate or abs(pos.tp_rate / tp - 1) > self._sl_tol:
+                return None
+            if sl and not (pos.sl_rate and abs(pos.sl_rate / sl - 1) <= self._sl_tol):
+                return None
+            return True
+
+        return bool(self._poll(check, window, immediate=immediate))
+
     def _await_sl(self, position_id: int, rate: float, window: float, *, immediate: bool) -> bool:
         def check() -> bool | None:
             try:
@@ -624,17 +760,20 @@ class Executor:
         planned_price = leg.planned_price
         instrument_id, settlement, sl_rate = leg.instrument_id, leg.settlement, leg.sl_rate
         transaction = "buy" if leg.direction == "long" else "sellShort"
+        # the take-profit rides in the open body only behind the tp_on_open gate (the planner's mode)
+        tp = {"take_profit_rate": float(leg.tp_rate)} if leg.tp_mode == "body" and leg.tp_rate else {}
         sent = self._submit(
             run, leg, {"units_sent": units, "planned_price": planned_price},
             lambda rid: self.write.open_order(  # type: ignore[union-attr]
                 request_id=rid, instrument_id=instrument_id, transaction=transaction,
-                settlement=settlement, leverage=leg.leverage, units=units, stop_loss_rate=sl_rate,
+                settlement=settlement, leverage=leg.leverage, units=units, stop_loss_rate=sl_rate, **tp,
             ),
         )
         if sent.outcome in ("rejected", "invalid"):
             self._resolve(run, leg, "rejected", error=sent.error)
-            run.partial = run.stop_opens = True
-            run.reason(f"{leg.symbol}: open rejected; remaining opens stopped")
+            run.partial = True
+            self._stop_after(run, leg)
+            run.reason(f"{leg.symbol}: open rejected; remaining {self._scope_word(leg)}opens stopped")
             return
         first: OrderStatus | None = None
         if sent.outcome == "ambiguous":
@@ -729,6 +868,7 @@ class Executor:
             self._expect(run, leg, status)
             mismatch = self._exposure_mismatch(status, units, planned_price, full=full)
             self._resolve(run, leg, "filled" if full else "partially_filled", error=mismatch, **common)
+            self._record_swing_fill(run, leg)
             if not full:
                 run.partial = True
                 run.reason(f"{leg.symbol}: open partially filled")
@@ -737,21 +877,25 @@ class Executor:
                 run.reason(f"{leg.symbol}: post-fill exposure check failed ({mismatch})")
         elif sid in STATUS_FAILED:
             self._resolve(run, leg, "rejected", error=status.error_message or "rejected", **common)
-            run.partial = run.stop_opens = True
-            run.reason(f"{leg.symbol}: open rejected; remaining opens stopped")
+            run.partial = True
+            self._stop_after(run, leg)
+            run.reason(f"{leg.symbol}: open rejected; remaining {self._scope_word(leg)}opens stopped")
         elif sid in STATUS_FAILED_AFTER_PARTIAL:
             self._expect(run, leg, status)
             self._resolve(run, leg, "rejected_partial", error=status.error_message or "rejected after a partial fill", **common)
-            run.partial = run.stop_opens = True
-            run.reason(f"{leg.symbol}: open rejected after a partial fill; remaining opens stopped")
+            self._record_swing_fill(run, leg)
+            run.partial = True
+            self._stop_after(run, leg)
+            run.reason(f"{leg.symbol}: open rejected after a partial fill; remaining {self._scope_word(leg)}opens stopped")
         elif sid == STATUS_WAITING_FOR_MARKET:
             after = self._cancel_waiting(run, leg, status)
             if after is not None and after.status_id != STATUS_WAITING_FOR_MARKET:
                 if after.status_id == STATUS_CANCELED:
                     self._resolve(run, leg, "rejected", error=CANCELLED_MARKET_CLOSED,
                                   order_id=after.order_id, broker_status=f"{after.status_id}:{after.status_name}")
-                    run.partial = run.stop_opens = True
-                    run.reason(f"{leg.symbol}: market closed; order cancelled; remaining opens stopped")
+                    run.partial = True
+                    self._stop_after(run, leg)
+                    run.reason(f"{leg.symbol}: market closed; order cancelled; remaining {self._scope_word(leg)}opens stopped")
                     return
                 self._settle_open(run, leg, after, units, planned_price)
                 return
@@ -779,6 +923,26 @@ class Executor:
         if broker is not None and abs(broker / intended - 1) > tol:
             return "broker-reported exposure outside tolerance"
         return None
+
+    @staticmethod
+    def _scope_word(leg: _LegCtx) -> str:
+        return "swing " if leg.is_swing else ""
+
+    def _record_swing_fill(self, run: _Run, leg: _LegCtx) -> None:
+        """A filled swing entry creates or advances its trade at once (leg state decides, §4.5)."""
+        if not leg.is_swing or leg.kind != "open":
+            return
+        from council.swing.models import IllegalTransition
+
+        try:
+            trade = self.ledger.record_swing_fill(run.decision_id, leg.seq, actor=ACTOR, now=self.clock())
+            # the approved rates live on the trade (a later set_tp re-sends this target)
+            missing = {k: v for k, v in (("sl_rate", leg.sl_rate), ("tp_rate", leg.tp_rate))
+                       if v is not None and getattr(trade, k) is None}
+            if missing:
+                self.ledger.update_swing_trade(trade.trade_id, now=self.clock(), **missing)
+        except (LedgerError, IllegalTransition) as exc:
+            run.reason(f"{leg.symbol}: swing trade not recorded ({type(exc).__name__})")
 
     def _expect(self, run: _Run, leg: _LegCtx, status: OrderStatus) -> None:
         for pid in status.position_ids:
@@ -850,13 +1014,21 @@ class Executor:
         deadline = close + timedelta(hours=WAITING_GRACE_H) if close else now + timedelta(hours=24)
         self._leg(run, leg, WAITING_STATE, order_id=order_id, broker_status=broker_status,
                   detail={"waiting_since": now.isoformat(), "waiting_deadline": deadline.isoformat()})
-        run.waiting = run.stop_opens = True
-        run.reason(f"{leg.symbol}: order held by the broker until its market opens; remaining opens stopped")
+        run.waiting = True
+        if leg.kind == "open":
+            self._stop_after(run, leg)
+        else:
+            run.stop_opens = True
+        run.reason(f"{leg.symbol}: order held by the broker until its market opens; remaining "
+                   f"{self._scope_word(leg) if leg.kind == 'open' else ''}opens stopped")
 
     def _blocker_scope(self, decision_id: str) -> str:
-        """`satellite` when every waiting leg is a stock order on a satellite line, else `all`."""
+        """`swing` when every waiting leg is a swing leg, `satellite` when every waiting leg is a
+        stock order on a satellite line, else `all`."""
         specs = self.policy.universe.by_symbol()
         waiting = [r for r in self.ledger.legs(decision_id) if r.state == WAITING_STATE]
+        if waiting and all(_row_is_swing(r) for r in waiting):
+            return "swing"
         stock = all(
             (spec := specs.get(r.line)) is not None and spec.asset_class == "stock" and spec.sleeve == "satellite"
             for r in waiting
@@ -902,6 +1074,20 @@ class Executor:
                     run.partial = run.stop_opens = True
                     return
             self._settle_close(run, leg, verdict, row.order_id)
+        elif leg.kind in ("modify_tp", "set_tp"):
+            pid = row.detail.get("position_id") or leg.position_id
+            tp = row.detail.get("tp_rate_sent") or leg.tp_rate
+            sl = row.detail.get("sl_rate_sent") or leg.sl_rate
+            ok = bool(pid and tp) and self._await_sl_tp(int(pid), sl, float(tp), AMBIGUITY_WINDOW_S,  # type: ignore[arg-type]
+                                                         immediate=True)
+            if ok:
+                self._resolve(run, leg, "filled", position_ids=[int(pid)])  # type: ignore[arg-type]
+            elif row.state in ("submitting", "unknown"):
+                self._resolve(run, leg, "skipped", error="take-profit change not applied (open_tp_missing)")
+                run.partial = True
+            else:
+                self._resolve(run, leg, "unknown", error="take-profit change not confirmed")
+                run.unknown = True
         else:
             ok = bool(leg.position_id and leg.sl_rate) and self._await_sl(
                 leg.position_id, float(leg.sl_rate), AMBIGUITY_WINDOW_S, immediate=True  # type: ignore[arg-type]
@@ -942,11 +1128,20 @@ class Executor:
         after: PortfolioRead | None = None
         try:
             after = self._portfolio()
+        except BrokerError as exc:
+            run.reason(f"post-execution reconcile unavailable ({type(exc).__name__})")
+        self._settle_swing(run, after)
+        try:
+            if after is None:
+                raise _NoPortfolio
             snapshot = snapshot_from_portfolio(after, now)
-            rec = reconcile(snapshot, self._targets(run.decision_id), run.expected, self.policy)
+            rec = reconcile(snapshot, self._targets(run.decision_id), run.expected, self.policy,
+                            swing_map=self._swing_map())
             rec = self._corporate_reconcile(run, rec, after.positions)
             self.ledger.record_positions(now, after.positions, decision_id=run.decision_id, source="post_execution")
             self.ledger.add_equity_mark(now, after.equity_usd, credit_usd=after.credit_usd, source="post_execution")
+        except _NoPortfolio:
+            pass
         except (BrokerError, ValueError) as exc:
             run.reason(f"post-execution reconcile unavailable ({type(exc).__name__})")
         final = self._final_state(run, rec)
@@ -957,12 +1152,82 @@ class Executor:
             # blocked keeps its full blocker (a satellite scope would free the core cycle without
             # the operator review that alone clears blocked)
             if final == WAITING_STATE:
-                self.ledger.set_blocker_scope(run.decision_id, self._blocker_scope(run.decision_id), now=now)
+                self._scope(run.decision_id, self._blocker_scope(run.decision_id), now)
+            elif final == "execution_unknown" and self._only_swing_unresolved(run.decision_id):
+                self._scope(run.decision_id, "swing", now)
             self.ledger.transition(run.decision_id, final, reason, actor=ACTOR, now=now)
         else:
             self.ledger.note(run.decision_id, f"resume: still {current}: {reason}", actor=ACTOR, now=now)
             final = current  # type: ignore[assignment]
         return self._report(run, final, rec, after)  # type: ignore[arg-type]
+
+    def _scope(self, decision_id: str, scope: str, now: datetime) -> None:
+        """Set a blocker scope; a `swing` scope the ledger refuses (an unresolved core leg) falls
+        back to the whole book."""
+        try:
+            self.ledger.set_blocker_scope(decision_id, scope, now=now)
+        except LedgerError:
+            self.ledger.set_blocker_scope(decision_id, "all", now=now)
+
+    def _only_swing_unresolved(self, decision_id: str) -> bool:
+        unresolved = [r for r in self.ledger.legs(decision_id)
+                      if r.state in LEG_ACTIVE_STATES | {WAITING_STATE, "planned"}]
+        return bool(unresolved) and all(_row_is_swing(r) for r in unresolved)
+
+    def _swing_map(self) -> Any:
+        from council.swing.book import swing_vehicle_map
+
+        return swing_vehicle_map(self.ledger, self.policy)
+
+    def _settle_swing(self, run: _Run, after: PortfolioRead | None) -> None:
+        """Swing trades from leg state (§4.5) and the take-profit check (§4.4): every filled swing
+        entry records its trade; one whose target should be at the broker but whose live positions
+        do not carry it moves to `open_tp_missing`; a filled `set_tp` moves its trade back. A
+        confirmed take-profit is added to the reconcile's expectations."""
+        from council.swing.models import IllegalTransition
+
+        rows = [r for r in self.ledger.legs(run.decision_id) if _row_is_swing(r)]
+        for row in rows:
+            leg = _LegCtx.from_row(row)
+            try:
+                if row.kind == "open" and row.state in ("filled", "partially_filled", "rejected_partial"):
+                    trade = self.ledger.record_swing_fill(run.decision_id, row.seq, actor=ACTOR, now=self.clock())
+                    if row.detail.get("tp_mode") not in ("body", "patch") or not leg.tp_rate:
+                        continue
+                    tp = float(leg.tp_rate)
+                    live = [] if after is None else [p for pid in row.position_ids
+                                                     if (p := after.position(pid)) is not None]
+                    if after is not None and not live:
+                        continue            # already closed at the broker: the watch classifies it
+                    if live and all(p.tp_rate and abs(p.tp_rate / tp - 1) <= self._sl_tol for p in live):
+                        confirmed = {p.position_id for p in live}
+                        run.expected = [e.model_copy(update={"tp_rate": tp}) if e.position_id in confirmed else e
+                                        for e in run.expected]
+                    elif trade.state in ("open", "partial"):
+                        self.ledger.transition_swing_trade(
+                            trade.trade_id, "open_tp_missing", actor=ACTOR, now=self.clock(),
+                            reason=f"take-profit not at the broker after {run.decision_id}:{row.seq}",
+                            cycle_id=self.ledger.get_decision(run.decision_id).cycle_id)
+                        run.reason(f"{row.vehicle_symbol}: take-profit missing at the broker (open_tp_missing)")
+                elif row.kind == "set_tp" and row.state == "filled" and leg.swing_trade_id:
+                    trade = self.ledger.swing_trade(leg.swing_trade_id)
+                    if trade is not None and trade.state == "open_tp_missing":
+                        self.ledger.transition_swing_trade(
+                            trade.trade_id, self._resumed_state(trade), actor=ACTOR, now=self.clock(),
+                            reason=f"take-profit set by {run.decision_id}:{row.seq}",
+                            cycle_id=self.ledger.get_decision(run.decision_id).cycle_id)
+            except (LedgerError, IllegalTransition) as exc:
+                run.reason(f"{row.vehicle_symbol}: swing trade update failed ({type(exc).__name__})")
+
+    def _resumed_state(self, trade: Any) -> str:
+        """`partial` when the trade's entry leg filled only in part, else `open`."""
+        try:
+            if trade.decision_id and trade.entry_seq is not None:
+                state = self.ledger.get_leg(trade.decision_id, int(trade.entry_seq)).state
+                return "open" if state == "filled" else "partial"
+        except LedgerError:
+            pass
+        return "open"
 
     def _corporate_reconcile(self, run: _Run, rec: ReconcileResult, positions: Sequence[Any]) -> ReconcileResult:
         """The reconcile `_final_state` judges, with corporate actions taken out

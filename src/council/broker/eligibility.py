@@ -76,6 +76,7 @@ def parse_leverage_config(raw: Mapping[str, Any]) -> LeverageConfig | None:
         max_sl_pct=as_float(pick(raw, "maxStopLossPercentage"), 100.0) or 100.0,
         default_sl_pct=as_float(pick(raw, "defaultStopLossPercentage")),
         allow_sl_tp=_bool(pick(raw, "allowStopLossTakeProfit"), True),
+        min_tp_pct=as_float(pick(raw, "minTakeProfitPercentage"), 0.0) or 0.0,
     )
 
 

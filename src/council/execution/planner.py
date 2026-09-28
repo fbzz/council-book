@@ -24,7 +24,9 @@ Rules (every one is tested):
   it is WIDENED to the minimum, above the maximum → skipped `stop_outside_broker_bounds`; a config
   that does not allow editing the stop or SL/TP → skipped `stop_not_allowed`), then
   `stop_loss_rate`: long ask × (1 − d), short bid × (1 + d).
-- Order: closes first (largest risk reduction first), then opens (largest first); at most
+- Order: closes first (largest risk reduction first), then stop/target modifications of existing
+  positions (`modify_sl`, `set_tp`), then core opens (largest first), then swing opens, then their
+  `modify_tp` legs (swing-book §4.4, §4.6); at most
   risk.proposal.max_legs COUNTED legs (risk-increasing or discretionary; a risk-reducing leg of a
   reference-origin line does not count) and at most proposal.max_legs_total legs in all, dropping
   from the tail; a leg whose dependency was dropped is dropped.
@@ -51,6 +53,22 @@ Rules (every one is tested):
   apply (a smoke ticket is what proves them); anything the builder would skip raises
   SmokePlanError with the skip code. A smoke leg's line is the vehicle's line, else
   `UNMAPPED_<instrument id>` (as the exposure snapshot names it).
+- Swing book (swing-book.md rev 2 §4.2/§4.4, SW-5): swing lines (`SW_<ticker>`) are planned ONLY from
+  `swing` orders (`SwingOrder`), never from `target_w`; `swing_map` (`swing.book.SwingVehicleMap`)
+  maps live swing positions to their lines so they are not locked as unmapped. An `enter` order is
+  one market open at 1x (a long is real shares, a short a CFD), sized by units from its NAV share,
+  with the approved stop distance (never widened to a broker minimum: a stop the broker bounds would
+  move is skipped `stop_outside_broker_bounds`) and target distance turned into rates at the
+  plan-time quote. Its vehicle class must be proven: `capabilities.allows_vehicle` of
+  `stock_real_long` / `stock_cfd_short`, else skipped `capability_not_proven:<cap>` (no gate when
+  `capabilities` is None, as for core opens). The target goes into the open body when the
+  `tp_on_open` gate is proven (`tp_mode="body"`), else a dependent `modify_tp` leg follows the open
+  (`"patch"`); a target closer than the config's minTakeProfitPercentage goes to the broker not at
+  all (`"none"`, noted `<line>: tp_below_broker_minimum`). An `exit` order fully closes the line's
+  positions; a `set_tp` order (an `open_tp_missing` trade, `set_tp_orders`) PATCHes the approved
+  target onto each position with its current stop. Swing legs never count toward the core leg caps
+  (core legs are never dropped for a swing leg); at most MAX_SWING_OPENS swing opens and as many
+  `modify_tp` legs per plan. Every swing leg carries `sleeve="swing"` and its `swing_trade_id`.
 """
 
 from __future__ import annotations
@@ -81,6 +99,10 @@ W_EPS = 1e-6               # weight changes below this are noise
 UNITS_SCALE = 1_000_000    # units are floored/ceiled to 6 decimals
 
 UNMAPPED_PREFIX = "UNMAPPED_"
+MAX_SWING_OPENS = 6        # swing-book §4.5: <= 6 swing opens + <= 6 modify_tp per decision
+TP_ON_OPEN = "tp_on_open"  # capability: the open route accepts takeProfitRate and the position keeps it
+# the vehicle-class capability a swing entry needs (swing.resolve.SIDE_CAPABILITIES, same values)
+SWING_VEHICLE_CAPS: Mapping[str, tuple[str, ...]] = {"long": ("stock_real_long",), "short": ("stock_cfd_short",)}
 
 VehicleFor = Callable[[str, Direction, int], VehicleChoice | None]
 CostFn = Callable[[str, str, Direction, int], tuple[float, ...]]   # (per side, carry[, fee bps NAV])
@@ -163,6 +185,11 @@ class _Draft:
     fee_drag: float = 0.0
     origin: str | None = None
     ref_level: float | None = None
+    sleeve: str | None = None
+    swing_trade_id: str | None = None
+    tp_rate: float | None = None
+    tp_mode: str | None = None
+    time_stop_date: str | None = None
 
     @property
     def is_close(self) -> bool:
@@ -173,6 +200,57 @@ class _Draft:
         """Counts toward risk.proposal.max_legs: every leg except a risk-reducing leg of a
         reference-origin line."""
         return self.risk_increasing or self.origin != REFERENCE_ORIGIN
+
+    @property
+    def phase(self) -> int:
+        """Plan order: closes, modifications of existing positions, core opens, swing opens, the
+        swing opens' modify_tp legs."""
+        if self.is_close:
+            return 0
+        if self.kind in ("modify_sl", "set_tp"):
+            return 1
+        if self.kind == "open":
+            return 3 if self.sleeve == "swing" else 2
+        return 4
+
+
+@dataclass(frozen=True)
+class SwingOrder:
+    """One swing-book instruction for the planner (built by the cycle from the engine-checked swing
+    lines, or by `set_tp_orders`). Distances are fractions of price; `size_nav` a NAV share."""
+
+    line: str                                   # SW_<ticker>
+    trade_id: str                               # trade:<id>
+    side: Direction
+    action: str                                 # "enter" | "exit" | "set_tp"
+    symbol: str                                 # the broker vehicle symbol
+    instrument_id: int | None = None
+    size_nav: float = 0.0
+    stop_pct: float | None = None
+    target_pct: float | None = None
+    time_stop_date: str | None = None
+    tp_rate: float | None = None                # set_tp: the approved take-profit rate
+    reason: str = ""
+
+
+def set_tp_orders(trades: Iterable[Any]) -> list[SwingOrder]:
+    """`set_tp` orders for every swing trade in `open_tp_missing` that carries its approved target
+    (swing-book §4.4.3: the next swing slot's plan re-sends the take-profit for approval)."""
+    from council.swing.book import line_id
+
+    out: list[SwingOrder] = []
+    for t in trades:
+        if getattr(t, "state", None) != "open_tp_missing" or not getattr(t, "tp_rate", None):
+            continue
+        try:
+            line = line_id(t.ticker)
+        except ValueError:
+            continue
+        out.append(SwingOrder(line=line, trade_id=t.trade_id, side=t.side, action="set_tp",
+                              symbol=t.ticker, instrument_id=t.instrument_id, tp_rate=float(t.tp_rate),
+                              time_stop_date=getattr(t, "time_stop_date", None),
+                              reason=f"{line}: re-send the approved take-profit (open_tp_missing)"))
+    return out
 
 
 def _split_cost(value: tuple[float, ...]) -> tuple[float, float, float]:
@@ -512,6 +590,155 @@ class _Builder:
         self.drafts.append(self.stamp(draft, 0.0))
         return draft
 
+    # ------------------------------------------------------------------ swing book (SW-5)
+    def _swing_marks(self, draft: _Draft, order: SwingOrder) -> _Draft:
+        draft.sleeve, draft.swing_trade_id = "swing", order.trade_id
+        draft.time_stop_date = order.time_stop_date
+        return draft
+
+    def _swing_cost(self, line: str, symbol: str, direction: Direction) -> tuple[float, float, float]:
+        try:
+            return _split_cost(self.cost_bps(line, symbol, direction, 1))
+        except Exception:  # noqa: BLE001 - a core cost table may not know a swing line (swing/costs.py prices it)
+            return 0.0, 0.0, 0.0
+
+    def swing_order(self, order: SwingOrder, positions: list[Position]) -> None:
+        if order.action == "enter":
+            self.swing_entry(order, positions)
+        elif order.action == "exit":
+            if not positions:
+                self.skip(order.line, "swing_exit_no_position")
+            for p in positions:
+                self._swing_marks(self.close(order.line, p, order.reason or f"{order.line}: swing exit"), order)
+        elif order.action == "set_tp":
+            self.swing_set_tp(order, positions)
+        else:
+            self.skip(order.line, "swing_unknown_action")
+
+    def swing_entry(self, order: SwingOrder, positions: list[Position]) -> None:
+        line, direction = order.line, order.side
+        if positions:
+            self.skip(line, "swing_line_already_open")
+            return
+        gaps = self.missing_caps(OPEN_PREREQUISITES)
+        if gaps:
+            self.skip(line, f"capability_missing:{gaps[0]}")
+            return
+        if self.capabilities is not None:
+            caps = SWING_VEHICLE_CAPS.get(direction, ("unknown_side",))
+            if not self.capabilities.allows_vehicle(caps):
+                verified = getattr(self.capabilities, "verified", frozenset())
+                self.skip(line, f"capability_not_proven:{next(c for c in caps if c not in verified)}")
+                return
+        settlement: Settlement = "real" if direction == "long" else "cfd"
+        row = self.eligibility.get(order.symbol)
+        if row is None:
+            self.skip(line, "no_eligibility")
+            return
+        config = select_config(row, direction, 1, settlement=settlement)
+        if config is None:
+            self.skip(line, "no_eligible_vehicle")
+            return
+        quote = bid_ask(self.quotes.get(order.symbol))
+        if quote is None:
+            self.skip(line, "no_quote")
+            return
+        bid, ask = quote
+        if bid > ask:
+            self.skip(line, "crossed_quote")
+            return
+        stop, target = order.stop_pct, order.target_pct
+        if stop is None or not math.isfinite(stop) or not 0 < stop < 1:
+            self.skip(line, "no_stop_distance")
+            return
+        if target is None or not math.isfinite(target) or target <= 0 or (direction == "short" and target >= 1):
+            self.skip(line, "no_target_distance")
+            return
+        size = float(order.size_nav)
+        if not (math.isfinite(size) and size > 0):
+            self.skip(line, "no_size")
+            return
+        price = ask if direction == "long" else bid
+        whole = whole_units_only(row)
+        units = _floor_units(size * self.nav / price, whole)
+        if row.max_units_per_order is not None and units > row.max_units_per_order:
+            units = _floor_units(row.max_units_per_order, whole)
+            self.skip(line, "capped_at_max_units_per_order")
+        exposure = units * price
+        if units <= 0 or exposure < row.min_position_exposure or exposure < config.min_position_amount:
+            self.skip(line, "below_broker_minimum")
+            return
+        if self.below_real_minimum(exposure, 1):
+            self.skip(line, "below_real_minimum")
+            return
+        fitted = fit_to_eligibility(stop, 1, config, buffer_pp=self.sl_buffer_pp)
+        if fitted is None or fitted > stop * (1 + 1e-9) or fitted >= 1:
+            # the approved stop is never widened (it is the thesis's invalidation and S1's loss)
+            self.skip(line, "stop_outside_broker_bounds")
+            return
+        tp_rate = price * (1 + target) if direction == "long" else price * (1 - target)
+        if target * 100 < config.min_tp_pct - 1e-9:
+            mode = "none"
+            self.skip(line, "tp_below_broker_minimum")
+        elif self.capabilities is not None and self.capabilities.allows_vehicle((TP_ON_OPEN,)):
+            mode = "body"
+        else:
+            mode = "patch"
+        per_side, carry, fee = self._swing_cost(line, order.symbol, direction)
+        dw = exposure / self.nav
+        draft = _Draft(
+            key=self._next_key(), kind="open", line=line, symbol=order.symbol,
+            instrument_id=order.instrument_id if order.instrument_id is not None else row.instrument_id,
+            direction=direction, settlement=settlement, leverage=1,
+            delta_w=dw if direction == "long" else -dw, units=units, amount_usd=exposure,
+            risk_increasing=True, reason=order.reason or f"{line}: swing {direction} entry",
+            sl_rate=stop_loss_rate(direction, bid, ask, stop), stop_distance=stop,
+            sl_margin_pct=sl_margin_pct(stop, 1), cost_bps_nav=per_side * dw,
+            carry_bps_day_nav=carry * dw, whole_units=whole, tp_rate=tp_rate, tp_mode=mode,
+        )
+        self.drafts.append(self._swing_marks(self.stamp(draft, fee), order))
+        if mode == "patch":
+            follow = _Draft(
+                key=self._next_key(), kind="modify_tp", line=line, symbol=order.symbol,
+                instrument_id=draft.instrument_id, direction=direction, settlement=settlement,
+                leverage=1, delta_w=0.0, units=units, amount_usd=exposure, risk_increasing=False,
+                reason=f"{line}: take-profit after the entry fill", sl_rate=draft.sl_rate,
+                stop_distance=stop, depends_on=[draft.key], whole_units=whole, tp_rate=tp_rate,
+            )
+            self.drafts.append(self._swing_marks(self.stamp(follow, 0.0), order))
+
+    def swing_set_tp(self, order: SwingOrder, positions: list[Position]) -> None:
+        line, rate = order.line, order.tp_rate
+        if not positions:
+            self.skip(line, "swing_set_tp_no_position")
+            return
+        if rate is None or not math.isfinite(rate) or rate <= 0:
+            self.skip(line, "no_target_rate")
+            return
+        for p in positions:
+            if not p.sl_rate or p.sl_rate <= 0:
+                self.skip(line, "set_tp_without_stop")      # a missing stop is its own alarm
+                continue
+            price = self.close_price(p)
+            if (p.is_buy and rate <= price) or (not p.is_buy and rate >= price):
+                self.skip(line, "target_already_reached")    # the watch flags it; the cycle exits
+                continue
+            row = self.eligibility.get(p.symbol)
+            direction: Direction = "long" if p.is_buy else "short"
+            config = select_config(row, direction, p.leverage, settlement=p.settlement) if row else None
+            if config is not None and abs(rate / price - 1) * p.leverage * 100 < config.min_tp_pct - 1e-9:
+                self.skip(line, "tp_below_broker_minimum")
+                continue
+            draft = _Draft(
+                key=self._next_key(), kind="set_tp", line=line, symbol=p.symbol,
+                instrument_id=p.instrument_id, direction=direction, settlement=p.settlement,
+                leverage=p.leverage, delta_w=0.0, units=p.units, amount_usd=self.exposure(p),
+                risk_increasing=False, reason=order.reason or f"{line}: set the approved take-profit",
+                position_id=p.position_id, sl_rate=p.sl_rate, whole_units=self.whole(p.symbol),
+                tp_rate=float(rate),
+            )
+            self.drafts.append(self._swing_marks(self.stamp(draft, 0.0), order))
+
     # ------------------------------------------------------------------ one line
     def plan_line(self, line: str, target: float, current: float, positions: list[Position]) -> None:
         longs = [p for p in positions if p.is_buy]
@@ -553,20 +780,36 @@ class _Builder:
 
 def _order_and_cap(drafts: list[_Draft], line_rank: Mapping[str, int], cap: int,
                    skip: Callable[[str, str], None], *, total_cap: int | None = None) -> list[_Draft]:
-    """Closes first (largest first), then opens (largest first); keep at most `cap` COUNTED legs
-    (`_Draft.counted`) and at most `total_cap` legs in all (None: no total cap), dropping from the
-    tail; then drop every leg whose dependency was dropped."""
+    """Order by `_Draft.phase` (closes, modifications, core opens, swing opens, modify_tp), largest
+    first inside a phase; keep at most `cap` COUNTED core legs (`_Draft.counted`) and at most
+    `total_cap` core legs in all (None: no total cap), dropping from the tail; swing legs never
+    count toward those caps and are capped at MAX_SWING_OPENS opens and as many modify_tp legs; then
+    drop every leg whose dependency was dropped."""
     ordered = sorted(
         drafts,
-        key=lambda d: (0 if d.is_close else 1, -abs(d.delta_w), line_rank.get(d.line, 999), d.key),
+        key=lambda d: (d.phase, -abs(d.delta_w), line_rank.get(d.line, 999), d.key),
     )
     kept: list[_Draft] = []
-    counted = 0
+    counted = core = swing_opens = swing_tps = 0
     for d in ordered:
-        if (d.counted and counted >= cap) or (total_cap is not None and len(kept) >= total_cap):
+        if d.sleeve == "swing":
+            if d.kind == "open":
+                if swing_opens >= MAX_SWING_OPENS:
+                    skip(d.line, "swing_leg_cap")
+                    continue
+                swing_opens += 1
+            elif d.kind == "modify_tp":
+                if swing_tps >= MAX_SWING_OPENS:
+                    skip(d.line, "swing_leg_cap")
+                    continue
+                swing_tps += 1
+            kept.append(d)
+            continue
+        if (d.counted and counted >= cap) or (total_cap is not None and core >= total_cap):
             skip(d.line, "leg_cap")
             continue
         kept.append(d)
+        core += 1
         counted += int(d.counted)
     changed = True
     while changed:
@@ -624,6 +867,9 @@ def _assemble(
                 depends_on=[seq_of[k] for k in d.depends_on], whole_units=d.whole_units,
                 origin=d.origin if d.origin in ("reference", "discretionary") else None,  # type: ignore[arg-type]
                 ref_level=d.ref_level, fee_bps_nav=d.fee_bps_nav, fee_drag=d.fee_drag,
+                sleeve="swing" if d.sleeve == "swing" else None, swing_trade_id=d.swing_trade_id,
+                tp_rate=d.tp_rate, tp_mode=d.tp_mode,  # type: ignore[arg-type]
+                time_stop_date=d.time_stop_date,
             )
         )
     touched = {d.line for d in kept}
@@ -664,6 +910,8 @@ def build_plan(
     economics: TradeEconomics | None = None,
     gap_ref: GapRef | None = None,
     capabilities: Any | None = None,
+    swing: Iterable[SwingOrder] | None = None,
+    swing_map: Any = None,
 ) -> Plan:
     """Legs that move the lines in `target_w` from `snapshot` to their targets. See the module
     rules: ONLY lines present in `target_w` are planned (pass `changed_targets(decision)`), and a
@@ -677,11 +925,17 @@ def build_plan(
     floor and the fee drag; `gap_ref` arms the gap guard. `capabilities` (M5-D1, connected broker only; None = no gate):
     without `partial_close` a trim is skipped (a full exit still works); without `rates_entitled` or
     `price_units` no open is planned; an open's vehicle class must be verified. A flatten uses
-    `build_flatten_plan`."""
+    `build_flatten_plan`. `swing` / `swing_map`: the swing-book orders and the live swing vehicle
+    map (module rules)."""
     if not (math.isfinite(nav_usd) and nav_usd > 0):
         raise ValueError("nav_usd must be positive")
+    from council.swing.book import is_swing_line
+
     universe = policy.universe
     v2l = vehicle_to_line(universe)
+    if swing_map is not None:
+        v2l = swing_map.merged_lines(v2l)
+    orders = list(swing or [])
     line_rank = {line.symbol: i for i, line in enumerate(universe.lines)}
     proposal = policy.risk["proposal"]
     cap = int(proposal["max_legs"]) if max_legs is None else max_legs
@@ -711,13 +965,23 @@ def build_plan(
     line_gross = {line: sum(b.exposure(p) / nav_usd for p in ps) for line, ps in by_line.items()}
 
     for line in sorted(target_w, key=lambda s: (line_rank.get(s, 999), s)):
+        if is_swing_line(line):             # planned from the swing orders only
+            if not any(o.line == line for o in orders):
+                b.skip(line, "swing_line_without_order")
+            continue
         if line not in line_rank:
             if not line.startswith(UNMAPPED_PREFIX):     # unmapped: already noted as locked
                 b.skip(line, "unknown_line")
             continue
         b.plan_line(line, float(target_w[line]), current.get(line, 0.0), by_line.get(line, []))
 
-    # Structural guarantee: only target lines were planned (plan_line never touches another line).
+    for order in orders:
+        if not is_swing_line(order.line):
+            b.skip(order.line, "swing_order_not_a_swing_line")
+            continue
+        b.swing_order(order, by_line.get(order.line, []))
+
+    # Structural guarantee: only target lines and swing-order lines were planned.
     kept = _order_and_cap(b.drafts, line_rank, cap, b.skip, total_cap=total_cap)
     return _assemble(
         kept, current=current, line_gross=line_gross, locked_gross=locked_gross,
