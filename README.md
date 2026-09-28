@@ -45,6 +45,11 @@ before it can be executed.**
 See [`policy/risk.yaml`](policy/risk.yaml) — every number the risk engine uses, versioned and hashed
 into each cycle. Changing it is a tagged policy change recorded in [CHANGELOG.md](CHANGELOG.md).
 
+A swing book of single-stock trades (long, and short through 1× CFDs with a hard stop) is being
+built beside the core book. Its parameters are in [`policy/swing.yaml`](policy/swing.yaml) and its
+hard ceilings in code (at most 6 open trades, 6 new trades a week, 8% of NAV each); it does not
+trade until a go-live commit flips `SWING_BOOK_LIVE`, and a human still approves every order.
+
 ## What counts as evidence
 Only forward, sealed cycles. Language models have read the history we could backtest on, so no
 council backtest is ever shown. The mechanical reference book's backtest is labelled as in-sample.

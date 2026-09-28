@@ -8,6 +8,10 @@ Files in the policy directory (top level only; `variants/` is research, never lo
 - `stock-rank.yaml` (optional; required when a sleeve is present): `Policy.stocks`.
 - `calendar-*.yaml`: merged into `Policy.calendar` (lists concatenated in file-name order).
 - `risk.yaml`, `reference.yaml`, `costs.yaml`, `council.yaml`.
+- `swing.yaml` (optional): the swing book's parameters, `Policy.swing` (`council.swing.policy`).
+  Loaded, validated and hashed like every other file; `council.invariants.check_swing_policy`
+  refuses a file looser than the code ceilings. Nothing trades on it while
+  `invariants.SWING_BOOK_LIVE` is False.
 
 Line identity is validated when the policy loads, never mid-cycle: every line id matches the public
 `LINE_PATTERN` and does not start with `UNMAPPED`, and line ids, vehicle symbols and aliases form ONE
@@ -40,6 +44,7 @@ from pydantic import (
 
 from council.paths import POLICY_DIR
 from council.publish.public_models import LINE_PATTERN  # the one definition of a line id
+from council.swing.policy import SWING_FILE, SwingPolicy
 
 AssetClass = Literal["stock", "etf", "crypto", "index", "commodity", "fx"]
 Sleeve = Literal["core", "crypto", "overlay", "satellite"]
@@ -406,6 +411,7 @@ class Policy(BaseModel):
     calendar: dict[str, Any]
     sha256: str
     stocks: dict[str, Any] = Field(default_factory=dict)
+    swing: SwingPolicy | None = None
 
     @model_validator(mode="after")
     def _validate_sleeve_config(self) -> Policy:
@@ -453,6 +459,8 @@ class Policy(BaseModel):
             council=_load("council.yaml", directory),
             calendar=_load_calendars(directory),
             stocks=stocks,
+            swing=SwingPolicy.model_validate(_load(SWING_FILE, directory))
+            if (directory / SWING_FILE).exists() else None,
             sha256=policy_sha256(directory, exclude=() if include_sleeve else (SLEEVE_FILE,)),
         )
 

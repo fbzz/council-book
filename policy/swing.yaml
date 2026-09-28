@@ -1,0 +1,126 @@
+# The swing book (design swing-book.md rev 2, §3; the user's decisions of 2026-09-27).
+# Loaded by `council.policy.Policy.load` as `Policy.swing`, validated by `council.swing.policy`
+# and checked against the code ceilings in `council.invariants` (this file may be STRICTER, never
+# looser). Every number here is part of the policy hash; a change is a tagged policy change with a
+# CHANGELOG entry. Nothing here trades while `invariants.SWING_BOOK_LIVE` is False.
+version: 1
+
+size:                          # S1: weights of the virtual NAV
+  target_nav: 0.08             # ~8% per trade (the user's decision)
+  min_nav: 0.04                # below this after the stop sizing -> drop stop_too_wide_for_size
+  max_loss_nav_at_stop: 0.008  # long: size = min(target, 0.008 / stop_pct)
+  short_max_loss_nav_at_stop: 0.005
+  short_si_unknown_mult: 0.5   # unknown short interest halves a short
+
+capacity:                      # S2, S3, S4
+  max_open: 6                  # up to 6 open swing positions (proposed-unexecuted entries count)
+  max_short: 2
+  max_new_7d: 6                # the user's decision: at most 6 new trades per rolling 7 days (a ceiling, not a quota)
+  max_open_risk_nav: 0.04      # sum of size x stop x gap multiplier over open + proposed trades
+  open_risk_gap_mult: 1.5
+
+stops:                         # S5: mandatory, only ever moved toward safety
+  min_pct: 0.02
+  max_long_pct: 0.12
+  max_short_pct: 0.08
+  min_atr_mult: 1.0
+
+targets:                       # S6
+  min_cost_mult: 3.0           # target >= 3 x round-trip cost
+  min_net_rr: 1.2              # (target - cost) / (stop + cost) >= 1.2 (the user kept it)
+  max_pct: 0.30
+  max_vol_mult: 1.5            # target <= 1.5 x sigma_daily x sqrt(time-stop sessions)
+  max_sigma_daily: 0.04
+
+time_stop:                     # S7
+  max_sessions: 15
+  min_sessions: 3
+  max_extension_sessions: 5    # the PM may extend once, with a new cited fact
+  max_total_sessions: 20
+
+liquidity:                     # S8
+  min_adv_usd: 50_000_000
+  min_price_usd: 10
+  short_min_adv_usd: 200_000_000
+
+earnings:                      # S9
+  no_entry_within_sessions: 3
+  exit_before_sessions: 1
+  post_report_wait_h: 30
+  estimated_window_days: 5
+  exit_proposal_lead_slots: 2
+  urgent_after_unapproved_slots: 3
+  exit_mode: proposal          # Q-S5: pre-earnings exits are exit proposals; never an automated write
+
+correlation:                   # S10
+  max_open_per_bucket: 2
+  same_bet_corr: 0.60
+  max_swing_net_beta: 0.30
+
+chase:                         # S11 (code gate + the Skeptic's prior)
+  max_move_since_news_sigma: 3.0
+  prior_wait_sigma: 2.0
+
+fees:                          # S12: the user's decision: a REPORTED metric, never a brake stricter
+  mode: report                 # than the weekly cap (report = measured and published pass/fail only;
+  budget_30d_nav_bps: 100      # entries are not refused on it, and the S12(b) throttle is off)
+  min_closed_for_ratio: 10
+  max_fee_to_gross: 0.333
+
+shorts:                        # S13: 1x CFD shorts with a hard broker stop
+  min_listing_days: 180
+  max_si_pct_float: 20
+  no_short_after_down_sigma: 3.0
+  no_short_ret20_above: 0.20
+  near_high_pct: 0.03
+  near_high_vol_ratio: 3.0
+  takeover_lookback_days: 90
+
+cooloff:                       # S14
+  after_stop_sessions: 5
+  after_exit_sessions: 2
+
+brake:                         # S15: net of all costs; lifted only by the operator
+  window_days: 30
+  pnl_nav: -0.05
+  net_of_all_costs: true
+
+entry_guard:                   # S16: entries are market orders at approval
+  valid_minutes: 60            # Q-S11: approve within 60 minutes of the cycle
+  max_run_stop_frac: 0.5
+  max_run_pct: 0.015
+  max_reproposals: 2
+
+drawdown_scale:                # S17: at -10% of the lifetime peak
+  from_peak: -0.10
+  size_nav: 0.04
+  max_open: 3
+
+slots:                         # SB2 / Q-S8: US slots whose session is >= 60 min old and >= 30 min from the close
+  summer_utc: ["14:40", "18:40"]
+  winter_utc: ["18:40"]        # from 2 Nov 2026: 18:40 UTC only (no extra 15:40 slot)
+  min_session_age_min: 60
+  min_to_close_min: 30
+
+llm:                           # §5
+  max_calls_per_slot: 9
+  deadline_s: 360
+  max_skeptic_calls: 3         # one Skeptic call per idea, at most 3 ideas
+  pm_replicates: 3
+  pm_entry_votes: 2
+  skeptic_model: glm-5.3-flash:cloud   # Q-S9: a different model family from the Scout
+  skeptic_model_family: other
+
+budget:
+  idle: cash                   # Q-S1: idle swing budget stays in cash
+
+public_record:                 # §7.3
+  declared_cost_pct_per_leg: 1.25   # public R is net of this declared cost per leg (percent of position)
+  percent_only: true
+
+tracking:
+  paper_track_every_idea: true # SB12: every idea (passes, waits, drops) is tracked for measurement
+  paper_run_before_live: false # the user's decision: no paper run; live once built and smoke-tested
+
+setups_live: [news_continuation, post_earnings_drift, second_order]   # SB16
+setups_paper_only: [gap_fade, breakout, mean_reversion, event_run_up]

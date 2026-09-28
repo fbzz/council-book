@@ -56,6 +56,42 @@ The PM may move up to three lines per cycle, inside **bands** set by code:
 
 BTC and ETH are reference-only in v1: at about 1% per side, council tilts cannot pay for themselves.
 
+## Swing book (being built; not live)
+A separate, agent-driven book of stock swing trades replaces the mechanical stock sleeve as the
+trading path for single stocks (the sleeve's SQ-8 rule stays as a public paper benchmark, never
+traded). A Scout reads the news and a code-built movers screen and names ideas; code resolves each
+ticker and attaches a fact card; a Skeptic on a different model family (blind to the Scout's pitch)
+checks whether the move is already priced in; a swing bull, bear and PM (3 replicates) decide.
+A swing trade is its own ledger object with a broker stop, a take-profit and a time stop, long
+(real shares, 1×) or short (a 1× CFD with a stop at most 8% away). Every number is in
+`policy/swing.yaml` (loaded as `Policy.swing`, hashed with the rest of the policy); the code
+ceilings it may never loosen are in `invariants.py`: at most 6 open trades, 2 shorts, 8% of NAV
+per trade, 6 new trades per rolling 7 days, a planned loss at the stop of at most 0.8% of NAV
+(long) or 0.5% (short). `SWING_BOOK_LIVE = False` keeps it out of live trading until the go-live
+commit; `STOCK_SLEEVE_LIVE` stays False for good. Every idea is paper-tracked for measurement, and
+public results are net of a declared cost of 1.25% of the position per leg.
+
+The swing data layer (`src/council/swing/`) is code only, no model calls:
+- **`intake.py`:** reads SEC 8-K / 6-K filings for any filer with a ticker, not only held names. It
+  keeps each filing's item codes and official item titles, and puts priority items first (25 at
+  most). It also passes through broker-feed items and builds the Scout's reading list.
+- **`screen.py`:** an after-close screen built once per US trading day from completed Alpaca SIP
+  daily bars. It makes four lists of facts, not picks: big movers, volume spikes, filings with no
+  price move, and laggards in sectors that moved. It has its own pacing, request budget and 429
+  breaker, and never reads live rates.
+- **`resolve.py`:** takes the exact symbol, finds the SEC CIK, and makes one eToro eligibility
+  request per slot, checked for the trade's side (`real/long/1` or `cfd/short/1`). It then runs the
+  capability gate and saves the result to `InstrumentMap`. With no broker it fails closed.
+- **`facts.py`:** builds a fact card with a completed-bar layer and a private live layer:
+  - how the stock reacted since the news: gap, move in % and in σ, volume ratio, and the sector
+    and index moves over the same window;
+  - context: 52-week distance, trend, volatility and beta, returns, earnings, FINRA short interest
+    (`data/finra.py`), SEC fundamentals and correlations.
+- **`costs.py`:** the private round-trip cost. The fee term uses a reference of 0.75 × the funded
+  NAV, so the gates give the same result at any NAV. Short CFD positions add overnight carry.
+- **`slots.py`:** allows a swing slot only when the US session has been open for at least 60 minutes
+  and has at least 30 minutes left. It follows daylight saving time: 18:40 UTC only in winter.
+
 ## Evidence and timing
 Every fact carries the time it became available. A cycle may only use facts available at its slot
 start, and only completed bars. A lookahead test mutates everything at or after the slot and checks

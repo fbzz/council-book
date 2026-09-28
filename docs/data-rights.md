@@ -62,6 +62,52 @@ table above:
 | Site | Map of the book | Tile areas are the lines' published `|weight_x|` (and `cash_x`); each asset-class box is the sum of its lines' tiles, and its header shows that sum in %. Nothing else is drawn. |
 | Site | A line's weight across runs | From each published run: `reference[line].weight_ref_x`, the council's `risk.raw_x`, and the executed book, only where the record knows it: for `completed`, `execution.achieved_x` else `risk.final_x`; for `completed_partial`, `achieved_x`, else the unchanged `risk.base_x` when the plan had a leg on the line, else `final_x`; for `rejected`, `expired`, `superseded` and `reviewed_no_action`, the unchanged `risk.base_x` (nothing traded); for every other state (blocked, execution unknown, approved, executing, proposed, sealed) `achieved_x` if an execution record has the line, else nothing (the outcome is not known yet); nothing for a rehearsal. All in % of the portfolio. |
 
+## Draft — the swing book (not in force)
+
+**Draft, not yet in force** (swing-book design rev 2, work package SW-0). Nothing below is read or
+published until the swing book is built and `invariants.SWING_BOOK_LIVE` flips in the go-live commit;
+the Alpaca rows take effect only after the operator reads Alpaca's free-plan terms (user decision
+Q-S10). Until then every Alpaca-derived swing field renders withheld (`unknown_source`) and the rows
+above stay the rule.
+
+| Source | Used for | Agents read it | The public record may show |
+|---|---|---|---|
+| Alpaca market data, free plan, widened (personal use; the operator's own keys) | Daily SIP bars for the movers screen (about 600 names) and the swing fact card's completed-bar layer; minute bars for the paper-tracking reference price; volume used privately for liquidity and volume ratios | Yes, as derived percentages and buckets | Derived percentages of completed sessions only (fact card fields below). No prices, no volumes, no dollar volume, no price series, no minute data. |
+| Broker live rate at the swing slot (agent-portfolio read token) | The fact card's live layer (`move_since_news_live_*`, `move_today_live_*`), the chase gate | Yes | Nothing: withheld (`broker_data`), as for every broker rate. |
+| FINRA equity short interest (bi-monthly, public source) | `short_interest_pct_float` for the short rules and the Skeptic's crowding field | Yes | Nothing: never published (the Skeptic's crowding label may appear, never the figure). |
+| SEC companyfacts and filing metadata (public domain) | Swing fact card fundamentals and catalyst item codes | Yes | Derived percentages and the form, item codes and official item titles. |
+| Broker eligibility for a swing ticker (agent-portfolio read token) | The swing code gate (side, settlement, leverage, stop/target permission) | No (pass/fail and drop code only) | The drop code only. Never instrument identifiers, SL/TP bounds or precision. |
+
+Swing fact card fields (completed-bar layer; in the public swing idea's `facts` once Q-S10 is resolved):
+
+| Field | Value shown | Otherwise (`withheld`) |
+|---|---|---|
+| `news_age_sessions`, `gap_pct`, `move_since_news_close_pct`, `move_since_news_close_sigma` | Yes, rounded | `unknown_source` until Q-S10 |
+| `vol_ratio_last`, `vol_ratio_since` | Bucket only: `<1 / 1–2 / 2–4 / >4` | `unknown_source` until Q-S10 |
+| `sector_move_since_pct`, `spx_move_since_pct`, `ndx_move_since_pct`, `rel_move_since_pct` | Yes, rounded | `unknown_source` until Q-S10 |
+| `dist_52w_high_pct`, `dist_52w_low_pct`, `trend`, `atr14_pct`, `sigma_daily`, `beta_60d`, `ret_5d`, `ret_20d`, `ret_60d` | Yes, rounded | `unknown_source` until Q-S10 |
+| `adv_usd_20d` | Bucket only: `<50M / 50–200M / >200M` | — |
+| `earnings_next`, `earnings_confirmed`, `earnings_last_sessions_ago` | Date and confirmed / estimated | — |
+| `rev_yoy`, `rev_accel`, `gm_chg`, `om_chg`, `filing_age_d` (SEC) | Yes, rounded | — |
+| `catalyst_items` | SEC: form, item codes and official titles; broker feed: the `N:` id only | — |
+| `move_since_news_live_*`, `move_today_live_*` | Never | `broker_data` |
+| `short_interest_pct_float` | Never | `not_publishable` |
+| `cost_rt_pct` and every actual fee | Never | — |
+
+The swing public record (`policy/swing.yaml` `public_record`):
+
+| Document | Field | Meaning |
+|---|---|---|
+| Cycle | swing ideas | Every Scout idea, including dropped and paper-only ones: ticker, side, setup, cited ids, the cleaned catalyst claim and thesis, stop and target as % distances from entry, time stop in sessions, the stage reached and the drop code. |
+| Cycle | Skeptic verdicts | Verdict, labels (priced in, news status, regime, crowding), the two catalyst checks, any code override, the model family, and the cleaned reasons. |
+| Book | swing trades | Weight (x NAV), side, days held, stop and target %, whether the target sits at the broker, the time-stop date and the state. |
+| Book | swing results | R, P/L in % of the position and contribution in bps of NAV, all **net of the declared cost of 1.25% of the position per leg** (plus the cost-route carry for shorts, in % of position). The declared cost is at or above the actual cost at any NAV where entries are allowed, so it reveals only an upper bound; the actual net figures stay operator-only. |
+| Book | fee budget (S12) | Pass / fail only; never the fee total. |
+| Site | Skeptic health | Canary caught / missed, pass rate over 20, rejects over the last 10, alarm. Canary ideas never appear in the idea list. |
+
+Never, for a swing trade: prices, entry or exit rates, stop or target rates, units, amounts, instrument
+or position identifiers, short interest, dollar volume, or the real funding.
+
 ## Never published, whatever the source
 
 - Money: dollar or euro amounts, account equity, cash, balances, P&L in currency.

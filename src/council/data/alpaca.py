@@ -57,6 +57,7 @@ FEED = "sip"
 ADJUSTMENT = "all"
 PAGE_LIMIT = 10_000              # bars per page (Alpaca's maximum), across the request's symbols
 SYMBOLS_PER_REQUEST = 12         # ~12 x 630 trading days fits one page
+MAX_SYMBOLS_PER_REQUEST = 200    # the swing screen's short windows (~45 sessions): 100+ symbols a page
 MAX_PAGES = 20
 END_LAG = timedelta(minutes=20)
 _SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.]{0,14}$")
@@ -216,12 +217,15 @@ def fetch_daily(
     now: datetime | None = None,
     reserve: Callable[[], None] | None = None,
     retries: int = DEFAULT_RETRIES,
+    max_symbols: int = SYMBOLS_PER_REQUEST,
 ) -> dict[str, pd.DataFrame]:
     """{ticker: adjusted daily bars from `start`, available at `now`} for up to SYMBOLS_PER_REQUEST
     history tickers (policy spelling, e.g. BRK-B), in one request (plus continuation pages).
 
     `reserve` is called before every page is requested (the caller's request budget and time
-    budget; it raises to stop). A ticker Alpaca returns nothing for maps to empty bars."""
+    budget; it raises to stop). A ticker Alpaca returns nothing for maps to empty bars.
+    `max_symbols` (at most MAX_SYMBOLS_PER_REQUEST) lets a short-window caller (the swing screen)
+    put more symbols in one request; the feed is always SIP and only completed days are kept."""
     if keys is None:
         raise DataError("alpaca: no API keys configured")
     symbols: dict[str, str] = {}
@@ -229,8 +233,9 @@ def fetch_daily(
         symbols.setdefault(alpaca_symbol(ticker), ticker)
     if not symbols:
         return {}
-    if len(symbols) > SYMBOLS_PER_REQUEST:
-        raise ValueError(f"at most {SYMBOLS_PER_REQUEST} symbols per alpaca request")
+    limit = min(int(max_symbols), MAX_SYMBOLS_PER_REQUEST)
+    if len(symbols) > limit:
+        raise ValueError(f"at most {limit} symbols per alpaca request")
     asof = to_utc(now or utcnow())
     start_s = start.isoformat()[:10] if isinstance(start, date | datetime) else str(start)[:10]
     params: dict[str, Any] = {

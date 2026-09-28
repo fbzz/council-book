@@ -1,5 +1,42 @@
 # Changelog
 
+## swing book SW-0: decision record, invariants, `policy/swing.yaml` — policy change (2026-09-27)
+- **Policy change**: new `policy/swing.yaml` (v1), loaded as `Policy.swing`, strictly validated
+  (unknown keys, strings or booleans for numbers, and inconsistent pairs are refused) and part of the
+  policy hash, so the hash changes. It carries every swing rule S1–S17 of the design (swing-book.md
+  rev 2 §3) with the user's decisions of 2026-09-27: up to 6 open swing positions at ~8% of NAV
+  each, at most 2 shorts, **at most 6 new trades per rolling 7 days** (the design's default was 3),
+  the S12 fee budget as a **reported metric only** (`fees.mode: report`: no entry is refused on it and
+  the S12(b) throttle is off; the weekly cap is the only frequency brake), net reward ≥ 1.2× risk,
+  entries valid 60 minutes, a winter swing slot at 18:40 UTC only, pre-earnings exits as exit proposals
+  (`earnings.exit_mode: proposal`; an automated write is not expressible), idle swing budget in cash,
+  the Skeptic on `glm-5.3-flash:cloud` (a different family from the Scout), public R net of a declared
+  1.25% per leg, every idea paper-tracked, and no paper run before live
+  (`tracking.paper_run_before_live: false`). Nothing trades on it: no code reads `Policy.swing` for
+  decisions yet, and `invariants.SWING_BOOK_LIVE` is False.
+- **Invariants** (`src/council/invariants.py`): `STOCKS_REAL_LONG_1X` is split into
+  `STOCK_LONGS_REAL_1X = True` and `STOCK_SHORTS_CFD_1X_WITH_STOP = True` (the old name stays as an
+  alias). **Looser than today**: stock shorts become expressible, only as 1× CFDs with a stop ≤ 8%, and
+  only in the swing book; universe stock lines stay real, long-only and unlevered (unchanged check).
+  **`STOCK_SLEEVE_LIVE = False` is unchanged**; new `SWING_BOOK_LIVE = False` beside it. New code
+  ceilings the policy may only tighten: `SWING_MAX_OPEN = 6`, `SWING_MAX_SHORT = 2`,
+  `SWING_MAX_SIZE_NAV = 0.08`, `SWING_MAX_NEW_7D = 6`, `SWING_MAX_LONG_LOSS_NAV = 0.008`,
+  `SWING_MAX_SHORT_LOSS_NAV = 0.005`, long / short stop ≤ 12% / 8%, open risk ≤ 4% NAV at a gap
+  multiplier ≥ 1.5, time stop ≤ 20 sessions, net reward/risk ≥ 1.2, entry validity ≤ 60 minutes,
+  ≤ 9 model calls per swing slot, declared public cost ≥ 1.25% per leg; the S15 brake fires at a
+  30-day net loss no deeper than −5% of NAV over ≥ 30 days, and S17 scaling starts no later than −10%
+  from the peak at ≤ 4% of NAV and ≤ 3 open trades (the policy may tighten these protections, never
+  switch them off). `check_policy` also refuses `llm.skeptic_model_family: other` when the Skeptic
+  model equals the Scout's `council.yaml` model (and `same` when it differs). `check_policy` runs
+  `check_swing_policy` whenever the file exists; a looser file fails with every breach listed.
+- A policy directory without `swing.yaml` (a HEAD snapshot from before this change) still loads,
+  with `Policy.swing = None`.
+- Docs: `docs/architecture.md` "Swing book", a README paragraph, and **draft** `docs/data-rights.md`
+  rows (widened Alpaca use, the broker live rate, FINRA short interest, swing eligibility, the fact
+  card fields and the swing public record), not in force until the swing book goes live and the
+  Alpaca terms are checked (Q-S10).
+- Tests: `tests/policy/test_swing_policy.py`.
+
 ## Runbook v2 and onboarding docs (2026-09-27)
 - `docs/runbook.md` rewritten for token day and after: pre-token steps, token day in order (keys,
   live-read checks, the mirror ratio, instrument resolution, smoke tickets S1–S6 with their

@@ -56,8 +56,9 @@ UNCHECKED = "stock_eligibility_unchecked"
 REASONS = (
     "not_found", "ambiguous", "open_not_allowed", "close_not_allowed", "partial_close_not_allowed",
     "no_real_long_1x", "sl_bounds", "requires_w8ben", "units_not_allowed", "trade_unit_type",
-    "whole_unit_price", "no_quote", "bad_symbol",
+    "whole_unit_price", "no_quote", "bad_symbol", "no_cfd_short_1x",
 )
+SIDES = ("long", "short")
 _BROKER_SYMBOL = TypeAdapter(BrokerSymbol)          # the sleeve file's own field type
 
 
@@ -123,6 +124,24 @@ def real_long_1x(row: EligibilityRow) -> LeverageConfig | None:
     return None
 
 
+def cfd_short_1x(row: EligibilityRow) -> LeverageConfig | None:
+    """The row's short / 1x / CFD / non-potential config that lets us set and edit a stop, or None
+    (the swing book's short vehicle, design swing-book.md §3.4). Same fail-closed read as
+    `real_long_1x`."""
+    for c in getattr(row, "stock_configs", None) or []:
+        if (c.direction == "short" and 1 in c.leverage_values and c.settlement == "cfd"
+                and not c.is_potential and c.allow_sl_tp and c.allow_edit_stop_loss):
+            return c
+    return None
+
+
+def side_config(row: EligibilityRow, side: str) -> LeverageConfig | None:
+    """`real_long_1x` for a long, `cfd_short_1x` for a short."""
+    if side not in SIDES:
+        raise ValueError(f"unknown side {side!r}")
+    return real_long_1x(row) if side == "long" else cfd_short_1x(row)
+
+
 def sl_bounds_ok(config: LeverageConfig, cfg: GateConfig) -> bool:
     """Every stop distance in [floor, cap] fits the config's SL% bounds after the buffer (1x: SL% =
     distance x 100), so no stop is ever widened or refused for this name."""
@@ -132,9 +151,11 @@ def sl_bounds_ok(config: LeverageConfig, cfg: GateConfig) -> bool:
 
 
 def check_row(requested: str, row: EligibilityRow, quote: Quote | None, cfg: GateConfig, *,
-              now: datetime, closing_only: bool = False) -> Verdict:
+              now: datetime, closing_only: bool = False, side: str = "long") -> Verdict:
     """Every condition on one row. `closing_only` (a credited or retiring line that is only ever
-    sold) checks only that the position can be closed."""
+    sold) checks only that the position can be closed. `side="short"` (the swing book) asks for the
+    1x CFD short config instead of the real long one (`no_cfd_short_1x`); every other check is the
+    same."""
     reasons: list[str] = []
     whole = not fractional_units(row)          # an absent or unknown quantity type counts as whole units
     if not recordable(row.symbol):
@@ -146,9 +167,9 @@ def check_row(requested: str, row: EligibilityRow, quote: Quote | None, cfg: Gat
             reasons.append("open_not_allowed")
         if not row.allow_partial_close:
             reasons.append("partial_close_not_allowed")
-        config = real_long_1x(row)
+        config = side_config(row, side)
         if config is None:
-            reasons.append("no_real_long_1x")
+            reasons.append("no_real_long_1x" if side == "long" else "no_cfd_short_1x")
         elif not sl_bounds_ok(config, cfg):
             reasons.append("sl_bounds")
         if w8ben_required(row):
@@ -178,9 +199,11 @@ def _quotes(read: Any, rows: Iterable[EligibilityRow], now: datetime) -> dict[in
 
 
 def check_symbols(read: Any, symbols: Sequence[str], cfg: GateConfig, *, now: datetime,
-                  closing_only: Iterable[str] = ()) -> dict[str, Verdict]:
+                  closing_only: Iterable[str] = (), side: str | Mapping[str, str] = "long") -> dict[str, Verdict]:
     """The gate for exact symbols: ONE eligibility request (the READ client batches at most 100 per
-    POST) and one rates request for the names with exactly one row."""
+    POST) and one rates request for the names with exactly one row. `side` is one side for every
+    symbol, or {symbol: side} (the swing book asks for longs and shorts in the same request; a
+    symbol missing from the mapping is judged long)."""
     wanted = list(dict.fromkeys(symbols))
     if not wanted:
         return {}
@@ -196,8 +219,9 @@ def check_symbols(read: Any, symbols: Sequence[str], cfg: GateConfig, *, now: da
             out[symbol] = Verdict(symbol, False, ("not_found",), checked_at=now)
         else:
             row = single[key]
+            which = side if isinstance(side, str) else side.get(symbol, "long")
             out[symbol] = check_row(symbol, row, quotes.get(row.instrument_id), cfg, now=now,
-                                    closing_only=key in sell_only)
+                                    closing_only=key in sell_only, side=which)
     return out
 
 
