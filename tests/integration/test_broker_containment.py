@@ -184,10 +184,15 @@ def test_v7_halt_flatten_is_keyed_by_minute_and_the_watch_survives(tmp_path, rem
     approve(flat.decision_id, deps)
     payload = ctx.ledger.get_runtime(f"exec_report:{flat.decision_id}")
     assert payload["cycle_id"] is None and payload["decision_ref"] == flat.decision_id
+    published = []
     for _ in range(2):                                    # the next watches do not crash
         fclock.advance(900)
         w = run_watch(ctx)
-        assert flat.decision_id not in w.executions_published   # publication itself: M5-N
+        assert not any(f.startswith("execution_unpublished") for f in w.alerts)
+        published += w.executions_published
+    assert published == [flat.decision_id]               # M5-N: once, under its own id
+    month = flat.decision_id[:7].replace("-", "/")
+    assert (remote_clone / "journal" / "executions" / month / f"{flat.decision_id}.json").exists()
 
 
 def test_a_bad_execution_record_is_flagged_and_retried(tmp_path):

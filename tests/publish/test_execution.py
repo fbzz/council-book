@@ -96,7 +96,7 @@ def test_execution_summary(execution):
     assert execution.approved_slot == datetime(2026, 10, 1, 14, 40, tzinfo=UTC)
     assert execution.completed_slot == datetime(2026, 10, 1, 14, 40, tzinfo=UTC)
     assert execution.achieved_x == {"NDX": 0.35, "SEMIS": 0.075, "BTC": 0.13}
-    assert execution.achieved_drift_x == 0.051
+    assert execution.achieved_drift_x == 0.05       # from the snapped weights: EURUSD rejected (M5-N)
     assert execution.cost_bp_total == 2.1                              # executed legs only (0.6 + 1.5)
     assert execution.flags == ["unmapped_symbols_dropped:1"]
 

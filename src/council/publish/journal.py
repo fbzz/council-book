@@ -32,6 +32,7 @@ from pydantic import BaseModel, ValidationError
 from council.publish import commit_reveal
 from council.publish.public_models import (
     CYCLE_ID_PATTERN,
+    DECISION_REF_PATTERN,
     PublicBook,
     PublicCommitment,
     PublicCycleV1,
@@ -52,6 +53,7 @@ SWING_PATH = f"{JOURNAL}/swing/latest.json"
 OPS_PATH = f"{JOURNAL}/ops/cycles.jsonl"
 INCIDENTS_DIR = f"{JOURNAL}/incidents"
 _CYCLE_ID = re.compile(CYCLE_ID_PATTERN)
+_DECISION_REF = re.compile(DECISION_REF_PATTERN)
 _INCIDENT_ID = re.compile(r"^INC-(\d{4})$")
 
 
@@ -77,8 +79,12 @@ def reveal_path(cycle_id: str) -> str:
     return f"{JOURNAL}/cycles/{_month(cycle_id)}/{cycle_id}.reveal.json"
 
 
-def execution_path(cycle_id: str) -> str:
-    return f"{JOURNAL}/executions/{_month(cycle_id)}/{cycle_id}.json"
+def execution_path(key: str) -> str:
+    """A cycle's execution file, or (M5-N) a decision's without a cycle: `<minute>-flatten` or
+    `<minute>-smoke-<step>`, which never collides with a cycle's file."""
+    if _DECISION_REF.match(key):
+        return f"{JOURNAL}/executions/{key[0:4]}/{key[5:7]}/{key}.json"
+    return f"{JOURNAL}/executions/{_month(key)}/{key}.json"
 
 
 def incident_path(incident_id: str) -> str:
@@ -138,7 +144,7 @@ def swing_files(book: PublicSwingBook) -> dict[str, bytes]:
 
 
 def execution_files(execution: PublicExecution) -> dict[str, bytes]:
-    return {execution_path(execution.cycle_id): dump_json(execution)}
+    return {execution_path(execution.key): dump_json(execution)}
 
 
 def _upsert_jsonl(existing: bytes | None, rows: Iterable[BaseModel], key: str) -> bytes:

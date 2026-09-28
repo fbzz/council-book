@@ -112,8 +112,6 @@ def test_s6_minimum_above_the_smoke_cap_is_refused(sandbox):
     assert sandbox.ledger.pending() == []
 
 
-@pytest.mark.xfail(strict=True, reason="context.broker_feed_enabled ignores the etoro-licence attestation "
-                   "(LC1): the cycle requests the feed once per slot while doctor still skips it")
 def test_v2a_unlicensed_feed_cycle_runs_on_public_items_with_zero_feed_requests(sandbox):
     """The feed constant is on (user decision) but the licence is not attested: LC1 not green, so
     the broker feed is never requested and the news role reads the public `P:` items only."""

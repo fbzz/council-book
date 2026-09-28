@@ -33,9 +33,11 @@ public-domain sources (`council.data.gov_news`: Federal Reserve Board, BLS, BEA,
 EIA, and SEC 8-K / 6-K metadata for the held and shortlisted stock lines), in rehearsal and live.
 The broker's feed (eToro Licensed Content) is added whenever an Agent Portfolio is connected and the
 switch is on (`broker_feed_enabled`: `invariants.BROKER_FEED_ENABLED`, which is True, and
-`policy/council.yaml` `news.broker_feed`, which can only turn it off). Its text may reach the news
-role's prompt but is never published, and private copies are purged within 7 days. A broker that is
-connected while the switch is off sets `news_broker_feed:off` and sends no feed request (the
+`policy/council.yaml` `news.broker_feed`, which can only turn it off) and the operator has attested
+the eToro licence (LC1, `etoro-licence` in `state_dir/readiness/attest.json`). Its text may
+reach the news role's prompt but is never published, and private copies are purged within 7 days.
+A broker that is connected while the switch is off or LC1 is unattested sets
+`news_broker_feed:off` and sends no feed request (the
 earnings then keep the SEC estimate). `N:` ids are keyed by the private install key. A source that
 fails becomes `news_source_error:<source>:<type>` (a 401/403 from the feed is `auth`) and never costs
 another source's items: the news role still runs on what arrived.
@@ -165,18 +167,40 @@ BROKER_FEED_SOURCE = "broker_feed"        # the source name in flags and fetch r
 FEED_TAKE = 50
 
 
-def broker_feed_enabled(policy: Policy, broker: Any | None) -> bool:
+LICENCE_ATTESTATION = "etoro-licence"    # LC1: the operator's `council-op ops attest etoro-licence --ref <ticket>`
+
+
+def licence_attested(state_dir: Path | None) -> bool:
+    """Has the operator attested the eToro licence (LC1) in `state_dir/readiness/attest.json`?
+    A missing, unreadable or schema-invalid record is not an attestation."""
+    if state_dir is None:
+        return False
+    from council.operator import readiness
+
+    path = Path(state_dir) / "readiness" / "attest.json"
+    try:
+        data = json.loads(path.read_text())
+        readiness.validate_record("attest", data)
+    except (OSError, ValueError, readiness.ReadinessError):
+        return False
+    entry = (data.get("attested") or {}).get(LICENCE_ATTESTATION)
+    return isinstance(entry, dict) and entry.get("value") is True
+
+
+def broker_feed_enabled(policy: Policy, broker: Any | None, state_dir: Path | None = None) -> bool:
     """May this cycle request the broker's news feed? Only with a connected broker, the code
-    ceiling `invariants.BROKER_FEED_ENABLED`, and `news.broker_feed` not set false in the policy."""
+    ceiling `invariants.BROKER_FEED_ENABLED`, `news.broker_feed` not set false in the policy, and the
+    operator's `etoro-licence` attestation (LC1) in `state_dir` (the user's decision: personal use
+    once a broker exists, never published, private copies purged within 7 days)."""
     from council import invariants
 
     if broker is None or not bool(getattr(invariants, "BROKER_FEED_ENABLED", False)):
         return False
     council = policy.council if isinstance(policy.council, dict) else {}
     section = council.get("news")
-    if section is None:
-        return True
-    return isinstance(section, dict) and section.get("broker_feed", True) is True
+    if section is not None and not (isinstance(section, dict) and section.get("broker_feed", True) is True):
+        return False
+    return licence_attested(state_dir)
 
 
 def feed_error_type(exc: BaseException) -> str:
@@ -208,7 +232,7 @@ def news_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path |
     fetch_public = public or gov_news.gather_public_news
     wall = clock or (lambda: datetime.now(UTC))
     broker_feed = None
-    if broker_feed_enabled(policy, broker):
+    if broker_feed_enabled(policy, broker, state_dir):
         feed_memo: dict[datetime, list[Any] | Exception] = {}
 
         def broker_feed(slot: datetime) -> list[Any]:  # type: ignore[no-redef]

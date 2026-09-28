@@ -617,7 +617,7 @@ def test_internal_codes_read_as_words(site, tmp_path, record, pack, policy):
     page = _pages(out)[f"cycles/{CYCLE_ID}.html"]
     assert "Why it met: a scheduled review, a volatility shock on Semiconductors." in page
     assert 'title="parse_fail">the answer could not be read</span>' in page and "Auditor: parse_fail" not in page
-    assert "Gold: below the broker&#39;s minimum order size" in page and "below_broker_minimum" not in page.split("title=")[0]
+    assert "Gold: too small to trade" in page and "below_broker_minimum" not in page and "minimum" not in page.split("title=")[0]
     doc = _rehearsal_doc(record, pack, policy).model_copy(update={"flags": ["calendar:release_dates_skipped_no_fred_key"]})
     officers = next(n for n in _run(site, doc)["nodes"] if n["key"] == "officers")
     assert officers["state"] == "fallback" and officers["word"] == "calendar incomplete"

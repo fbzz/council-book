@@ -335,11 +335,16 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     # ---- risk engine
     fps, material_changed = _material(ledger, pack, rec.cards, kill_state)
     rec.material_fingerprint = fingerprints_digest(fps)
+    # PRIVATE (M5-N): the broker minimum reaches the engine, so a line below it holds as R11 rather
+    # than reaching the planner's size skip; read once and reused by the plan
+    rows = _eligibility_rows(ctx, snapshot, rec.flags)
+    broker_min = broker_min_shares(policy, rows, snapshot.equity_usd if snapshot is not None else None)
+    rec.flags += size_floor_binding_flags(policy, broker_min, econ.copy_floor_share if econ is not None else 0.0)
     decision = _evaluate(ctx, rec, levels=levels, ref_levels=ref_levels, bands=rec.bands or bands,
                          states=states, snapshot=snapshot, unit=unit, kill_state=kill_state,
                          quotes=quotes, pack=pack, material_changed=material_changed, basis=basis,
                          slot=slot, returns=returns, nav=nav, econ=econ, extra_blockers=corporate_blockers,
-                         extra_lines=swing.lines)
+                         extra_lines=swing.lines, broker_min_share=broker_min)
     rec.risk = decision
 
     # ---- plan (connected account only)
@@ -347,7 +352,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     if snapshot is not None and ctx.sources.broker is not None:
         try:
             plan = _plan(ctx, decision, snapshot=snapshot, states=states, kill_state=kill_state,
-                         ref_levels=ref_levels, unit=unit, econ=econ, history=history, caps=caps,
+                         ref_levels=ref_levels, unit=unit, econ=econ, history=history, caps=caps, rows=rows,
                          swing_orders=swing_orders_after_engine(swing, decision) if swing.live else None)
             if plan is not None:
                 plan = stamp_swing_legs(stamp_sessions(plan, policy.universe, asof=slot), slot)
@@ -802,7 +807,7 @@ def _council_extras(code_cards, bands_fn, call_log: list | None = None, sink: An
 # ------------------------------------------------------------------------------- risk
 def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands, states, snapshot, unit,
               kill_state, quotes, pack, material_changed, basis, slot, returns, nav,
-              econ=None, extra_blockers=(), extra_lines=()) -> RiskDecision:
+              econ=None, extra_blockers=(), extra_lines=(), broker_min_share=None) -> RiskDecision:
     from council.risk.engine import RiskEngine
     from council.risk.held_levels import ledger_held_levels
 
@@ -830,9 +835,53 @@ def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands,
         nav_drawdown=nav.drawdown if nav is not None else None,
         pending_w=pending, held_levels=held,
         copy_min_share=econ.copy_floor_share if econ is not None else 0.0,
+        broker_min_share=broker_min_share or None,
         cost_30d_fee_bps=float(fee_30d),
         extra_lines=extra_lines,          # swing-book §1.1: the pinned swing lines (none until run_swing)
     )
+
+
+def _eligibility_rows(ctx: CycleContext, snapshot: Any, flags: list[str]) -> list[Any] | None:
+    """The broker's eligibility rows for the plan's instruments, read once per cycle (connected
+    account only). A failed read leaves None: the plan reads them again and fails closed there."""
+    from council.broker.instruments import InstrumentMap
+
+    broker = ctx.sources.broker
+    if snapshot is None or broker is None:
+        return None
+    try:
+        imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
+        return list(broker.eligibility(instrument_ids=plan_instrument_ids(ctx.policy, imap, snapshot)))
+    except Exception as exc:  # the engine then runs without the broker minimum; the plan re-reads
+        flags.append(f"broker_minimum_unread:{type(exc).__name__}")
+        return None
+
+
+def broker_min_shares(policy: Any, rows: Iterable[Any] | None, nav_usd: float | None) -> dict[str, float]:
+    """PRIVATE: each line's broker minimum position exposure as a NAV share, the lowest over the
+    line's vehicles the broker returned (M5-N; never published or prompted)."""
+    if not rows or not nav_usd or nav_usd <= 0:
+        return {}
+    by_symbol = {r.symbol: r for r in rows}
+    out: dict[str, float] = {}
+    for line in policy.universe.lines:
+        mins = [float(getattr(by_symbol[v.symbol], "min_position_exposure", 0.0) or 0.0)
+                for v in (*line.vehicles.long, *line.vehicles.short) if v.symbol in by_symbol]
+        if mins and min(mins) > 0:
+            out[line.symbol] = min(mins) / float(nav_usd)
+    return out
+
+
+def size_floor_binding_flags(policy: Any, broker_min: Mapping[str, float], copy_min_share: float) -> list[str]:
+    """The private P2 flags: `size_floor_binding:<line>` for each line whose size floor (the real
+    trade floor or the broker minimum) exceeds the public deadband share at the current NAV. They
+    bound the NAV, so `redact.public_flags` drops them."""
+    threshold = float(policy.risk["deadband"]["min_nav_share"])
+    lines = broker_min.keys() if broker_min else ()
+    if copy_min_share > threshold + 1e-12:
+        lines = policy.universe.symbols()
+    return [f"size_floor_binding:{s}" for s in sorted(lines)
+            if max(copy_min_share, float(broker_min.get(s, 0.0))) > threshold + 1e-12]
 
 
 def engine_blockers(ctx: CycleContext, extra: Iterable[str] = ()) -> list[str]:
@@ -862,7 +911,7 @@ def _vol_fn(policy, returns, states):
 
 # ------------------------------------------------------------------------------- plan
 def _plan(ctx: CycleContext, decision: RiskDecision, *, snapshot, states, kill_state,
-          ref_levels=None, unit=None, econ=None, history=None, caps=None, swing_orders=None):
+          ref_levels=None, unit=None, econ=None, history=None, caps=None, rows=None, swing_orders=None):
     from council.broker.eligibility import resolve_vehicle
     from council.broker.instruments import InstrumentMap
     from council.broker.parsing import parse_rates
@@ -877,8 +926,14 @@ def _plan(ctx: CycleContext, decision: RiskDecision, *, snapshot, states, kill_s
     imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
     ids = plan_instrument_ids(policy, imap, snapshot)
     orders = list(swing_orders or [])
-    ids = sorted(set(ids) | {int(o.instrument_id) for o in orders if o.instrument_id is not None})
-    rows = broker.eligibility(instrument_ids=ids)  # type: ignore[union-attr]
+    swing_ids = {int(o.instrument_id) for o in orders if o.instrument_id is not None}
+    ids = sorted(set(ids) | swing_ids)
+    if rows is None:
+        rows = broker.eligibility(instrument_ids=ids)  # type: ignore[union-attr]
+    else:
+        missing = sorted(swing_ids - {r.instrument_id for r in rows})
+        if missing:                                  # swing lines the core's eligibility read did not cover
+            rows = [*rows, *broker.eligibility(instrument_ids=missing)]  # type: ignore[union-attr]
     rows_by_symbol = {r.symbol: r for r in rows}
     quotes = parse_rates(broker.rates(ids), imap.symbol_for)  # type: ignore[union-attr]
     nav_usd = snapshot.equity_usd

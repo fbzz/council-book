@@ -854,7 +854,7 @@ def _plan(plan: Plan | None, lm: LineMap) -> PublicPlan | None:
         gross_after_x=_x(plan.gross_after),
         net_before_x=_x(plan.net_before),
         net_after_x=_x(plan.net_after),
-        skipped=[_code(s) for s in plan.skipped],
+        skipped=[_code(trace_rules.public_plan_skip(s)) for s in plan.skipped],
     )
 
 
@@ -1266,14 +1266,39 @@ def _weight_sign(kind: str, direction: str | None) -> float | None:
     return 0.0
 
 
-def _fill(r: LegResultLike, line: str, leg: Leg | None, state: str, nav_usd: float) -> PublicFill:
+# M5-N whole-unit fills: a measured weight within the planned tolerance of its target publishes as
+# the target. The tolerance is the executor's post-fill exposure tolerance (relative) or the public
+# deadband share (absolute, x NAV), whichever is larger: rounding to whole units moves a weight by
+# less than one unit, which the size floor keeps under the deadband share whenever gate P2 is green.
+FILL_TOLERANCE_REL = 0.05
+FILL_TOLERANCE_X = 0.02
+
+
+def fill_tolerances(policy: Any) -> dict[str, float]:
+    """`public_execution`'s tolerance keywords from the policy's risk limits."""
+    risk = policy.risk
+    return {"tolerance_rel": float(risk["approval"]["post_fill_exposure_tolerance"]),
+            "tolerance_x": float(risk["deadband"]["min_nav_share"])}
+
+
+def _within_tolerance(measured: float, target: float, rel: float, absolute: float) -> bool:
+    return abs(measured - target) <= max(rel * abs(target), absolute) + 1e-12
+
+
+def _fill(r: LegResultLike, line: str, leg: Leg | None, state: str, nav_usd: float,
+          tol: tuple[float, float] = (FILL_TOLERANCE_REL, FILL_TOLERANCE_X)) -> PublicFill:
     direction = leg.direction if leg is not None else None
     target = _x(leg.weight_after - leg.weight_before) if leg is not None else None
-    filled = slippage = error = None
+    filled = slippage = error = fill = None
     units, price = _pos(r.units_filled), _pos(r.fill_price)
     sign = _weight_sign(r.kind, direction)
     if r.kind == "open" and units is not None and price is not None and sign is not None:
         filled = _within(_x(sign * units * price / nav_usd), 5.0)
+        if target is not None and filled is not None:
+            if _within_tolerance(filled, target, *tol):
+                filled, fill = target, "within_tolerance"
+            else:
+                fill = "outside_tolerance"
         if target is not None and filled is not None and abs(target) >= _MIN_TARGET_X:
             error = _within(round((filled / target - 1.0) * 100.0, PCT_DP) + 0.0, 1000.0)
         amount = _pos(leg.amount_usd) if leg is not None else None
@@ -1295,18 +1320,56 @@ def _fill(r: LegResultLike, line: str, leg: Leg | None, state: str, nav_usd: flo
         exposure_error_pct=error,
         slippage_bp=slippage,
         cost_bp=_bp(leg.cost_bps_nav) if leg is not None else None,
+        fill=fill,
     )
+
+
+def _achieved(achieved: dict[str, float], plan: Plan | None, lm: LineMap, tol: tuple[float, float],
+              flags: list[str]) -> tuple[dict[str, float], float | None]:
+    """Line weights after reconcile; a planned line within tolerance of its planned weight reads as
+    that weight, one outside it keeps the exact value and is flagged `achieved_outside_tolerance`.
+    Also the public drift, Σ |published achieved − planned| over the planned lines (the reconcile's
+    own definition, `execution.reconcile`), so the exact drift never carries the whole-unit residual
+    the snap hides; None without a plan (the caller then keeps the reconcile's drift)."""
+    planned: dict[str, float] = {}
+    for leg in sorted(plan.legs, key=lambda g: g.seq) if plan is not None else ():
+        line = lm.lookup(str(leg.line)) or lm.line(leg.symbol)
+        if line is not None:
+            planned[line] = _x(leg.weight_after)          # signed line weight after the leg
+    out = dict(achieved)
+    outside = 0
+    for line, target in planned.items():
+        if line not in out:
+            continue
+        if _within_tolerance(out[line], target, *tol):
+            out[line] = target + 0.0
+        else:
+            outside += 1
+    if outside:
+        flags.append(f"achieved_outside_tolerance:{outside}")
+    if plan is None:
+        return out, None
+    return out, sum(abs(out.get(line, 0.0) - target) for line, target in planned.items())
+
+
+def _weightless(fill: PublicFill) -> PublicFill:
+    """A smoke ticket's fill without anything sized by the NAV (G28): no weights, errors or costs."""
+    return fill.model_copy(update={"weight_target_x": None, "weight_filled_x": None, "exposure_error_pct": None,
+                                   "cost_bp": None, "fill": None})
 
 
 def public_execution(
     report: ExecutionReportLike,
     *,
-    cycle_id: str,
+    cycle_id: str | None,
     lines: Iterable[LineSpec] | Universe | Mapping[str, LineSpec] | None,
     nav_usd: float,
     plan: Plan | None = None,
     approved_at: datetime | None = None,
     completed_at: datetime | None = None,
+    decision_ref: str | None = None,
+    tolerance_rel: float = FILL_TOLERANCE_REL,
+    tolerance_x: float = FILL_TOLERANCE_X,
 ) -> PublicExecution:
     """The public execution record from the PRIVATE `ExecutionReport`.
 
@@ -1315,7 +1378,16 @@ def public_execution(
     approved plan, joined by leg seq) supplies direction, the approved weight change, the planned
     price and the cost estimate; without it those fields are None and `plan_missing` is flagged.
     Amounts, units, prices, order/position ids, request ids and error strings are never read into
-    the output."""
+    the output.
+
+    M5-N: a decision without a cycle (a watch flatten, a smoke ticket) passes `cycle_id=None` and
+    its `decision_ref`; a smoke ticket's execution is weightless (its size is the broker minimum,
+    so any weight would give the NAV). A measured fill or achieved weight within the tolerance of
+    its target publishes as the target (see `FILL_TOLERANCE_REL`)."""
+    if cycle_id is not None:
+        decision_ref = None
+    smoke = decision_ref is not None and "-smoke-" in decision_ref
+    tol = (tolerance_rel, tolerance_x)
     nav = _pos(nav_usd)
     if nav is None:
         raise ValueError("nav_usd must be a positive finite number")
@@ -1339,7 +1411,8 @@ def public_execution(
         leg = plan_legs.get(r.seq)
         if plan is not None and leg is None:
             no_plan_leg += 1
-        fills.append(_fill(r, line, leg, state, nav))
+        fill = _fill(r, line, leg, state, nav, tol)
+        fills.append(_weightless(fill) if smoke else fill)
     fills.sort(key=lambda f: f.seq)
     final = report.final_state if report.final_state in _DECISION_STATES else "execution_unknown"
     if final != report.final_state:
@@ -1347,19 +1420,27 @@ def public_execution(
     rec = report.reconcile
     costs = [f.cost_bp for f in fills if f.state in _EXECUTED and f.cost_bp is not None]
     achieved = lm.sum_by_line(rec.achieved_w) if rec is not None else {}
+    drift = rec.drift if rec is not None else None
+    if smoke:
+        achieved, drift = {}, None
+    else:
+        achieved, public_drift = _achieved(achieved, plan, lm, tol, flags)
+        if rec is not None and public_drift is not None:
+            drift = public_drift
     for name, count in (("unmapped_symbols_dropped", lm.unmapped), ("leg_kind_unrecognised", bad_kind),
                         ("leg_state_unrecognised", bad_state), ("leg_not_in_plan", no_plan_leg)):
         if count:
             flags.append(f"{name}:{count}")
     return PublicExecution(
         cycle_id=cycle_id,
+        decision_ref=decision_ref,
         decision_state=final,
         approved_slot=_slot_of(approved_at),
         completed_slot=_slot_of(completed_at),
         fills=fills,
         achieved_x=achieved,
-        achieved_drift_x=_within(_x(rec.drift), 5.0) if rec is not None else None,
-        cost_bp_total=_bp(sum(costs)) if plan is not None else None,
+        achieved_drift_x=_within(_x(drift), 5.0) if drift is not None else None,
+        cost_bp_total=_bp(sum(costs)) if plan is not None and not smoke else None,
         flags=flags,
     )
 

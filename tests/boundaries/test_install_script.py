@@ -338,7 +338,7 @@ def test_uninstall_each_set(sandbox, flag, labels):
     for label in LIVE + SOAK:
         (agents / f"{label}.plist").write_text("x")
     sandbox[2].unlink()
-    run = _run(sandbox, UNINSTALL, *flag, tty=None)
+    run = _run(sandbox, UNINSTALL, *flag, answer="unload")
     assert run.rc == 0, run.err
     assert run.called("council", "ops", "assert-operator")
     uid = os.getuid()
@@ -350,11 +350,29 @@ def test_uninstall_each_set(sandbox, flag, labels):
 def test_uninstall_refuses_outside_operator_context(sandbox):
     _install(sandbox)
     sandbox[-1].write_text("")          # forget the install's own launchctl print/disable calls
-    run = _run(sandbox, UNINSTALL, "--all", tty=None, FAKE_ASSERT_RC="2")
+    run = _run(sandbox, UNINSTALL, "--all", answer="unload", FAKE_ASSERT_RC="2")
     assert run.rc != 0 and "nothing unloaded" in run.err
     assert not run.called("launchctl")
 
 
 def test_uninstall_refuses_without_release_and_bad_flag(sandbox):
-    assert _run(sandbox, UNINSTALL, tty=None).rc != 0
+    assert _run(sandbox, UNINSTALL, answer="unload").rc != 0
     assert _run(sandbox, UNINSTALL, "--live", tty=None).rc == 64
+
+
+@pytest.mark.parametrize("tty", ["/nonexistent/tty", "/dev/null", "/dev/ttyNOSUCH"])
+def test_uninstall_refuses_without_a_terminal(sandbox, tty):
+    _install(sandbox)
+    sandbox[-1].write_text("")
+    run = _run(sandbox, UNINSTALL, "--all", tty=tty)
+    assert run.rc != 0 and "no terminal" in run.err
+    assert not run.called("launchctl") and not run.called("council")
+
+
+@pytest.mark.parametrize("answer", ["", "yes", "UNLOAD"])
+def test_uninstall_unloads_nothing_unless_the_operator_types_unload(sandbox, answer):
+    _install(sandbox)
+    sandbox[-1].write_text("")
+    run = _run(sandbox, UNINSTALL, "--all", answer=answer)
+    assert run.rc != 0 and "nothing unloaded" in run.err
+    assert not run.called("launchctl")
