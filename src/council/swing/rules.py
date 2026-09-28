@@ -14,7 +14,7 @@ Reason codes (public; the numbers behind them are not):
 | Rule | Code(s) |
 |---|---|
 | S1 size | `stop_too_wide_for_size` |
-| S2 capacity | `max_open`, `max_short` |
+| S2 capacity | `max_open`, `max_short`, `already_open` (one swing trade per ticker: a second entry would stack past the size and loss caps) |
 | S3 weekly cap | `weekly_cap` |
 | S4 open risk | `open_risk` |
 | S5 stops | `stop_missing`, `stop_out_of_range`, `stop_inside_atr` (a stop inside 1 ATR is widened when the wider stop still passes S1/S6) |
@@ -43,6 +43,7 @@ from typing import Literal
 
 from council import invariants as inv
 from council.clock import session_hours
+from council.stocks.universe import try_normalise_id
 from council.swing import costs as swing_costs
 from council.swing.policy import SwingPolicy
 
@@ -54,7 +55,7 @@ ENTRY_BLOCKING_KILL_STATES = frozenset({"WARN", "HALTED", "FLAT"})
 # Rule id of each drop code (the trace and the public record carry `<rule>:<code>`).
 RULE_OF: dict[str, str] = {
     "stop_too_wide_for_size": "S1",
-    "max_open": "S2", "max_short": "S2",
+    "max_open": "S2", "max_short": "S2", "already_open": "S2",
     "weekly_cap": "S3",
     "open_risk": "S4",
     "stop_missing": "S5", "stop_out_of_range": "S5", "stop_inside_atr": "S5",
@@ -269,6 +270,11 @@ def _drop(c: Candidate, code: str, flags: Iterable[str] = ()) -> Verdict:
     return Verdict(ref=c.ref, ok=False, code=code, flags=tuple(flags))
 
 
+def _tid(ticker: str) -> str:
+    """The ticker's line id (BRK.B == BRK_B), so one name is one swing line."""
+    return try_normalise_id(ticker) or ticker.strip().upper()
+
+
 def _sign(side: str) -> float:
     return 1.0 if side == "long" else -1.0
 
@@ -323,7 +329,7 @@ def screen_entry(c: Candidate, book: BookState, sp: SwingPolicy, cost_fn: CostFn
     """Every per-idea rule, then the book rules against `book.trades`. First failure wins."""
     lim = limits(sp)
     flags: list[str] = []
-    if book.kill_state in ENTRY_BLOCKING_KILL_STATES:
+    if book.kill_state != "NORMAL":      # WARN / HALTED / FLAT, and any unknown state (fail closed)
         return _drop(c, "kill_state")
     if book.blockers:
         return _drop(c, "swing_blocker")
@@ -335,7 +341,7 @@ def screen_entry(c: Candidate, book: BookState, sp: SwingPolicy, cost_fn: CostFn
         return _drop(c, "setup_paper_only")
     # S14 cool-off
     for x in book.recent_exits:
-        if x.ticker == c.ticker:
+        if _tid(x.ticker) == _tid(c.ticker):
             wait = sp.cooloff.after_stop_sessions if x.by_stop else sp.cooloff.after_exit_sessions
             if sessions_until(x.day, book.today) < wait:
                 return _drop(c, "cooloff")
@@ -476,6 +482,8 @@ def book_check(c: Candidate, v: Verdict, book: BookState, sp: SwingPolicy) -> st
     max_open = lim.max_open
     if drawdown_scaled(book, sp):
         max_open = min(max_open, sp.drawdown_scale.max_open)
+    if any(_tid(t.ticker) == _tid(c.ticker) or t.ref == c.ref for t in trades):
+        return "already_open"
     if len(trades) + 1 > max_open:
         return "max_open"
     if c.side == "short" and sum(1 for t in trades if t.side == "short") + 1 > lim.max_short:

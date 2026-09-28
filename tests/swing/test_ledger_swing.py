@@ -195,6 +195,82 @@ def test_a_decision_is_swing_scoped_only_while_every_unresolved_leg_is_swing(led
     assert ledger.blockers() == [f"{SWING_BLOCKER_PREFIX}d1"] and ledger.swing_entries_blocked()
 
 
+def test_a_swing_scope_with_nothing_unresolved_holds_the_whole_book(ledger):
+    """Review fix: a blocked decision whose every leg resolved (e.g. a core post-fill exposure
+    mismatch) is not a swing hold, whatever scope was recorded while a swing leg was waiting."""
+    _decision(ledger)
+    _swing_leg(ledger, "d1", 1, "trade:t1")
+    ledger.update_leg("d1", 1, state="submitted")
+    ledger.update_leg("d1", 1, state="waiting_for_market")
+    ledger.set_blocker_scope("d1", "swing")
+    ledger.transition("d1", "waiting_for_market", "held", actor="executor")
+    assert ledger.blockers() == ["swing:d1"]
+    ledger.transition("d1", "blocked", "timeout", actor="watch")
+    assert ledger.blockers() == ["swing:d1"]                       # the swing leg still waits
+    _fill(ledger, "d1", 1)
+    assert ledger.blockers() == ["d1"]                             # resolved: the whole book is held
+    with pytest.raises(LedgerError, match="non-swing"):
+        ledger.set_blocker_scope("d1", "swing")
+
+
+def test_a_planned_unmarked_leg_keeps_a_decision_whole_book(ledger):
+    _decision(ledger)
+    ledger.insert_legs("d1", [open_leg(1, "GOLD"), open_leg(2, "SPX500").model_copy(update={"line": "SW"})])
+    ledger.update_leg("d1", 2, state="submitting", request_id="r2", detail={"sleeve": "swing"})
+    ledger.update_leg("d1", 2, state="unknown")                    # leg 1 (core) never left `planned`
+    ledger.transition("d1", "execution_unknown", "died", actor="executor")
+    with pytest.raises(LedgerError, match="non-swing"):
+        ledger.set_blocker_scope("d1", "swing")
+    assert ledger.blockers() == ["d1"]
+
+
+def test_a_fill_must_match_the_trade_it_names(ledger):
+    ledger.create_swing_trade("trade:t1", ticker="NVDA", side="short")
+    _decision(ledger)
+    _swing_leg(ledger, "d1", 1, "trade:t1", direction="long")
+    _fill(ledger, "d1", 1)
+    with pytest.raises(LedgerError, match="does not match"):
+        ledger.record_swing_fill("d1", 1)
+    assert ledger.swing_trade("trade:t1").state == "proposed"
+
+
+def test_trade_detail_refuses_free_text_because_a_closed_trade_cannot_be_scrubbed(ledger):
+    with pytest.raises(LedgerError, match="free text"):
+        ledger.create_swing_trade("trade:t1", ticker="NVDA", side="long",
+                                  detail={"why": "Company beats estimates, raises guidance"})
+    ledger.create_swing_trade("trade:t1", ticker="NVDA", side="long",
+                              detail={"leg_ids": ["d1:1"], "r_net": 1.4, "tp_at_broker": False})
+    with pytest.raises(LedgerError, match="free text"):
+        ledger.update_swing_trade("trade:t1", detail={"note": "a sentence copied from a headline"})
+    assert ledger.swing_trade("trade:t1").detail == {"leg_ids": ["d1:1"], "r_net": 1.4,
+                                                      "tp_at_broker": False}
+
+
+def test_trade_events_are_keyed_for_the_purge_by_trade_and_by_writing_cycle(ledger):
+    feed = "an exact copied feed headline text"
+    ledger.create_swing_trade("trade:t1", ticker="NVDA", side="long", origin_cycle="c1")
+    ledger.add_swing_event("time_stop_due", trade_id="trade:t1", reason=feed)   # trade id only
+    ledger.transition_swing_trade("trade:t1", "missed", reason=feed, cycle_id="c3")
+    with pytest.raises(LedgerError):
+        ledger.add_swing_event("note", trade_id="trade:nope", reason="x")
+    with pytest.raises(LedgerError, match="purge"):
+        ledger.add_swing_event("note", reason=feed)                 # text nobody could scrub
+    hits = lambda text: feed in text   # noqa: E731
+    assert scrub_swing_rows(ledger, "c1", hits, "[x]") == 2        # the flag, and c3's (via trade)
+    assert [e["reason"] for e in ledger.swing_events("trade:t1")] == ["created", "[x]", "[x]"]
+    assert [e["origin_cycle"] for e in ledger.swing_events("trade:t1")] == ["c1", "c1", "c3"]
+
+
+def test_benchmark_detail_never_carries_prices_units_or_ids(ledger):
+    for detail in ({"spy_price": 512.3}, {"legs": [{"units": 3}]}, {"x": {"position_id": 7}}):
+        with pytest.raises(LedgerError, match="private"):
+            ledger.record_benchmark_day("2026-10-05", sq8_ret=0.0, matched_idx_ret=0.0, idx_hold_ret=0.0,
+                                        detail=detail)
+    ledger.record_benchmark_day("2026-10-05", sq8_ret=0.0, matched_idx_ret=0.0, idx_hold_ret=0.0,
+                                detail={"sq8_index": 100.0, "sq8_drawdown": 0.0, "names": ["NVDA"],
+                                        "traded": [], "cost": 0.0})
+
+
 # ------------------------------------------------------------------------------ purge
 def test_scrub_swing_rows_by_origin_and_carry_cycle(ledger):
     feed = "an exact copied feed headline text"

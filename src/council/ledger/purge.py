@@ -3,8 +3,9 @@
 `council.operator.purge._scrub_ledger` filters a cycle's ledger record against the cycle's licensed
 feed texts once its capture passes the cut-off. The swing rows that may copy feed text are keyed by
 origin cycle: `swing_ideas.record_json` (an idea also matches every cycle that carried it forward),
-`swing_events.reason` / `payload_json` and `paper_trades.record_json` (rows of that cycle, or of an
-idea that matches it). Every string that copies a licensed text becomes the placeholder; ids,
+`swing_events.reason` / `payload_json` (rows written by that cycle, of an idea that matches it, or
+of a trade of that cycle or idea) and `paper_trades.record_json` (rows of that cycle, or of an idea
+that matches it). Every string that copies a licensed text becomes the placeholder; ids,
 numbers and states are kept. `swing_trades` hold no free text (schema v5) and are never touched, so
 a closed trade stays immutable. Pure ledger code: nothing here imports a broker.
 """
@@ -57,9 +58,14 @@ def scrub_swing_rows(ledger: Ledger, cycle_id: str, hits: Hits, placeholder: str
             if new is not row["record_json"] and not dry_run:
                 conn.execute("UPDATE swing_ideas SET record_json = ? WHERE idea_id = ?",
                              (new, row["idea_id"]))
+        # an event is keyed by the cycle that wrote it, its idea, or a trade of this cycle / idea
+        # (a watch flag on a trade may carry only the trade id)
         for row in conn.execute(
                 f"""SELECT event_id, reason, payload_json FROM swing_events
-                    WHERE origin_cycle = ? OR idea_id IN ({marks})""", (cycle_id, *ideas)).fetchall():
+                    WHERE origin_cycle = ? OR idea_id IN ({marks})
+                    OR trade_id IN (SELECT trade_id FROM swing_trades
+                                    WHERE origin_cycle = ? OR idea_id IN ({marks}))""",
+                (cycle_id, *ideas, cycle_id, *ideas)).fetchall():
             reason = _scrub(row["reason"], hits, placeholder, count)
             payload = _scrub_json(row["payload_json"], hits, placeholder, count)
             if (reason is not row["reason"] or payload is not row["payload_json"]) and not dry_run:

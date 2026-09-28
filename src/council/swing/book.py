@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from council import invariants as inv
+from council.broker.parsing import unmapped_symbol
 from council.stocks.universe import try_normalise_id
 from council.swing.models import ACTIVE_STATES
 
@@ -94,8 +95,23 @@ class SwingLine:
             raise ValueError("an exit pins the line at 0")
         if self.action == "enter" and (self.pinned_w > 0) != (self.side == "long"):
             raise ValueError("an entry's sign must match its side")
-        if abs(self.pinned_w) > inv.SWING_MAX_SIZE_NAV + 1e-12 and self.action == "enter":
-            raise ValueError("a swing entry above the code size ceiling")
+        if self.action == "enter":
+            _assert_entry_caps(self.side, abs(self.pinned_w), self.stop_pct)
+
+
+def _assert_entry_caps(side: str, size: float, stop_pct: float | None) -> None:
+    """Defence in depth behind S1/S5 (§3.6): an entry line carries its stop, stays within the code
+    size ceiling, the long stop ceiling and the planned loss at the stop (0.8% / 0.5% NAV)."""
+    tol = 1e-9
+    if size > inv.SWING_MAX_SIZE_NAV + tol:
+        raise ValueError("a swing entry above the code size ceiling")
+    if stop_pct is None or not math.isfinite(stop_pct) or stop_pct <= 0:
+        raise ValueError("a swing entry needs a stop (S5)")
+    if side == "long" and stop_pct > inv.SWING_MAX_LONG_STOP_PCT + tol:
+        raise ValueError("a swing long's stop beyond the code ceiling")
+    loss = inv.SWING_MAX_LONG_LOSS_NAV if side == "long" else inv.SWING_MAX_SHORT_LOSS_NAV
+    if size * stop_pct > loss + tol:
+        raise ValueError("a swing entry's planned loss at the stop above the code ceiling")
 
 
 def entry_line(ref: str, ticker: str, side: str, size_nav: float, *, stop_pct: float,
@@ -166,6 +182,9 @@ def build_vehicle_map(rows: Iterable[Any], *, core_vehicles: Iterable[str] = ())
         by_vehicle[lid] = lid
         if r.instrument_id is not None:
             by_id[int(r.instrument_id)] = tid
+            # A portfolio parsed with the universe map only names a swing position
+            # UNMAPPED_<id> (`broker.parsing.unmapped_symbol`): it is still this swing line.
+            by_vehicle[unmapped_symbol(int(r.instrument_id))] = lid
     return SwingVehicleMap(symbols_by_id=by_id, line_by_vehicle=by_vehicle)
 
 

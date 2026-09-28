@@ -269,6 +269,13 @@ class RiskEngine:
         entry-free book does not fail, any core line moved from the entry-free result, the S10 share
         of the equity beta cluster, or the R3 / R16 / R20 entry blocks - the LAST entry is removed.
         The core is never shrunk to make room for a swing entry; exits and holds are never removed."""
+        ids = [ln.line_id for ln in lines]
+        if len(set(ids)) != len(ids):
+            # One swing line per name: a duplicate would silently overwrite a pinned weight.
+            raise ValueError("duplicate swing line ids in extra_lines")
+        clash = sorted(set(ids) & (set(self.specs) | set(kw["levels"])))
+        if clash:
+            raise ValueError(f"swing line ids collide with core lines: {clash}")
         held = [ln for ln in lines if ln.action != "enter"]
         entries = [ln for ln in lines if ln.action == "enter"]
         dropped: dict[str, str] = {}
@@ -303,7 +310,7 @@ class RiskEngine:
         keep = []
         for ln in entries:
             why = None
-            if kw["kill_state"] == "WARN":
+            if kw["kill_state"] != "NORMAL":      # WARN (LATCHED flattened earlier); unknown fails closed
                 why = "R3"
             elif "all" in scopes or "swing" in scopes:
                 why = "R20"
@@ -332,9 +339,14 @@ class RiskEngine:
         members = [s for s in caps.equity_beta_cluster.members if s in self.specs]
         cluster = sum(abs(trial.final_w.get(s, 0.0)) for s in members)
         cluster0 = sum(abs(core.final_w.get(s, 0.0)) for s in members)
-        swing_longs = sum(ln.pinned_w * (ln.beta_60d if ln.beta_60d is not None else 1.0)
-                          for ln in lines if ln.pinned_w > 0)
-        if cluster + swing_longs > max(caps.equity_beta_cluster.max, cluster0) + EPS:
+        def longs(group: Iterable[Any]) -> float:
+            return sum(ln.pinned_w * (ln.beta_60d if ln.beta_60d is not None else 1.0)
+                       for ln in group if ln.pinned_w > 0)
+
+        # The entry-free book (core + swing holds) is the baseline: an entry that does not add to
+        # the cluster (a short) is never dropped for a cluster the holds already fill.
+        held_longs = longs(ln for ln in lines if ln.action != "enter")
+        if cluster + longs(lines) > max(caps.equity_beta_cluster.max, cluster0 + held_longs) + EPS:
             return "R5"
         return None
 

@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -679,14 +680,17 @@ class Ledger:
         return seqs
 
     def _only_swing_unresolved(self, conn: sqlite3.Connection, decision_id: str) -> bool:
-        """True when every unresolved (active, unknown or waiting) leg of the decision is a swing leg
-        and there is at least one leg."""
+        """True when the decision has at least one unresolved (planned, active, unknown or waiting)
+        leg and every such leg is a swing leg. Fail-closed: a hold with nothing unresolved (a post-fill
+        exposure mismatch, a reconcile failure after every leg resolved) is not caused by a swing leg,
+        so it holds the whole book whatever scope was recorded earlier; a planned leg left behind by a
+        dead process counts as unresolved (it may be a core leg nobody marked)."""
         rows = conn.execute("SELECT seq, state FROM legs WHERE decision_id = ?", (decision_id,)).fetchall()
-        if not rows:
+        unresolved = {r["seq"] for r in rows
+                      if r["state"] in LEG_ACTIVE_STATES | {WAITING_STATE, "planned"}}
+        if not unresolved:     # nothing swing explains the hold: the whole book stays held
             return False
-        swing = self._swing_leg_keys(conn, decision_id)
-        unresolved = {r["seq"] for r in rows if r["state"] in LEG_ACTIVE_STATES | {WAITING_STATE}}
-        return unresolved <= swing
+        return unresolved <= self._swing_leg_keys(conn, decision_id)
 
     def has_blocker(self) -> bool:
         return bool(self.blockers())
@@ -1346,7 +1350,7 @@ class Ledger:
                 "decision_id": decision_id, "entry_seq": entry_seq, "ticker": ticker,
                 "instrument_id": instrument_id, "side": side, "state": "proposed",
                 "sl_rate": sl_rate, "tp_rate": tp_rate, "time_stop_date": time_stop_date,
-                "detail_json": _dump(dict(detail or {})),
+                "detail_json": _dump(_check_trade_detail(dict(detail or {}))),
             }, stamp)
             self._swing_event(conn, "transition", stamp, trade_id=trade_id, idea_id=idea_id,
                               origin_cycle=origin_cycle, to_state="proposed", reason="created",
@@ -1389,6 +1393,14 @@ class Ledger:
         if kind == "transition":
             raise LedgerError("transition events are written by transition_swing_trade only")
         with self._tx() as conn:
+            if trade_id is not None:        # an unknown trade id would leave text the purge cannot key
+                trade = self._trade_row(conn, trade_id)
+                if trade is None:
+                    raise LedgerError(f"unknown swing trade {trade_id}")
+                idea_id = idea_id or trade["idea_id"]
+                origin_cycle = origin_cycle or trade["origin_cycle"]
+            if origin_cycle is None and idea_id is None and (reason or payload):
+                raise LedgerError("a swing event with text needs an origin cycle, idea or trade (7-day purge)")
             self._swing_event(conn, kind, self._now(now), trade_id=trade_id, idea_id=idea_id,
                               origin_cycle=origin_cycle, reason=reason, payload=payload, actor=actor)
 
@@ -1421,22 +1433,24 @@ class Ledger:
 
     def transition_swing_trade(
         self, trade_id: str, to_state: str, *, reason: str = "", actor: str = SYSTEM_ACTOR,
-        close_rate: float | None = None, now: datetime | None = None,
+        close_rate: float | None = None, cycle_id: str | None = None, now: datetime | None = None,
     ) -> SwingTradeRow:
         """Move a trade along `swing.models.TRANSITIONS` (compare-and-set). Illegal moves and any
-        move of a closed/missed trade raise `IllegalTransition`."""
+        move of a closed/missed trade raise `IllegalTransition`. `cycle_id` is the cycle whose run
+        writes `reason` (default: the trade's origin cycle); the 7-day purge scrubs the event's text
+        against that cycle's feed texts, so a later cycle's PM reason must name its own cycle."""
         stamp = self._now(now)
         with self._tx() as conn:
             row = conn.execute("SELECT * FROM swing_trades WHERE trade_id = ?", (trade_id,)).fetchone()
             if row is None:
                 raise LedgerError(f"unknown swing trade {trade_id}")
-            self._move_trade(conn, row, to_state, stamp, reason=reason, actor=actor,
+            self._move_trade(conn, row, to_state, stamp, reason=reason, actor=actor, cycle_id=cycle_id,
                              extra={"close_rate": close_rate} if close_rate is not None else None)
         return self.swing_trade(trade_id)  # type: ignore[return-value]
 
     def _move_trade(
         self, conn: sqlite3.Connection, row: sqlite3.Row, to_state: str, stamp: str, *,
-        reason: str, actor: str, extra: Mapping[str, Any] | None = None,
+        reason: str, actor: str, extra: Mapping[str, Any] | None = None, cycle_id: str | None = None,
     ) -> None:
         current = row["state"]
         check_trade_transition(current, to_state)
@@ -1449,7 +1463,7 @@ class Ledger:
         if cur.rowcount != 1:
             raise IllegalTransition(f"swing trade {row['trade_id']} moved concurrently (was {current})")
         self._swing_event(conn, "transition", stamp, trade_id=row["trade_id"], idea_id=row["idea_id"],
-                          origin_cycle=row["origin_cycle"], from_state=current, to_state=to_state,
+                          origin_cycle=cycle_id or row["origin_cycle"], from_state=current, to_state=to_state,
                           reason=reason, actor=actor)
 
     _TRADE_FIELDS = frozenset({"position_ids", "units", "open_rate", "sl_rate", "tp_rate",
@@ -1474,7 +1488,7 @@ class Ledger:
                         _merge_ids(json.loads(row["position_ids_json"]), value))
                 elif key == "detail":
                     columns["detail_json"] = _dump({**json.loads(row["detail_json"] or "{}"),
-                                                    **redact(dict(value))})
+                                                    **_check_trade_detail(redact(dict(value)))})
                 else:
                     columns[key] = value
             assignments = ", ".join(f"{k} = ?" for k in columns)
@@ -1535,6 +1549,11 @@ class Ledger:
             trade_id = row["trade_id"]
             if row["state"] in TRADE_TERMINAL_STATES:
                 raise IllegalTransition(f"swing trade {trade_id} is terminal ({row['state']})")
+            if leg["direction"] != row["side"] or (
+                    row["instrument_id"] is not None and leg["instrument_id"] is not None
+                    and int(row["instrument_id"]) != int(leg["instrument_id"])):
+                raise LedgerError(f"leg {decision_id}:{seq} ({leg['direction']}, instrument "
+                                  f"{leg['instrument_id']}) does not match swing trade {trade_id}")
             if row["decision_id"] is None:     # link the leg the first time a fill names this trade
                 conn.execute("UPDATE swing_trades SET decision_id = ?, entry_seq = ? WHERE trade_id = ?",
                              (decision_id, seq, trade_id))
@@ -1570,6 +1589,7 @@ class Ledger:
         for value in (sq8_ret, matched_idx_ret, idx_hold_ret):
             if value is not None and not math.isfinite(float(value)):
                 raise LedgerError(f"benchmark return must be finite: {value!r}")
+        _check_public_detail(dict(detail or {}), "benchmark day detail")
         with self._tx() as conn:
             conn.execute(
                 """INSERT INTO benchmark_days (day, sq8_ret, matched_idx_ret, idx_hold_ret, detail_json,
@@ -1621,6 +1641,49 @@ class Ledger:
                 rows = conn.execute("SELECT * FROM paper_trades WHERE status = ? ORDER BY opened_at, paper_id",
                                     (status,)).fetchall()
         return [{**dict(r), "record": json.loads(r["record_json"] or "{}")} for r in rows]
+
+
+_CODE_STRING = re.compile(r"[A-Za-z0-9_.:+\-]{0,64}")
+# keys a public-facing row never carries (percent-only record, design §7.3)
+_PRIVATE_KEY_PARTS = ("price", "units", "amount", "usd", "position_id", "instrument_id", "open_rate",
+                      "close_rate", "sl_rate", "tp_rate", "fill_rate", "equity", "balance")
+
+
+def _check_trade_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """`swing_trades.detail_json` holds numbers, booleans and short id/code strings only: a trade
+    row becomes immutable when closed, so free text (which may copy licensed feed text) could never be
+    scrubbed by the 7-day purge; such text belongs in `swing_events`."""
+    def walk(value: Any, where: str) -> None:
+        if isinstance(value, str):
+            if not _CODE_STRING.fullmatch(value):
+                raise LedgerError(f"swing trade detail {where}: free text is not allowed (ids/codes only)")
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise LedgerError(f"swing trade detail {where}: non-finite number")
+        elif isinstance(value, Mapping):
+            for k, v in value.items():
+                walk(str(k), f"{where}.key")
+                walk(v, f"{where}.{k}")
+        elif isinstance(value, list | tuple):
+            for i, v in enumerate(value):
+                walk(v, f"{where}[{i}]")
+        elif value is not None and not isinstance(value, bool | int | float):
+            raise LedgerError(f"swing trade detail {where}: unsupported {type(value).__name__}")
+    walk(detail, "detail")
+    return detail
+
+
+def _check_public_detail(detail: Mapping[str, Any], what: str) -> None:
+    """A public-facing row's detail never names a price, units, amounts or broker ids (§7.3)."""
+    for key, value in detail.items():
+        low = str(key).lower()
+        if any(part in low for part in _PRIVATE_KEY_PARTS):
+            raise LedgerError(f"{what}: key {key!r} is private (percent-only public record)")
+        if isinstance(value, Mapping):
+            _check_public_detail(value, what)
+        elif isinstance(value, list | tuple):
+            for item in value:
+                if isinstance(item, Mapping):
+                    _check_public_detail(item, what)
 
 
 def _merge_ids(existing: Iterable[Any], new: Iterable[Any]) -> list[int]:

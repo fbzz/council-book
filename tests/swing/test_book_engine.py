@@ -200,3 +200,49 @@ def test_approval_drift_skips_swing_lines_closed_at_the_broker():
     assert B.approval_drift({"NDX": 0.30}, base, live) == pytest.approx(0.08)       # KEEP still live: counts
     assert B.approval_drift(current, base, B.build_vehicle_map([Row("GONE", 2, "open"), Row("KEEP", 1, "open")])) \
         == pytest.approx(0.08)
+
+
+# ------------------------------------------------------------------------------ review (SW-4 hunt)
+def test_entry_line_enforces_stop_and_loss_caps():
+    with pytest.raises(ValueError):
+        B.SwingLine(line_id="SW_ACME", ref="idea:a", ticker="ACME", side="long", action="enter",
+                    pinned_w=0.08, settlement="real", stop_pct=None, sigma_ann=0.4)   # S5: mandatory
+    with pytest.raises(ValueError):
+        entry(size=0.08, stop=0.11)                   # 0.88% NAV at the stop > 0.8%
+    with pytest.raises(ValueError):
+        entry(size=0.04, stop=0.13)                   # long stop beyond 12%
+    with pytest.raises(ValueError):
+        entry("WIDG", "short", 0.08, stop=0.07)      # 0.56% NAV at the stop > 0.5%
+    assert entry(size=0.08, stop=0.10).pinned_w == pytest.approx(0.08)
+    assert entry("WIDG", "short", 0.0625, stop=0.08).pinned_w == pytest.approx(-0.0625)
+
+
+def test_duplicate_swing_lines_raise(lp):
+    with pytest.raises(ValueError, match="duplicate"):
+        run(lp, extra_lines=[entry("ACME"), entry("ACME", size=0.04)])
+
+
+def test_cluster_filled_by_holds_does_not_drop_a_short_entry(lp):
+    d0 = run(lp)
+    members = lp.risk["caps"]["equity_beta_cluster"]["members"]
+    cluster = sum(abs(d0.final_w.get(s, 0.0)) for s in members)
+    tight = override(lp, "risk", {"caps.equity_beta_cluster.max": cluster + 0.05})
+    hold = B.open_line("trade:1", "HOLD", "long", 0.08, sigma_daily=0.02, beta_60d=1.0)
+    d = run(tight, current={"SW_HOLD": 0.08}, extra_lines=[hold, entry("WIDG", "short", 0.04, stop=0.06)])
+    assert d.final_w["SW_WIDG"] == pytest.approx(-0.04) and not d.swing_dropped
+    d = run(tight, current={"SW_HOLD": 0.08}, extra_lines=[hold, entry("ACME", beta_60d=1.0)])
+    assert d.swing_dropped == {"SW_ACME": "swing_book_limit:R5"}
+
+
+def test_unmapped_swing_position_is_not_unknown(policy):
+    """A portfolio parsed with the universe map only (watch) names it UNMAPPED_<id>."""
+    from council.broker.parsing import unmapped_symbol
+    from council.stocks import corporate
+
+    m = B.build_vehicle_map([Row("ACME", 9001, "open")])
+    snap = snapshot({unmapped_symbol(9001): 0.08})
+    achieved, unknown = line_weights(snap, policy, swing_map=m)
+    assert unknown == [] and achieved == {"SW_ACME": pytest.approx(0.08)}
+    seen = {7: corporate.Observation(unmapped_symbol(9001), sl_rate=95.0, bid=120.0)}
+    [v] = corporate.classify_vanished_positions(seen, [], [], policy, sigma_4h={}, swing_map=m)
+    assert v.outcome == corporate.SWING_CLOSED and v.line == "SW_ACME"

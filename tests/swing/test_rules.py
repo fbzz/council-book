@@ -314,3 +314,39 @@ def test_candidate_from_card_converts_percent_fields(sp):
     assert run(c, sp=sp).ok
     assert run(replace(c, px_ge_10=False), sp=sp).code == "price_too_low"
     assert run(replace(c, px_ge_10=None), sp=sp).code == "price_too_low"
+
+
+# ------------------------------------------------------------------------------ review (SW-4 hunt)
+def test_s2_one_swing_trade_per_ticker(sp):
+    b = book(trades=[trade("brk", sector="Fin")])
+    b = replace(b, trades=[replace(b.trades[0], ticker="BRK.B")])
+    assert run(cand(ticker="BRK_B", sector="Other"), b, sp).code == "already_open"   # BRK.B == BRK_B
+    ok, dropped = R.final_pass([cand(ref="idea:a", sector="A"), cand(ref="idea:b", sector="B")],
+                               book(), sp, flat_cost())
+    assert [v.ref for v in ok] == ["idea:a"] and [d.code for d in dropped] == ["already_open"]
+    assert R.public_code("already_open") == "S2:already_open"
+
+
+def test_unknown_kill_state_fails_closed(sp):
+    assert run(cand(), book(kill_state="UNKNOWN"), sp).code == "kill_state"
+
+
+def test_no_accepted_entry_breaks_a_hard_cap(sp):
+    """Every accepted entry, over a grid of stops / ATR / SI / drawdown: size <= 8%, planned loss at
+    the stop <= 0.8% (long) / 0.5% (short) NAV, stop within the side's range."""
+    for side in ("long", "short"):
+        for stop in (0.02, 0.03, 0.05, 0.07, 0.08, 0.10, 0.12):
+            for atr in (0.01, 0.04, 0.09):
+                for si in (5.0, None):
+                    for dd in (None, -0.12):
+                        c = cand(side=side, adv_usd=5e8, stop_pct=stop, atr_pct=atr, sigma_daily=0.04,
+                                 target_pct=0.30, short_interest_pct_float=si)
+                        v = run(c, book(drawdown_from_peak=dd), sp)
+                        if not v.ok:
+                            continue
+                        cap = 0.008 if side == "long" else 0.005
+                        assert v.size_nav <= 0.08 + 1e-12
+                        assert v.size_nav * v.stop_pct <= cap + 1e-12
+                        assert v.stop_pct <= (0.12 if side == "long" else 0.08) + 1e-12
+                        if dd is not None:
+                            assert v.size_nav <= 0.04 + 1e-12
