@@ -4,7 +4,8 @@
 Code enforces the risk limits, a human approves every order, and every decision is sealed publicly
 before it can be executed.**
 
-> Status: **AWAITING ACCOUNT** — the system is being built in public. Nothing trades yet.
+> Status: **AWAITING ACCOUNT** — built in public; the onboarding checks, rehearsal and smoke tickets
+> are ready for the Agent Portfolio token ([runbook](docs/runbook.md)). Nothing trades yet.
 
 ## What this is
 - An experiment: can a council of language-model agents, bounded by deterministic code, run an

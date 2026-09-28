@@ -17,7 +17,9 @@ Order of operations for `approve` (any failure stops before a single order is se
      every leg's reason.
   3b. a rebalance must have been made under the current policy (stored policy SHA; the cycle
      record's for decisions written before it was stored). Flatten and compliance are exempt:
-     they only reduce and must never be stranded by a policy commit.
+     they only reduce and must never be stranded by a policy commit. A smoke ticket (M5-D2) is
+     exempt too, but needs its published ops row (step 3, every step) and a NORMAL kill switch
+     (a close-only smoke ticket also under WARN / RESUMED).
   4. fresh READ snapshot: every position a kept leg closes still exists; line drift <= policy.
      The current book is the snapshot PLUS the opens the broker still holds for a closed market
      (ledger.pending_open_weights), exactly as the engine counted it in the proposal's base.
@@ -60,6 +62,7 @@ class ApprovalDeps:
     now_fn: Callable[[], datetime] = utcnow
     guard_fn: Callable[[], None] | None = None            # default: real process guards
     executor_kwargs: Mapping[str, Any] | None = None
+    journal_dir: Any = None                               # M5-K why screen; default paths.JOURNAL_DIR
 
 
 def run_guards(deps: ApprovalDeps) -> None:
@@ -95,6 +98,14 @@ def approve(decision_id: str, deps: ApprovalDeps) -> Any:
         raise ApprovalRefused(f"kill switch {kill_state}: only flatten or compliance may be approved")
     if plan.risk_increasing and not getattr(d, "published_commit", None):
         raise ApprovalRefused("risk-increasing plan whose commitment was never published")
+    if d.kind == "smoke":
+        # M5-D2: a smoke ticket needs its weightless ops row published (every step, risk-reducing
+        # ones too) and a NORMAL kill switch; a flatten supersedes it anyway
+        if not getattr(d, "published_commit", None):
+            raise ApprovalRefused("smoke ticket whose ops row was never published")
+        reducing = all(leg.kind in ("close", "partial_close") for leg in plan.legs)
+        if kill_state != "NORMAL" and not reducing:   # a smoke close stays approvable under WARN
+            raise ApprovalRefused(f"kill switch {kill_state}: smoke tickets need NORMAL")
     dropped = market_hours_drops(plan, d.kind, policy, now)
     kept = [leg for leg in plan.legs if leg.seq not in dropped]
     if not kept:
@@ -123,6 +134,7 @@ def approve(decision_id: str, deps: ApprovalDeps) -> Any:
         raise ApprovalRefused(f"post-trade gross {gross:.2f}x above the hard {GROSS_HARD_MAX:.1f}x")
 
     _screen(kept_plan, deps, drift=drift, gross=gross, deadline=_as_dt(d.valid_until) if d.valid_until else None)
+    why_screen(d, kept_plan, deps)
     for seq, why in sorted(dropped.items()):
         deps.print_fn(f"dropped leg {seq}: {why}")
     from council.operator.guards import new_nonce, typed_nonce_confirm
@@ -509,6 +521,24 @@ def _screen(plan: Any, deps: ApprovalDeps, *, drift: float, gross: float,
     p(f"gross after {gross:.2f}x · drift since proposal {drift:.3f} · cost {plan.cost_bps_nav:.1f} bp of NAV")
     if deadline is not None:
         p(f"approval deadline {deadline:%Y-%m-%d %H:%MZ} (a leg past its own time above is dropped)")
+
+
+def why_screen(d: Any, plan: Any, deps: ApprovalDeps) -> list[str]:
+    """M5-K: per line with a leg, why it moved (the public trail over the sealed document) and its
+    legs in percent and x. A display aid only: it never refuses and never raises; a leg without a
+    trail is flagged so the operator can reject."""
+    from council.operator.why import decision_why
+
+    try:
+        missing = decision_why(d, plan, state_dir=deps.state_dir, journal_dir=deps.journal_dir,
+                               echo=deps.print_fn)
+    except Exception as exc:
+        deps.print_fn(f"WARNING: why trail unavailable ({type(exc).__name__}); reject unless you know why "
+                      "each line moves")
+        return []
+    if missing:
+        deps.print_fn(f"WARNING: no trail for {', '.join(missing)}; reject unless you know why it moves")
+    return missing
 
 
 def _json(value: Any) -> Any:

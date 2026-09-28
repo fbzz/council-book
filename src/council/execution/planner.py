@@ -44,6 +44,13 @@ Rules (every one is tested):
   exceeds risk.anti_chase_sigma daily sigmas, and `gap_guard_no_reference` when either is missing.
 - `build_flatten_plan` closes EVERY position (unmapped ones included) with full closes only and
   no leg cap.
+- `build_smoke_plan` (m5-readiness §8, M5-D2) turns an operator smoke ticket's intents into legs
+  with the SAME construction: an open by exact units through `_Builder.open` (broker minimums,
+  real floor, stop fitted to the broker bounds, stop-loss rate), a close / partial close through
+  `_Builder.close`, and a stop-loss move through `_Builder.modify_sl`. Capability gates do not
+  apply (a smoke ticket is what proves them); anything the builder would skip raises
+  SmokePlanError with the skip code. A smoke leg's line is the vehicle's line, else
+  `UNMAPPED_<instrument id>` (as the exposure snapshot names it).
 """
 
 from __future__ import annotations
@@ -468,6 +475,43 @@ class _Builder:
         self.drafts.append(self.stamp(draft, fee))
         return draft
 
+    def modify_sl(self, line: str, p: Position, distance: float, reason: str) -> _Draft | None:
+        """Move an open position's stop-loss to `distance` (fitted to the broker's SL bounds); the
+        rate is taken from the fresh quote exactly as an open's. risk_increasing when the move
+        loosens the stop."""
+        quote = bid_ask(self.quotes.get(p.symbol))
+        if quote is None:
+            self.skip(line, "no_quote")
+            return None
+        row = self.eligibility.get(p.symbol)
+        if row is None:
+            self.skip(line, "no_eligibility")
+            return None
+        direction: Direction = "long" if p.is_buy else "short"
+        config = next((c for c in row.leverage_configs if c.direction == direction
+                       and p.leverage in c.leverage_values and c.settlement == p.settlement), None)
+        if config is None or not (config.allow_edit_stop_loss and config.allow_sl_tp):
+            self.skip(line, "stop_not_allowed")
+            return None
+        fitted = fit_to_eligibility(distance, p.leverage, config, buffer_pp=self.sl_buffer_pp)
+        if fitted is None or (direction == "long" and fitted >= 1):
+            self.skip(line, "stop_outside_broker_bounds")
+            return None
+        bid, ask = quote
+        rate = stop_loss_rate(direction, bid, ask, fitted)
+        current = p.sl_rate or 0.0
+        looser = rate < current if direction == "long" else (current <= 0 or rate > current)
+        draft = _Draft(
+            key=self._next_key(), kind="modify_sl", line=line, symbol=p.symbol,
+            instrument_id=p.instrument_id, direction=direction, settlement=p.settlement,
+            leverage=p.leverage, delta_w=0.0, units=p.units, amount_usd=self.exposure(p),
+            risk_increasing=bool(looser), reason=reason, position_id=p.position_id, sl_rate=rate,
+            stop_distance=fitted, sl_margin_pct=sl_margin_pct(fitted, p.leverage),
+            whole_units=self.whole(p.symbol),
+        )
+        self.drafts.append(self.stamp(draft, 0.0))
+        return draft
+
     # ------------------------------------------------------------------ one line
     def plan_line(self, line: str, target: float, current: float, positions: list[Position]) -> None:
         longs = [p for p in positions if p.is_buy]
@@ -730,3 +774,100 @@ def build_flatten_plan(
         kept, current=current, line_gross=line_gross, locked_gross=0.0, locked_net=0.0,
         skipped=b.skipped,
     )
+
+
+# ---------------------------------------------------------------------------------- smoke tickets
+class SmokePlanError(ValueError):
+    """A smoke intent the shared leg construction refuses; the message is the skip code."""
+
+
+@dataclass(frozen=True)
+class SmokeIntent:
+    """One leg of an operator smoke ticket (M5-D2): `open` (choice + exact units + stop distance),
+    `close` / `partial_close` (position [+ units]) or `modify_sl` (position + stop distance)."""
+
+    kind: LegKind
+    reason: str
+    choice: VehicleChoice | None = None
+    units: float | None = None
+    stop_distance: float | None = None
+    position: Position | None = None
+
+
+def smoke_line(universe: Universe, symbol: str, instrument_id: int | None) -> str:
+    """The line a smoke leg is booked on: the vehicle's line, else UNMAPPED_<instrument id>."""
+    line = vehicle_to_line(universe).get(symbol)
+    if line is not None:
+        return line
+    return f"{UNMAPPED_PREFIX}{instrument_id}"
+
+
+def build_smoke_plan(
+    *,
+    intents: Iterable[SmokeIntent],
+    snapshot: ExposureSnapshot,
+    quotes: Mapping[str, Any],
+    eligibility: Mapping[str, EligibilityRow],
+    nav_usd: float,
+    policy: Policy,
+    economics: TradeEconomics | None = None,
+    cost_bps: CostFn | None = None,
+) -> Plan:
+    """The legs of one smoke ticket, built with the planner's own leg and stop-loss construction
+    (see the module rules). The weight walk starts from `snapshot`, so the approval's drift and
+    gross re-checks read these legs exactly as a rebalance's. Raises SmokePlanError on any skip."""
+    if not (math.isfinite(nav_usd) and nav_usd > 0):
+        raise ValueError("nav_usd must be positive")
+    items = list(intents)
+    if not items:
+        raise SmokePlanError("smoke_no_legs")
+    universe = policy.universe
+
+    def line_of(symbol: str, instrument_id: int | None) -> str:
+        return smoke_line(universe, symbol, instrument_id)
+
+    stops: dict[str, float] = {}
+    leverage: dict[str, int] = {}
+    for it in items:
+        if it.kind == "open":
+            if it.choice is None or it.units is None or it.stop_distance is None:
+                raise SmokePlanError("smoke_open_incomplete")
+            line = line_of(it.choice.symbol, it.choice.instrument_id)
+            stops[line], leverage[line] = float(it.stop_distance), int(it.choice.leverage)
+    b = _Builder(
+        policy=policy, nav=nav_usd, vehicle_for=lambda *_: None, quotes=quotes,
+        stop_distance=stops, leverage_for=leverage, eligibility=eligibility,
+        cost_bps=cost_bps or (lambda *_: (0.0, 0.0)), economics=economics,
+    )
+    current: dict[str, float] = {}
+    line_gross: dict[str, float] = {}
+    for p in snapshot.positions:
+        line = line_of(p.symbol, p.instrument_id)
+        w = b.exposure(p) / nav_usd
+        current[line] = current.get(line, 0.0) + (w if p.is_buy else -w)
+        line_gross[line] = line_gross.get(line, 0.0) + w
+    for it in items:
+        before = len(b.skipped)
+        if it.kind == "open":
+            assert it.choice is not None
+            line = line_of(it.choice.symbol, it.choice.instrument_id)
+            b.open(line, it.choice.direction, None, reason=it.reason, choice=it.choice, units=it.units)
+        else:
+            if it.position is None:
+                raise SmokePlanError("smoke_position_missing")
+            line = line_of(it.position.symbol, it.position.instrument_id)
+            if it.kind == "close":
+                b.close(line, it.position, it.reason)
+            elif it.kind == "partial_close":
+                if it.units is None or not 0 < it.units < it.position.units:
+                    raise SmokePlanError("smoke_partial_units_invalid")
+                b.close(line, it.position, it.reason, units=it.units)
+            else:
+                if it.stop_distance is None:
+                    raise SmokePlanError("smoke_stop_distance_missing")
+                b.modify_sl(line, it.position, float(it.stop_distance), it.reason)
+        fatal = [note for note in b.skipped[before:] if not note.endswith("capped_at_max_units_per_order")]
+        if fatal:
+            raise SmokePlanError(fatal[0].split(": ", 1)[-1])
+    return _assemble(b.drafts, current=current, line_gross=line_gross, locked_gross=0.0,
+                     locked_net=0.0, skipped=b.skipped)

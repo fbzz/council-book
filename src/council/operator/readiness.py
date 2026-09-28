@@ -974,7 +974,9 @@ def b3_plists(p: Probes) -> Result:
             bad.append(f"{pl.name}: role")
         if pl.env.get("COUNCIL_AGENT_CONTEXT") != "1":
             bad.append(f"{pl.name}: agent context")
-        council = [a for a in pl.program if a.endswith("/council")]
+        # the live jobs run `<release>/.venv/bin/council`; the soak jobs `<release>/.venv/bin/python -m
+        # council.operator.soak` (M5-F): either executable must live in the installed release
+        council = [a for a in pl.program if a.endswith(("/council", "/python"))]
         if not council or not all(a.startswith(release + "/") for a in council):
             bad.append(f"{pl.name}: not the release path")
         for name, value in pl.env.items():

@@ -1,49 +1,166 @@
 # Operator runbook
 
-Nothing in this runbook is automated: each step is run by the human operator.
+Nothing in this runbook is automated: the human operator runs every step, in a plain Terminal.app
+window, never in an agent session, an editor terminal or under launchd. Every operator command
+refuses anywhere else (`council ops assert-operator` shows why), and most refuse unless they run from
+the installed release (release pinning). Amounts in this public runbook are placeholders (`<N>`).
 
-## Onboarding (once the Agent Portfolio exists)
-1. In the broker's web UI, create the **Agent Portfolio** and two API keys for it: one **read-only**
-   and one **write**. Never create keys on the main account for this project.
-2. In the operator terminal (a plain Terminal window, not an agent session):
-   ```sh
-   export COUNCIL_ROLE=operator
-   council keys init-write-keychain      # creates the separate auto-locking write keychain
-   council keys store-read               # prompts (no echo) for the read token and the app key
-   council keys store-write              # prompts (no echo) for the write token
-   council doctor --live-read            # scopes, eligibility, costs, candles, feeds entitlement
-   ```
-3. Record the private fixtures (`council doctor --record-fixtures`) and review the proposed vehicle
-   for every line (real UCITS/ETC vs 1× CFD).
-4. Tag the spec (`council-spec-v1`) and run the **smoke test**: minimum-size tickets, each approved
-   separately — a 1× long on a core vehicle, a real crypto buy, a short CFD with a stop-loss, a stop
-   modification and a partial close. Confirm in the main account that every mirrored position has the
-   same stop-loss.
-5. Install the tagged release and load the jobs: `ops/install.sh council-spec-v1 --load`.
-
-## Every proposal
 ```sh
-council inbox
-council show <decision>
-council approve <decision>            # re-checks everything, asks for a typed nonce, unlocks the write keychain
-council reject <decision> --reason "…"
+REL="$HOME/Library/Application Support/council-book/releases/current"
+alias council-op='"$HOME/Library/Application Support/council-book/releases/current/.venv/bin/council"'
+export COUNCIL_ROLE=operator
 ```
-Never click "Always Allow" on a keychain prompt.
 
-## Kill switch
+`council-op doctor --ready [--track core|stocks] [--post-token] [--json] [--network]` lists every
+readiness gate with its code and the next command to run; it exits 0 when ready, 1 when not.
+
+## 1. Before the token
+
+1. **eToro licence question.** Ask eToro in writing (support ticket) whether the agents may read the
+   broker's news feed (Licensed Content) for your personal use. When the answer is yes:
+   `council-op ops attest etoro-licence --ref <ticket>` (the ticket is checked, never stored). Until
+   then `doctor --ready` shows the feed gate red; turning the feed off is a policy change
+   (`policy/council.yaml` `news.broker_feed: false`).
+2. **Disk and power:** at least 10 GiB free; the Mac on AC with `sudo pmset -c sleep 0`.
+3. **Non-broker secrets**, one Keychain item each, typed at a no-echo prompt (never on the command
+   line): `council-op keys store <name>` for `tiingo` (a dedicated account), `gov-user-agent`
+   (`council-book (contact: <e-mail>)`), `ntfy-topic`, `healthcheck-url` (a 15-minute check with a
+   45-minute grace), optionally `fred`, `sec-user-agent` and `alpaca` (Track S), and `soak-probe`
+   (paste the output of `openssl rand -hex 16`).
+4. **Publisher deploy key** with write access to the repository (GitHub → Settings → Deploy keys),
+   used by the publisher clone in the state directory.
+5. **Tag and install from `origin`, without loading.** Tag the commit you reviewed, push the tag, and
+   install from a fresh clone of that tag, so neither a local tag nor a dev-tree script is trusted:
+   ```sh
+   git tag -a council-spec-v1 -m "council-spec-v1: first live release (core)" <reviewed-commit>
+   git push origin council-spec-v1
+   T=$(mktemp -d) && git clone -q --depth 1 --branch council-spec-v1 https://github.com/fbzz/council-book.git "$T/cb"
+   "$T/cb/ops/install.sh" council-spec-v1    # shows the commit; type its first 8 characters; loads nothing
+   ```
+   Then add the `council-op` alias above to `~/.zshrc`.
+6. **Agent deny rules** are project-level and checked in (`.claude/settings.json`, source
+   `ops/claude/deny-rules.json`). Open Claude Code in the repository and check that `/permissions`
+   lists them. They narrow accidents; they are not a security boundary.
+7. **Write keychain and checks:**
+   ```sh
+   council-op keys init-write-keychain      # pick a password you will type at every approval
+   council-op notify test
+   council-op ops attest ntfy-received
+   council-op ops attest tiingo-dedicated
+   council-op ops attest power-ok           # only if you accept the power gate as amber
+   ```
+8. **Dress rehearsal** (about 20 minutes, against a fake broker in a throwaway sandbox with its own
+   keychain; it opens a `[REHEARSAL]` shell and walks you through token day):
+   ```sh
+   cd "$REL" && ops/rehearse-onboarding.sh     # --keep keeps the sandbox
+   ```
+   Its cycle step runs on the stub model, synthetic bars and the fake broker (no network), but on
+   the wall clock: run it within two hours after a slot (02:40, 06:40, 10:40, 14:40, 18:40 or
+   22:40 UTC), or the slot is recorded `missed` and nothing is proposed.
+   On exit it records the result itself (`ops record-dress`).
+9. **launchd soak** (48 hours: the stub model hourly, one real-model rehearsal cycle a day, a local
+   remote only):
+   ```sh
+   "$REL/ops/install.sh" council-spec-v1 --rehearsal --load
+   # after 48 h:
+   "$REL/ops/uninstall.sh" --rehearsal
+   ```
+10. **Check:** `council-op doctor --ready --track core --network` shows only token gates open.
+
+## 2. Token day (core track)
+
+Start on a weekday morning, London time; allow about three hours.
+
+1. **In the eToro web UI** (you, never an agent): create the **Agent Portfolio**, fund its copy, and
+   set the copy's **Copy Stop Loss** looser than the kill switch (40% recommended). Create two user
+   tokens for it: `council-read` (read scope only) and `council-write` (write scope). Note the
+   Builders' Economy terms version. Never create keys on the main account.
+2. **Keys and checks:**
+   ```sh
+   council-op keys store-read                 # app key + READ token, no echo
+   council-op keys store-write                # WRITE token into the write keychain, no echo
+   council-op keys verify                     # GET only; unlocks the write keychain once
+   council-op ops attest terms-version
+   council-op doctor --live-read              # token gates, codes only
+   council-op account set-mirror --funding-usd <N> --from-broker
+   council-op instruments resolve             # check the vehicle, currency and unit of every line
+   council-op doctor --record-fixtures        # private; purged after 7 days
+   council-op doctor --ready --track core --post-token
+   ```
+   If `keys verify` reports that the API exposes no scopes, check both tokens in the UI, then run
+   `council-op ops attest token-scopes`.
+3. **If a gate needs a policy change** (a floor, a dead candidate, a unit): the agents write the
+   change with a CHANGELOG policy-change entry; you review it, tag it (for example
+   `council-spec-v1.1`) and install from `origin` as in §1.5, then repeat the last line of step 2.
+4. **Smoke tickets**, minimum size, one at a time: S1 to S4 in LSE hours (a real ETF/ETC long, its
+   stop-loss moved, a partial close, the close), then S5 (BTC), then S6 (a CFD short, outside the FX
+   break). For each step:
+   ```sh
+   council-op smoke propose S1 --preview      # the exact request: currency, units, stop-loss
+   council-op smoke propose S1                # prints <id>
+   council-op show <id>
+   council-op approve <id>                    # typed nonce, then the write-keychain password
+   council-op smoke verify <id>               # automatic checks + the manual checklist
+   council-op ops attest mirror-copied --decision <id>   # after looking at the main account
+   ```
+   After S1: `council-op ops attest fee-charged-on=virtual,mirror` (the levels you saw charged) and
+   `council-op ops attest copy-stop-loss`. A step refused with `smoke_min_above_cap` is skipped and
+   its capability stays off. Smoke records stay private; only a weightless ops row is published.
+5. **First live cycle by hand**, at a slot (:40 of 02, 06, 10, 14, 18 or 22 UTC, at most 120 minutes
+   late), once `council-op smoke status` shows no open or pending ticket:
+   ```sh
+   env COUNCIL_ROLE=runner COUNCIL_MODE=live "$REL/.venv/bin/council" cycle
+   ```
+   Then handle the proposal as in §3.
+6. **Load the jobs** (refused unless `doctor --ready --track core --post-token` is green):
+   ```sh
+   "$REL/ops/install.sh" council-spec-v1 --load
+   launchctl list | grep com.fbzz.council
+   ```
+7. **The next 48 hours:** approve or reject proposals from the notifications; run
+   `council-op doctor --ready --post-token` once a day.
+
+## 3. Every proposal
+
+```sh
+council-op inbox
+council-op show <id>                  # legs and, per line, why it moves (--why: every line's trail)
+council-op approve <id>               # re-checks everything, typed nonce, unlocks the write keychain
+council-op reject <id> --reason "…"   # the reason is published
+council-op inputs show <cycle> --html # optional: exactly what each agent read (private, local)
+```
+
+After the reveal anyone, agents included, can run `council why <cycle> [<line>]` on the public
+record. Never click "Always Allow" on a keychain prompt. An execution has succeeded only when it
+reaches `completed`; `blocked` and `execution_unknown` halt later live cycles until you act (§5).
+
+## 4. Kill switch
+
 - **WARN** (−20% from the lifetime peak): no new risk is proposed.
-- **HALT** (−25%): a flatten proposal is issued every cycle with urgent notifications until you
-  approve it (`council flatten`) or reject it. Resuming later requires `council resume --reason "…"`;
-  the peak stays the lifetime peak.
+- **HALT** (−25%): a flatten proposal is issued every cycle, with urgent notifications, until you
+  approve it with `council-op approve <id>` or reject it. After recovery run
+  `council-op resume --reason "…"`; the lifetime peak stays, so the next check halts again while
+  equity is still below the halt line.
 
-## Weekly (10 minutes)
-- Check the ops page: missed cycles, parse failures, fallbacks.
-- Compare the main account's mirror with the published book (percentages only) and record the result.
-- Check token expiry (`council doctor`) and free disk space.
+## 5. Incidents
 
-## Incidents
-- **Leak in the public repo:** stop the jobs (`ops/uninstall.sh`), remove the content, rotate any
-  exposed credential, publish an incident note.
-- **Execution unknown / blocked:** `council resume-exec <decision>` only looks orders up and
-  reconciles; it never sends new orders. Outstanding opens need a fresh proposal.
-- **Token compromised:** delete it in the broker UI, create a new one, store it again.
+| Situation | Command |
+|---|---|
+| `execution_unknown` | `council-op resume-exec <id>` (broker lookups only; never sends) |
+| An order waiting for a closed market | check the broker, then `council-op ops resolve <id> --filled` or `--cancelled` |
+| `blocked` with no active or waiting leg | check the broker, then `council-op ops review <id> --reason "…"` |
+| HALT | §4 |
+| Token rejected or compromised | delete and recreate it in the eToro UI, then `keys store-read` or `keys store-write`, then `keys verify` |
+| Keychain locked after a reboot | log in; the next cycle recovers |
+| eToro asks for Licensed Content to be deleted | `council-op purge-licensed --all` within 24 hours (`--dry-run` counts first); reply with its receipt |
+| Leak in the public repository | `"$REL/ops/uninstall.sh"`, remove the content, rotate any exposed credential, publish an incident note |
+
+Outstanding opens after an incident need a fresh proposal; nothing re-sends an old one.
+
+## 6. Weekly (10 minutes)
+
+- `council-op doctor --ready --post-token`: token expiry, disk, backups, pings, the licensed-content
+  sweeper.
+- The ops page: missed cycles, parse failures, fallbacks.
+- The main account's mirror against the published book (percentages only).
+- `council-op stocks status` once the stock sleeve is live.

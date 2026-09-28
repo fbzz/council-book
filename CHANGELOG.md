@@ -1,5 +1,20 @@
 # Changelog
 
+## Runbook v2 and onboarding docs (2026-09-27)
+- `docs/runbook.md` rewritten for token day and after: pre-token steps, token day in order (keys,
+  live-read checks, the mirror ratio, instrument resolution, smoke tickets S1–S6 with their
+  attestations, the first live cycle, loading the jobs), every proposal, the kill switch, an incident
+  table and the weekly check, all through the installed release (`council-op`). Stale references
+  fixed: there is no `council flatten` (a HALT ends when the operator approves the flatten proposal),
+  and the input capture is `council inputs show <cycle>`.
+- `docs/data-rights.md`: a "Decision trail" paragraph (size holds read as one code, R11; an R15
+  value only when every cost is a policy floor and the history is Tiingo or Binance; fee codes never
+  carry a value; `P:` items cited by id with their publisher) and a "Licensed content (eToro)"
+  paragraph.
+- `docs/architecture.md`: an "Operator boundary and onboarding" section; README status line;
+  `CLAUDE.md` / `AGENTS.md` command lists (`inputs show|verify|prune`, `notify test`,
+  `rehearse onboarding`). Docs only: no change to `policy/`, `prompts/` or code.
+
 ## transparency v2, stage 2: public-domain news for the news role, the broker feed switch, input capture wired — policy change (2026-09-26)
 - **Policy change**: `policy/council.yaml` gains `news:` (`max_items: 40`, `lookback_h: 48`,
   `quotas: {broker_feed: 25, sec: 8, fed_board: 5, bls: 2, bea: 2, treasury: 2, eia: 2}`,

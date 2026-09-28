@@ -33,6 +33,9 @@ instruments = typer.Typer(add_completion=False, no_args_is_help=True,
                           help="Resolve the vehicles of every line through eligibility (operator only; READ token).")
 notify = typer.Typer(add_completion=False, no_args_is_help=True,
                      help="Operator notifications (ntfy; the topic is private and never printed).")
+smoke = typer.Typer(add_completion=False, no_args_is_help=True,
+                    help="Onboarding smoke tickets S1–S7 (operator only; READ token; executed only "
+                         "through `approve`).")
 app.add_typer(keys, name="keys")
 app.add_typer(notify, name="notify")
 app.add_typer(site, name="site")
@@ -40,6 +43,10 @@ app.add_typer(ops, name="ops")
 app.add_typer(account, name="account")
 app.add_typer(stocks, name="stocks")
 app.add_typer(instruments, name="instruments")
+app.add_typer(smoke, name="smoke")
+rehearse = typer.Typer(add_completion=False, no_args_is_help=True,
+                       help="Onboarding rehearsal against the fake broker (dev role; marked sandbox only).")
+app.add_typer(rehearse, name="rehearse")
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -151,6 +158,19 @@ def _ctx(*, mode: str, stub_llm: bool = False, publish: str = "preview"):
     return build_context(mode=mode, stub_llm=stub_llm, publish=publish)  # type: ignore[arg-type]
 
 
+def _dress_context():
+    """Inside a marked rehearsal sandbox (the dress rehearsal's [REHEARSAL] shell), `cycle` and
+    `watch` never reach a model, a data vendor, eToro or the real remote: they run on the sandbox
+    context (`rehearsal.onboarding.dress_cli_context`). None outside a sandbox."""
+    from council.operator.release import is_marked_sandbox
+
+    if not is_marked_sandbox():
+        return None
+    from council.rehearsal.onboarding import dress_cli_context
+
+    return dress_cli_context()
+
+
 @app.command()
 def cycle(
     slot: str = typer.Option("auto", help="'auto' runs the due slot (late <= 120 min)."),
@@ -164,7 +184,10 @@ def cycle(
     from council.settings import Settings
 
     settings = Settings.from_env()
-    if rehearsal:
+    sandbox = _dress_context()
+    if sandbox is not None:
+        ctx = sandbox                         # [REHEARSAL] shell: stub model, fake broker, sandbox remote
+    elif rehearsal:
         from council import paths
         from council.context import build_context
 
@@ -186,8 +209,8 @@ def watch() -> None:
     from council.watch import run_watch
 
     settings = Settings.from_env()
-    ctx = _ctx(mode="live" if settings.mode == "live" else "dry_run",
-               publish="push" if settings.mode == "live" else "preview")
+    ctx = _dress_context() or _ctx(mode="live" if settings.mode == "live" else "dry_run",
+                                   publish="push" if settings.mode == "live" else "preview")
     out = run_watch(ctx)
     typer.echo(json.dumps(out.__dict__, default=str, indent=1))
 
@@ -235,7 +258,7 @@ def show(
     source: str = typer.Option("auto", "--source", help="With --why: auto | journal | ledger."),
     journal_dir: Path = typer.Option(None, "--journal", help="With --why: the journal/ directory."),
 ) -> None:
-    """Show a proposal's legs in percent and x (with --why: the per-line decision trail)."""
+    """Show a proposal's legs and, per line with a leg, why it moves (with --why: every line's trail)."""
     if why:
         from council.operator.why import run_why
 
@@ -243,7 +266,7 @@ def show(
     require_operator("show", pinned=OPERATOR_COMMANDS["show"])        # ledger legs: operator terminal only
     from council.context import build_context
     from council.models.plan import Plan
-    from council.operator.approve import ApprovalDeps, _screen
+    from council.operator.approve import ApprovalDeps, _screen, why_screen
 
     ctx = build_context(mode="stub", publish="none")
     d = ctx.ledger.get_decision(decision_id)
@@ -253,6 +276,7 @@ def show(
         deps = ApprovalDeps(ledger=ctx.ledger, policy=ctx.policy, read=None, write_factory=lambda: None,
                             state_dir=ctx.state_dir, print_fn=typer.echo)
         _screen(plan, deps, drift=0.0, gross=plan.gross_after, deadline=d.valid_until)
+        why_screen(d, plan, deps)                         # M5-K: why each line with a leg moves
 
 
 @app.command()
@@ -618,14 +642,16 @@ def keys_store_read() -> None:
 @operator_command("keys store-write", pinned=True)
 def keys_store_write() -> None:
     """Store the Agent Portfolio WRITE token in the separate write keychain (no echo)."""
-    target = _key_store_target()
+    _key_store_target()                  # refuses a leftover sandbox variable / an unmarked sandbox
     from council.operator.keychain import (
         WRITE_SERVICE,
         store_token_interactive,
         write_keychain_path,
     )
 
-    store_token_interactive(WRITE_SERVICE, keychain=target if target is not None else write_keychain_path())
+    # always the separate write keychain: inside a marked sandbox that is <sandbox>/council-write
+    # .keychain-db (throwaway), never the throwaway READ file, so the rehearsal mirrors token day
+    store_token_interactive(WRITE_SERVICE, keychain=write_keychain_path())
     typer.echo("stored")
 
 
@@ -1006,6 +1032,72 @@ def stocks_prune() -> None:
         state_dir=paths.state_dir(), repo=commands.default_repo(), broker=rb, now=utcnow())))
 
 
+# --------------------------------------------------------------------------------- smoke
+# M5-D2 (m5-readiness §8): a smoke ticket is proposed here and executed only by `approve` (every
+# re-check); the watch publishes its weightless ops row. READ token only; nothing here writes to
+# the broker.
+def _smoke_deps(*, read_required: bool):
+    from council.context import build_context
+    from council.operator.smoke import SmokeDeps
+    from council.settings import Settings
+
+    settings = Settings.from_env()
+    ctx = build_context(mode="stub", publish="none", settings=settings, policy_from_head=True)
+    return SmokeDeps(ledger=ctx.ledger, policy=ctx.policy, read=_read_client(required=read_required),
+                     state_dir=ctx.state_dir, print_fn=typer.echo)
+
+
+def _smoke_run(fn):
+    from council.operator.smoke import SmokeRefused
+
+    try:
+        return _broker_refusal(fn)
+    except SmokeRefused as exc:
+        _refuse(str(exc))
+
+
+@smoke.command("propose")
+@operator_command("smoke propose", pinned=True)
+def smoke_propose(
+    step: str = typer.Argument(..., help="S1 … S7 (see `council smoke status`)."),
+    preview: bool = typer.Option(False, "--preview", help="Print the exact write request; write nothing."),
+) -> None:
+    """Propose one minimum-size smoke ticket (refused while anything is pending, blocked, not NORMAL,
+    or while the launchd jobs are loaded). Approve it with `council-op approve <id>`."""
+    from council.operator import smoke as sm
+
+    deps = _smoke_deps(read_required=True)
+    _smoke_run(lambda: sm.propose(step, deps, preview=preview))
+
+
+@smoke.command("verify")
+@operator_command("smoke verify", pinned=True)
+def smoke_verify(decision_id: str) -> None:
+    """Automatic checks of a completed smoke ticket; all green records the step's capability."""
+    from council.operator import smoke as sm
+
+    deps = _smoke_deps(read_required=True)
+    checks = _smoke_run(lambda: sm.verify(decision_id, deps))
+    raise typer.Exit(0 if checks and all(c.ok for c in checks) else 1)
+
+
+@smoke.command("status")
+@operator_command("smoke status", pinned=True)
+def smoke_status() -> None:
+    """Every step's latest ticket, K20 (no smoke ticket pending, no smoke position open), K14 and S3;
+    records them in readiness/smoke.json."""
+    from council.operator import readiness
+    from council.operator import smoke as sm
+
+    deps = _smoke_deps(read_required=False)
+    result = _smoke_run(lambda: sm.status(deps))
+    try:
+        readiness.write_record("smoke", head=readiness.Probes.default().head(), gates=result.gates)
+    except readiness.ReadinessError as exc:
+        _refuse(f"readiness record not written: {exc}")
+    raise typer.Exit(0 if result.gates["K20"]["state"] == "green" else 1)
+
+
 # --------------------------------------------------------------------------------- site
 @site.command("build")
 def site_build(out: Path = typer.Option(Path("_site")), journal_dir: Path = typer.Option(Path("journal"))) -> None:
@@ -1017,6 +1109,114 @@ def site_build(out: Path = typer.Option(Path("_site")), journal_dir: Path = type
     mod = runpy.run_path(str(paths.REPO_ROOT / "site" / "build.py"))
     code = mod["main"](["--journal", str(journal_dir), "--out", str(out)])
     raise typer.Exit(code or 0)
+
+
+# --------------------------------------------------------------------------------- rehearse
+@rehearse.command("fake-broker")
+def rehearse_fake_broker(
+    scenario_name: str = typer.Option("onboarding", "--scenario", help="The FakeEtoro scenario (onboarding)."),
+    port: int = typer.Option(0, "--port", help="127.0.0.1 port (0 = any free port)."),
+) -> None:
+    """Serve the onboarding FakeEtoro on 127.0.0.1 inside the marked sandbox COUNCIL_STATE_DIR (L2 dress
+    rehearsal). Writes <sandbox>/fake-broker.port and <sandbox>/rehearsal-tokens.txt (three FAKE
+    tokens, 0600) and serves until interrupted. Refuses the real state dir and an unmarked one."""
+    import signal
+    import threading
+    from datetime import UTC, datetime
+
+    from council import paths
+    from council.broker.fake_server import FakeBrokerServer, FakeServerError
+    from council.operator.release import is_marked_sandbox
+    from council.rehearsal import scenario
+
+    if scenario_name != "onboarding":
+        _refuse(f"unknown scenario {scenario_name!r} (onboarding)")
+    state = paths.state_dir()
+    if "COUNCIL_STATE_DIR" not in os.environ or not is_marked_sandbox(state):
+        _refuse("the fake broker runs only with COUNCIL_STATE_DIR set to a marked rehearsal sandbox")
+    tokens = scenario.Tokens.fresh()
+    fake = scenario.build_fake(tokens, lambda: datetime.now(UTC), now=datetime.now(UTC))
+    token_file = state / "rehearsal-tokens.txt"
+    fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(f"app-key {tokens.app}\nread {tokens.read}\nwrite {tokens.write}\n")
+    try:
+        server = FakeBrokerServer(fake, state, port=port).start()
+    except (FakeServerError, OSError) as exc:
+        _refuse(f"fake broker not started ({type(exc).__name__})")
+    typer.echo(f"fake broker on {server.base_url} (sandbox only); stop with Ctrl-C")
+    done = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: done.set())
+    try:
+        done.wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
+        token_file.unlink(missing_ok=True)
+
+
+@rehearse.command("onboarding")
+def rehearse_onboarding(keep: bool = typer.Option(False, "--keep", help="Keep the throwaway sandbox.")) -> None:
+    """Run the automated token day (L1 steps) in a throwaway sandbox: fake keychain, loopback fake
+    broker, stub model, local bare remote. Touches no real keychain, state dir, remote or network."""
+    import tempfile
+
+    from council.rehearsal import onboarding as ob
+    from council.rehearsal import security as fake_security
+
+    root = Path(tempfile.mkdtemp(prefix="council-rehearsal-"))
+    saved = {name: os.environ.get(name) for name in (*SANDBOX_VARIABLES, "COUNCIL_MODE", "COUNCIL_ROLE")}
+    box = ob.Sandbox.create(root)
+    undo = fake_security.install(box.security)
+    try:
+        box.start_broker()
+        box.activate(os.environ.__setitem__)
+        os.environ["COUNCIL_ROLE"] = "dev"
+        results = ob.run_all(box)
+    finally:
+        undo()
+        box.stop()
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        if not keep:
+            ob.remove(box)
+    for line in box.log:
+        typer.echo(line)
+    ok = bool(results) and all(r.ok for r in results) and results[-1].step == "leak scan"
+    typer.echo(("rehearsal passed" if ok else "rehearsal FAILED") + (f"; sandbox kept at {root}" if keep else ""))
+    raise typer.Exit(0 if ok else 1)
+
+
+@ops.command("record-dress")
+@operator_command("ops record-dress", pinned=True)
+def ops_record_dress(
+    sandbox: Path = typer.Option(..., "--sandbox", help="The dress rehearsal's sandbox state dir."),
+) -> None:
+    """Record the human dress rehearsal (gate O5): checks the sandbox read-only (marked, keys verify
+    green, a completed smoke ticket and a completed council decision) and writes readiness/dress.json
+    in the real state dir. The only file the dress rehearsal writes outside its sandbox."""
+    from council import paths
+    from council.operator import readiness
+    from council.operator.release import default_state_dir
+    from council.rehearsal.dress import evidence
+
+    if paths.state_dir().expanduser().resolve() != default_state_dir().expanduser().resolve():
+        _refuse("run record-dress from your own terminal, outside the [REHEARSAL] shell")
+    counts, problems = evidence(sandbox)
+    gate = ({"state": "green", "code": "dress_ok"} if not problems
+            else {"state": "red", "code": "dress_failed:" + problems[0]})   # one code per gate
+    try:
+        readiness.write_record("dress", head=readiness.Probes.default().head(), gates={"O5": gate})
+    except readiness.ReadinessError as exc:
+        _refuse(f"readiness record not written: {exc}")
+    typer.echo(f"{gate['state']} O5 {gate['code']} (smoke {counts['smoke']}, council {counts['council']})")
+    for problem in problems[1:]:
+        typer.echo(f"  also: {problem}")
+    raise typer.Exit(0 if not problems else 1)
 
 
 @app.command()

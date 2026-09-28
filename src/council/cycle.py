@@ -17,6 +17,14 @@ Each decision records the policy SHA it was made under. Orders the broker holds 
 market (waiting_for_market) are resolved read-only before the broker snapshot, and a flatten never
 adds a second close for a position whose close the broker already holds.
 
+Smoke tickets (M5-D2, K20): while a smoke ticket is pending or in flight, or a smoke-opened position
+is open (`ledger.smoke_active`), a live cycle seals no rebalance or compliance proposal (flag
+`smoke_open`) and publishes its ops row only: no cycle document, status or book (they would carry
+the smoke weight). A HALTED / FLAT cycle still seals its flatten (which supersedes a pending ticket),
+publishing the ops row only; that flatten keeps no public cycle link, so its execution report stays
+private (M5-N). Meanwhile the NAV state and the lifetime peaks are never initialised or
+raised; after the token-day tickets they restart once, before the first live proposal.
+
 Costs and trade size (WP-E): the cycle prices the $1 fixed fee as a PRIVATE scalar of NAV from the
 snapshot's equity and the operator's mirror ratio (`runtime.cycle_trade_economics`; missing →
 the policy's assumed ratio and the flag `mirror_ratio_missing`), sets it on the real non-crypto cost
@@ -106,6 +114,8 @@ def redact_failed(rec: CycleRecord) -> bool:
     return any(f.startswith(REDACT_ERROR + ":") for f in rec.flags)
 
 
+SMOKE_BASELINE_RESET_KEY = "smoke_baseline_reset"   # = ledger.db.SMOKE_BASELINE_RESET_KEY
+SMOKE_OPEN_FLAG = "smoke_open"            # K20: no proposal sealed while a smoke ticket is active (M5-D2)
 REAL_PEAK_KEY = "real_adjusted_peak"      # ledger runtime: lifetime peak of the real-adjusted equity (D19)
 
 
@@ -206,6 +216,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         except Exception as exc:  # any broker read failure: skip safely, alert once per 4 h
             return _skip_broker(ctx, info, now, flags, f"broker_error:{broker_error_kind(exc)}")
         corporate_blockers = corporate_actions(ctx, snapshot, cycle_id)
+    smoke = ledger.smoke_active([p.position_id for p in snapshot.positions]) if snapshot is not None else []
     # M5-D1 capability gates: consulted only with a connected broker (None = nothing changes)
     caps = _capabilities(ctx, now) if snapshot is not None else None
     # PRIVATE: the fixed fee and the real trade floor as NAV shares (never published or prompted)
@@ -337,11 +348,26 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     valid_until: datetime | None = None
     if plan is not None and plan.legs:
         kind = "flatten" if kill_state in ("HALTED", "FLAT") else ("compliance" if decision.compliance and not _discretionary(decision) else "rebalance")
+    else:
+        kind = None
+    # K20 (M5-D2): while a smoke ticket is pending or in flight, or a smoke position is open, no
+    # rebalance or compliance proposal is sealed and only the ops row is published (the cycle
+    # document, status and book would carry the smoke position's weight, M-2). HALTED / FLAT still
+    # seal their flatten, which supersedes a pending ticket; only the ops row is published and the
+    # flatten keeps no public cycle link (its execution report would carry the smoke weight).
+    smoke_hold = bool(smoke) and kill_state not in ("HALTED", "FLAT")
+    if smoke_hold:
+        rec.flags.append(SMOKE_OPEN_FLAG)
+        kind = None
+    if kind is not None and plan is not None:
         decision_id = f"{cycle_id}-{kind}-{uuid.uuid4().hex[:6]}"
         valid_until = decision_valid_until(plan, kind, slot)
         ledger.create_decision(
             decision_id=decision_id, kind=kind, valid_until=valid_until,
-            cycle_id=cycle_id,
+            # a flatten sealed while a smoke position is open keeps no public cycle link: its
+            # execution report would carry the smoke leg's weight (and so the NAV); like a watch
+            # flatten it waits for its own public type (M5-N)
+            cycle_id=None if smoke else cycle_id,
             target={"final_w": decision.final_w, "base_w": decision.base_w,
                     "nav_usd": snapshot.equity_usd if snapshot else None},
             plan=plan, state="awaiting_publication", now=now, policy_sha=policy.sha256)
@@ -355,7 +381,11 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         ledger.record_role_call(cycle_id, call)
 
     # ---- seal + publish
-    published, sha = _seal_and_publish(ctx, rec, pack, reveal_now=decision_id is None, snapshot=snapshot)
+    if smoke:   # a HALTED flatten too: the cycle document would carry the smoke weight (M-2)
+        published, sha = _publish_ops_only(ctx, rec)
+    else:
+        published, sha = _seal_and_publish(ctx, rec, pack, reveal_now=decision_id is None,
+                                           snapshot=snapshot, smoke_open=bool(smoke))
     state = rec.decision_state
     if redact_failed(rec):
         # no commitment exists: the decision never becomes `proposed` (approve refuses it) and
@@ -644,22 +674,31 @@ def _snapshot_and_kill(ctx: CycleContext, now: datetime) -> tuple[Any, str, Any]
     imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
     snapshot = snapshot_from_pnl(payload, vehicle_by_instrument=imap.symbols_by_id(),
                                  line_by_vehicle=vehicle_to_line(policy.universe), now=now)
-    raw_nav = ledger.get_runtime("nav_state")
+    # M-3 (M5-D2): while a smoke ticket is pending, in flight or holds a position, the NAV state and
+    # the lifetime peaks are read but never initialised or raised; after the token-day tickets they
+    # restart once, at the first smoke-free read before any live proposal
+    smoke = ledger.smoke_active([p.position_id for p in snapshot.positions])
+    reset = not smoke and ledger.smoke_baseline_due()
+    raw_nav = None if reset else ledger.get_runtime("nav_state")
     nav = update_nav(NavState.model_validate(raw_nav) if raw_nav else None, snapshot.equity_usd, now)
-    ledger.set_runtime("nav_state", nav.model_dump(mode="json"))
+    if not smoke:
+        ledger.set_runtime("nav_state", nav.model_dump(mode="json"))
+    if reset:
+        ledger.set_runtime(SMOKE_BASELINE_RESET_KEY, now.isoformat())
     reads = [(datetime.fromisoformat(t), float(e)) for t, e in ledger.get_runtime("equity_reads", [])]
     reads = [r for r in reads if now - r[0] <= timedelta(hours=6)][-20:] + [(now, snapshot.equity_usd)]
     ledger.set_runtime("equity_reads", [[t.isoformat(), e] for t, e in reads])
     prev = ledger.get_runtime("kill_state", "NORMAL")
-    real_peak = ledger.get_runtime(REAL_PEAK_KEY)
+    real_peak = None if reset else ledger.get_runtime(REAL_PEAK_KEY)
     kd = killswitch.evaluate(nav=nav, equity_reads=reads, prev_state=prev,
                              has_positions=bool(snapshot.positions), policy=policy,
                              real_drag=ledger.real_fee_drag(),       # D19: the real account's fee drag
                              real_peak=float(real_peak) if isinstance(real_peak, int | float) else None)
-    if kd.real_peak is not None:        # PRIVATE: lifetime peak of the real-adjusted equity
+    if kd.real_peak is not None and not smoke:   # PRIVATE: lifetime peak of the real-adjusted equity
         ledger.set_runtime(REAL_PEAK_KEY, kd.real_peak)
     ledger.set_runtime("kill_state", kd.state)
-    ledger.add_equity_mark(now, snapshot.equity_usd, credit_usd=snapshot.credit_usd, source="cycle")
+    ledger.add_equity_mark(now, snapshot.equity_usd, credit_usd=snapshot.credit_usd,
+                           source="smoke" if smoke else "cycle")
     return snapshot, kd.state, nav
 
 
@@ -1086,9 +1125,12 @@ def cycle_install_key(ctx: CycleContext, rec: CycleRecord) -> bytes:
         return secrets.token_bytes(32)
 
 
-def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: bool, snapshot) -> tuple[bool, str | None]:
+def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: bool, snapshot,
+                      smoke_open: bool = False) -> tuple[bool, str | None]:
     """Seal the public cycle document, store the exact sealed bytes + salt privately, and publish
-    the commitment (plus the reveal when there is nothing to hide, i.e. no proposal)."""
+    the commitment (plus the reveal when there is nothing to hide, i.e. no proposal). While a smoke
+    ticket is active (`smoke_open`) no status or book file is published: they would carry the smoke
+    position's weight (M-2)."""
     from council.publish import commit_reveal, journal, redact
 
     if ctx.publisher is None:
@@ -1117,9 +1159,10 @@ def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: 
     files.update(journal.ops_files(_existing(ctx, ops_path), [redact.public_ops_row(rec)]))
     state = "AWAITING_ACCOUNT" if ctx.sources.broker is None else (
         {"WARN": "WARN", "HALTED": "HALTED", "FLAT": "FLAT"}.get(rec.kill_state, "LIVE"))
-    files.update(journal.status_files(redact.public_status(
-        state, last_cycle_id=rec.cycle_id, last_cycle_at=rec.slot, kill_state=rec.kill_state)))
-    if snapshot is not None and rec.risk is not None:
+    if not smoke_open:
+        files.update(journal.status_files(redact.public_status(
+            state, last_cycle_id=rec.cycle_id, last_cycle_at=rec.slot, kill_state=rec.kill_state)))
+    if snapshot is not None and rec.risk is not None and not smoke_open:
         ref_w = rec.reference.weights() if rec.reference else None
         files.update(journal.book_files(redact.public_book(
             rec.cycle_id, rec.risk.base_w or snapshot.signed_w, lines=lines, reference_weights=ref_w,

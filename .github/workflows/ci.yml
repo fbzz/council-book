@@ -65,6 +65,28 @@ jobs:
           printf '%s\n' "${ids[@]}"
           uv run pytest -m "not live" "${ids[@]}"
 
+  rehearsal:
+    # The onboarding rehearsal (m5-readiness §7.2 L1 + variants, M5-G) and the L2 dress-rehearsal
+    # script run with fakes: FakeEtoro on 127.0.0.1 only, the stub model, a local bare remote, no
+    # keychain (the opt-in -m macos_keychain test never runs here). Under 120 s.
+    name: rehearsal
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+      - name: Shellcheck the dress-rehearsal script
+        run: shellcheck ops/rehearse-onboarding.sh
+      - name: Rehearsal (no network, no LLM, no broker)
+        run: uv run pytest -m "not live" tests/rehearsal
+
   gitleaks:
     runs-on: ubuntu-latest
     timeout-minutes: 10

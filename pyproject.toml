@@ -38,6 +38,7 @@ packages = ["src/council"]
 testpaths = ["tests"]
 markers = [
   "live: touches the network or a live model (opt-in, never in CI)",
+  "macos_keychain: creates a real throwaway macOS keychain (opt-in with -m macos_keychain, never in CI)",
 ]
 
 [tool.ruff]

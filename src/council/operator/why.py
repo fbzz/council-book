@@ -12,6 +12,11 @@ Sources (`--source`):
            analysts' cards, the medoid's fall-back lines, claim-to-line tags). Operator terminal only.
   auto     (default) the ledger in the operator's terminal, otherwise the journal.
 
+`decision_why` (M5-K) is the operator's screen for `council show <decision>` and the approval
+screen: per line with a leg, the same trail over the SEALED, not yet revealed public document in
+`state_dir/salts/` (verified against its commitment), then the ledger legs in percent and x. After
+the reveal its trail blocks equal `council why --source journal` on the same document.
+
 An unrevealed cycle has no public document, and its trail would show the council's leanings before
 the human decision, so outside the operator's terminal it is refused (exit 2) before anything is
 read. Both sources print the same fixed words (engine notes and plan skips go through
@@ -104,9 +109,53 @@ def journal_trails(journal_dir: Path, cycle_id: str, *,
     path = root / journal.cycle_path(cycle_id)
     if not path.is_file():
         return None
+    execution, ops = journal_outcome(journal_dir, cycle_id)
+    return trail.trails(_json(path), execution, ops, names=names)
+
+
+def journal_outcome(journal_dir: Path, cycle_id: str) -> tuple[Any, Any]:
+    """The cycle's public execution file and latest ops row under `journal_dir` (None when absent):
+    what carries the decision outcome, for the revealed and the sealed document alike."""
+    from council.publish import journal
+
+    root = Path(journal_dir).parent
     execution_path = root / journal.execution_path(cycle_id)
     execution = _json(execution_path) if execution_path.is_file() else None
-    return trail.trails(_json(path), execution, ops_row(root, cycle_id), names=names)
+    return execution, ops_row(root, cycle_id)
+
+
+# ---------------------------------------------------------------------------------- sealed
+def sealed_document(state_dir: Path, cycle_id: str) -> Any | None:
+    """PRIVATE until the reveal: the exact sealed public cycle document kept in
+    `state_dir/salts/<cycle>.json`, or None when there is none. Raises WhyError when the kept
+    bytes and salt no longer open their commitment (a tampered or corrupt seal is never shown)."""
+    from council.publish import commit_reveal
+
+    try:
+        sealed = commit_reveal.load_sealed(cycle_id, Path(state_dir) / "salts")
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError) as exc:
+        raise WhyError(f"sealed document for {cycle_id} is unreadable ({type(exc).__name__})") from exc
+    if not commit_reveal.verify_bytes(sealed.sealed_bytes, sealed.salt, sealed.commitment_sha):
+        raise WhyError(f"sealed document for {cycle_id} does not open its commitment")
+    doc = json.loads(sealed.sealed_bytes)
+    if doc.get("cycle_id") != cycle_id:
+        raise WhyError(f"sealed document for {cycle_id} names cycle {doc.get('cycle_id')!r}")
+    return doc
+
+
+def sealed_trails(state_dir: Path, journal_dir: Path, cycle_id: str, *,
+                  names: Mapping[str, str] | None = None) -> list[trail.LineTrail] | None:
+    """The trails of the sealed, not yet revealed public document (M5-K), with the same public
+    outcome files `journal_trails` reads, so after the reveal the two are identical. Public models
+    only (the document passed the allow-list when it was sealed); shown only in the operator's
+    terminal because it shows the council's leanings before the human decision."""
+    doc = sealed_document(state_dir, cycle_id)
+    if doc is None:
+        return None
+    execution, ops = journal_outcome(journal_dir, cycle_id)
+    return trail.trails(doc, execution, ops, names=names)
 
 
 # ---------------------------------------------------------------------------------- ledger
@@ -153,6 +202,88 @@ def ledger_trails(state_dir: Path, cycle_id: str, *,
         return None
     rec = CycleRecord.model_validate(raw)
     return trail.record_trails(rec, names=names, **ledger_state(ledger, rec.decision_id))
+
+
+# ---------------------------------------------------------------------------------- screen
+SEALED_NOTE = "private until the reveal: the council's leanings before your decision; do not share"
+NO_TRAIL = "no trail for this line in the public document"
+
+
+def leg_row(leg: Any) -> str:
+    """One ledger leg in percent of NAV and in x (weights are signed fractions of NAV)."""
+    before, after = float(leg.weight_before or 0.0), float(leg.weight_after or 0.0)
+    text = (f"   leg {leg.seq} {leg.kind} {leg.symbol} {leg.direction} x{leg.leverage}: "
+            f"{before:+.1%} → {after:+.1%} of NAV ({before:+.3f}x → {after:+.3f}x)")
+    if leg.stop_distance:
+        text += f", stop {float(leg.stop_distance):.1%}"
+    return text
+
+
+def _has_trail(t: trail.LineTrail | None) -> bool:
+    return t is not None and bool(t.steps or t.why_not)
+
+
+def decision_why(
+    decision: Any,
+    plan: Any,
+    *,
+    state_dir: Path,
+    journal_dir: Path | None = None,
+    names: Mapping[str, str] | None = None,
+    echo: Callable[[str], Any] = typer.echo,
+) -> list[str]:
+    """M5-K: the operator's "why" screen for `council show <decision>` and the approval screen. For
+    every line with a leg, the line's trail (`publish.trail` over the sealed public document, or the
+    revealed one once it is in the journal) followed by that line's ledger legs in percent and x.
+    Public-model content only: no private input and no licensed text is read. Returns the lines
+    with a leg but no trail (empty when every leg is explained); never raises."""
+    from council import paths
+
+    cycle_id = getattr(decision, "cycle_id", None)
+    legs = list(getattr(plan, "legs", None) or [])
+    if not legs:
+        return []
+    if not cycle_id:
+        kind = getattr(decision, "kind", "decision")
+        echo(f"why: no council trail; this {kind} comes from code, not from a council cycle")
+        return []
+    journal_root = Path(journal_dir) if journal_dir is not None else paths.JOURNAL_DIR
+    names = names if names is not None else line_names()
+    try:
+        found = sealed_trails(state_dir, journal_root, cycle_id, names=names)
+        source = "sealed public document, not yet revealed"
+        if found is None:
+            found = journal_trails(journal_root, cycle_id, names=names)
+            source = "revealed public record"
+    except Exception as exc:     # a display aid: a broken seal is reported, never a crash
+        echo(f"why: trail unavailable for {cycle_id} ({exc if isinstance(exc, WhyError) else type(exc).__name__})")
+        return sorted({str(leg.line or leg.symbol) for leg in legs})
+    if found is None:
+        echo(f"why: no sealed or revealed public document for {cycle_id}; trail unavailable")
+        return sorted({str(leg.line or leg.symbol) for leg in legs})
+    by_line = {t.line: t for t in found}
+    leg_lines = {str(leg.line or leg.symbol) for leg in legs}
+    order = [t.line for t in found if t.line in leg_lines]           # `council why`'s order
+    order += sorted(leg_lines - set(order))
+    echo("")
+    echo(f"{cycle_id} · why each line with a leg · source: {source}")
+    if source.startswith("sealed"):
+        echo(SEALED_NOTE)
+    missing: list[str] = []
+    for key in order:
+        t = by_line.get(key)
+        echo("")
+        if _has_trail(t):
+            for text in trail.render_trail(t):
+                echo(text)
+        else:
+            missing.append(key)
+            echo(f"{t.headline if t is not None else key}")
+            echo(f"   {NO_TRAIL}")
+        for leg in legs:
+            if str(leg.line or leg.symbol) == key:
+                echo(leg_row(leg))
+    return missing
 
 
 # ---------------------------------------------------------------------------------- command
@@ -235,6 +366,7 @@ def register(app: typer.Typer) -> None:
 
 
 __all__ = [
-    "PRIVATE_NOTE", "WhyError", "cycle_of", "journal_trails", "ledger_state", "ledger_trails",
-    "operator_context_ok", "register", "run_why", "why_command",
+    "NO_TRAIL", "PRIVATE_NOTE", "SEALED_NOTE", "WhyError", "cycle_of", "decision_why", "journal_outcome",
+    "journal_trails", "leg_row", "ledger_state", "ledger_trails", "operator_context_ok", "register",
+    "run_why", "sealed_document", "sealed_trails", "why_command",
 ]

@@ -11,6 +11,11 @@ Rules:
 - Any `council-book.etoro.*` item is refused in an agent context (CLAUDECODE, any CLAUDE_CODE_*
   variable, or an agent ancestor from `guards.FORBIDDEN_ANCESTORS`) BEFORE `security` runs.
   COUNCIL_AGENT_CONTEXT is deliberately NOT an agent signal here: the launchd runner sets it.
+- Inside a marked rehearsal sandbox (state dir with a `REHEARSAL` marker, never the real one), a
+  `council-book.etoro.*` item never touches the login keychain: a lookup or store with no explicit
+  keychain goes to `COUNCIL_KEYCHAIN_FILE` (the throwaway file), and raises BEFORE `security` runs
+  when that variable is unset. An explicit keychain must be that file or the sandbox's own write
+  keychain (`<sandbox>/council-write.keychain-db`).
 """
 
 from __future__ import annotations
@@ -54,6 +59,30 @@ def _is_write_keychain(keychain: Path | str | None) -> bool:
     if keychain is None:
         return False
     return Path(keychain).expanduser().resolve() == write_keychain_path().resolve()
+
+
+def _sandbox_keychain(service: str, keychain: Path | str | None,
+                      env: Mapping[str, str] | None = None) -> Path | str | None:
+    """The keychain a broker item may use inside a marked rehearsal sandbox (unchanged outside
+    one, and for non-broker items). Raises before `security` runs if the sandbox would reach the
+    login keychain or any keychain other than the throwaway file / the sandbox write keychain."""
+    from council.operator.release import is_marked_sandbox
+
+    if not service.startswith(BROKER_SERVICE_PREFIX) or not is_marked_sandbox():
+        return keychain
+    environ = env if env is not None else os.environ
+    throwaway = environ.get("COUNCIL_KEYCHAIN_FILE", "").strip()
+    if not throwaway:
+        raise KeychainError("rehearsal sandbox without COUNCIL_KEYCHAIN_FILE: broker items are never "
+                            "read from or stored in the login keychain under the REHEARSAL marker")
+    throwaway_path = Path(throwaway).expanduser()
+    if keychain is None:
+        return throwaway_path
+    chosen = Path(keychain).expanduser().resolve()
+    if chosen not in (throwaway_path.resolve(), write_keychain_path().resolve()):
+        raise KeychainError("rehearsal sandbox: broker items use only COUNCIL_KEYCHAIN_FILE or the "
+                            "sandbox write keychain")
+    return keychain
 
 
 def _process_ancestors() -> list[str]:
@@ -119,6 +148,7 @@ def read_secret(
     The write token (service or keychain) is readable only when COUNCIL_ROLE=operator, and no
     broker item is readable from an agent context (checked before `security` runs)."""
     assert_not_agent_for_broker(service, env=env, ancestors=ancestors)
+    keychain = _sandbox_keychain(service, keychain, env)
     role = (env if env is not None else os.environ).get("COUNCIL_ROLE")
     if (service == WRITE_SERVICE or _is_write_keychain(keychain)) and role != "operator":
         raise KeychainError("the write token is readable only from the operator terminal")
@@ -191,6 +221,7 @@ def store_token_interactive(
 ) -> None:
     """Prompt for a token without echo and store it. The value goes to `security -i` on stdin,
     never on a command line, and is never printed or logged."""
+    keychain = _sandbox_keychain(service, keychain)
     value = getpass_fn(f"Paste the token for {service} (input hidden): ").strip()
     if not _TOKEN_CHARS.match(value):
         raise KeychainError("token rejected: empty, too short or unexpected characters")

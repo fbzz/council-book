@@ -24,7 +24,7 @@ CREATE INDEX IF NOT EXISTS role_calls_by_cycle ON role_calls (cycle_id);
 CREATE TABLE IF NOT EXISTS decisions (
     decision_id      TEXT PRIMARY KEY,
     cycle_id         TEXT,
-    kind             TEXT NOT NULL CHECK (kind IN ('rebalance', 'flatten', 'compliance')),
+    kind             TEXT NOT NULL CHECK (kind IN ('rebalance', 'flatten', 'compliance', 'smoke')),
     priority         INTEGER NOT NULL,
     state            TEXT NOT NULL,
     prev_state       TEXT,

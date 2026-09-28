@@ -40,9 +40,10 @@ def test_the_invariants_hold_the_feed_decision():
 
 def test_the_changelog_records_the_news_policy_change():
     changelog = (ROOT / "CHANGELOG.md").read_text()
-    entry = changelog.split("\n## ", 2)[1]
-    assert "policy change" in entry.splitlines()[0].lower()
-    assert "`policy/council.yaml` gains `news:`" in entry
+    # Found by content: later docs-only entries may sit above it.
+    entries = [e for e in changelog.split("\n## ")[1:] if "`policy/council.yaml` gains `news:`" in e]
+    assert len(entries) == 1
+    assert "policy change" in entries[0].splitlines()[0].lower()
 
 
 def test_data_rights_has_a_row_per_public_source():

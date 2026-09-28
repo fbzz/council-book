@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rehearsal soak (M5-F): dry-run watch every 15 min and at load; daily push-auth and soak-probe Keychain checks; writes readiness/soak.json (O3). Never places orders. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.fbzz.council.rehearsal.watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string><string>-i</string>
+    <string>{{RELEASE}}/.venv/bin/python</string><string>-m</string><string>council.operator.soak</string><string>watch</string>
+  </array>
+  <key>WorkingDirectory</key><string>{{RELEASE}}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>{{HOME}}</string>
+    <key>COUNCIL_ROLE</key><string>runner</string>
+    <key>COUNCIL_MODE</key><string>dry_run</string>
+    <key>COUNCIL_AGENT_CONTEXT</key><string>1</string>
+  </dict>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <key>Nice</key><integer>5</integer>
+  <key>StandardOutPath</key><string>{{LOGS}}/rehearsal-watch.out.log</string>
+  <key>StandardErrorPath</key><string>{{LOGS}}/rehearsal-watch.err.log</string>
+</dict>
+</plist>

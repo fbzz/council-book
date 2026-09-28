@@ -74,7 +74,7 @@ table above:
   the repository).
 - The private input capture (every model call's exact input, raw replies including the first reply
   of a corrected call, and the correction turn), its salts, and the private install key. The
-  operator reads the capture in the operator terminal only (`council inputs <cycle>`); the command
+  operator reads the capture in the operator terminal only (`council inputs show <cycle>`); the command
   refuses any agent context, because it can show broker feed text.
 
 ## Units used in public
@@ -101,6 +101,28 @@ slot (`policy/council.yaml` `news`: broker feed 25, SEC 8, Federal Reserve Board
 Treasury and EIA 2 each; at most 40 in all). With no item at all the news role makes no call.
 Public-domain titles and summaries are cleaned (money becomes "[amount removed]", large counts
 "[level removed]") and leak-scanned when they are fetched; an item that trips the scan is dropped.
+
+## Decision trail
+
+`council why <cycle> [<line>]` (and the operator's `council show <id> --why`) explains why each line
+moved or did not (`src/council/publish/trail.py`). On a revealed cycle it reads only the public
+record; the operator's view of a sealed decision goes through the same public mappings, so its words
+follow the same rules as the record. Every size hold, whether a broker minimum, a size floor or a
+skipped leg, reads as one code, "too small to trade (R11)", with no subtype and no number. A
+net-of-cost (R15) value is shown only when every cost fact of the cycle is a policy floor quote
+(`costs:floor`) and the line's volatility comes from its Tiingo or Binance history; any broker cost
+quote, or broker candles, leaves the bare code "net-of-cost gate (R15)". Fee checks (`R14_fee`,
+`R15_fee`) never carry a value. Public-domain news items are cited by their `P:` id with their
+publisher's name; a broker feed item appears only as its opaque `N:` id, with no text and no
+publisher.
+
+## Licensed content (eToro)
+
+The broker's news feed and every broker payload are eToro Licensed Content under the eToro API and
+Builders' Economy terms. The agents may read the feed for the operator's personal use; its text is
+never published, its private copies (input capture, transcripts, recorded fixtures) are purged
+within 7 days by the first cycle of each UTC day (the watch job sweeps daily too), and
+`council purge-licensed --all` removes every copy at once if eToro asks. The feed switch is `policy/council.yaml` `news.broker_feed`.
 
 ## Licences
 

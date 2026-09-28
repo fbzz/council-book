@@ -33,8 +33,12 @@ MATRIX: dict[str, list[str]] = {
     "show": ["show", "d1"],
     "approve": ["approve", "d1"],
     "reject": ["reject", "d1", "--reason", "not now"],
+    "smoke propose": ["smoke", "propose", "S1"],
+    "smoke verify": ["smoke", "verify", "d1"],
+    "smoke status": ["smoke", "status"],
     "ops resolve": ["ops", "resolve", "d1", "--filled"],
     "ops review": ["ops", "review", "d1", "--reason", "checked the broker"],
+    "ops record-dress": ["ops", "record-dress", "--sandbox", "/nonexistent-sandbox"],
     "resume-exec": ["resume-exec", "d1"],
     "resume": ["resume", "--reason", "recovered"],
     "keys init-write-keychain": ["keys", "init-write-keychain"],
@@ -256,7 +260,11 @@ def test_keys_under_the_marker_store_only_in_the_rehearsal_keychain_file(stops, 
     for command in ("store-read", "store-write"):
         assert _run(["keys", command]).exit_code == 0
     stored = [shlex.split(stdin or "") for _, stdin in stops.security]
-    assert len(stored) == 3 and all(parts[-1] == str(rehearsal_keychain) for parts in stored)
+    assert len(stored) == 3
+    # READ items only in the throwaway file; the WRITE token only in the sandbox write keychain
+    assert [parts[-1] for parts in stored[:2]] == [str(rehearsal_keychain)] * 2
+    assert stored[2][-1] == str(state / "council-write.keychain-db")
+    assert "council-book.etoro.write" in stored[2] and "council-book.etoro.read" not in stored[2]
 
 
 # ------------------------------------------------------------------------------ ops assert-operator

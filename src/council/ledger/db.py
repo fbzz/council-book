@@ -27,6 +27,12 @@ Rules:
   a leg written before origins existed counts as discretionary (`origins=` filters). Costs: the
   detail's `cost_bps_nav` is the variable cost and `fee_bps_nav` the private fixed fee;
   `cost_bps_since` sums both unless `include_fee=False`.
+- Smoke tickets (m5-readiness §8.1, M-3): every fill-derived cycle query above ignores legs of
+  `kind=smoke` decisions (R12 hold timers, held levels, R4d cool-off, turnover, R13/R14 budgets,
+  costs, the real fee drag). `smoke_positions` / `smoke_active` say whether a smoke ticket is
+  pending or in flight or a smoke-opened position is still open; live cycles refuse to seal a
+  proposal meanwhile. Schema v4 admits the `smoke` kind (a v3 ledger's decisions table is rebuilt
+  once, rows kept).
 - Broker payloads are stored with credential-like keys redacted. The file never lives in the repo.
 """
 
@@ -56,6 +62,7 @@ from council.ledger.states import (
     PENDING_STATES,
     PRIORITY,
     SATELLITE_BLOCKER_PREFIX,
+    SMOKE_KIND,
     WAITING_STATE,
     DecisionKind,
     can_transition,
@@ -67,7 +74,7 @@ from council.paths import assert_outside_repo, state_dir
 from council.policy import Universe
 from council.risk.nav import NavState
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 LEDGER_FILE = "ledger.sqlite3"
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _SENSITIVE_KEYS = ("authorization", "api_key", "api-key", "user_key", "user-key", "token", "secret", "password")
@@ -87,6 +94,7 @@ FILLED_LEG_STATES: tuple[str, ...] = ("filled", "partially_filled", "rejected_pa
 STOP_HIT_EVENT = "stop_hit"
 NAV_STATE_KEY = "nav_state"
 KILL_STATE_KEY = "kill_state"
+SMOKE_BASELINE_RESET_KEY = "smoke_baseline_reset"          # when the post-smoke NAV baseline restarted
 MATERIAL_FINGERPRINT_KEY = "last_material_fingerprint"      # legacy single fingerprint (read only)
 MATERIAL_FINGERPRINTS_KEY = "last_material_fingerprints"    # per line + "_global" (design §11.4)
 KILL_STATES: frozenset[str] = frozenset({"NORMAL", "WARN", "HALTED", "FLAT", "RESUMED"})
@@ -298,6 +306,35 @@ _LEG_FIELDS = frozenset({
 })
 
 
+def _admit_smoke_kind(conn: sqlite3.Connection, schema: str) -> None:
+    """v4: rebuild a pre-v4 `decisions` table whose kind CHECK lacks 'smoke' (SQLite cannot alter a
+    CHECK). The documented table-rebuild: foreign keys off, copy every row, swap, check keys."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='decisions'").fetchone()
+    if row is None or f"'{SMOKE_KIND}'" in (row["sql"] or ""):
+        return
+    start = schema.index("CREATE TABLE IF NOT EXISTS decisions (")
+    ddl = schema[start:schema.index(");", start) + 2].replace(
+        "CREATE TABLE IF NOT EXISTS decisions (", "CREATE TABLE decisions_v4 (")
+    columns = ", ".join(r["name"] for r in conn.execute("PRAGMA table_info(decisions)"))
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(ddl)
+            conn.execute(f"INSERT INTO decisions_v4 ({columns}) SELECT {columns} FROM decisions")
+            conn.execute("DROP TABLE decisions")
+            conn.execute("ALTER TABLE decisions_v4 RENAME TO decisions")
+            conn.execute("CREATE INDEX IF NOT EXISTS decisions_by_state ON decisions (state)")
+            if conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise LedgerError("foreign key check failed while admitting the smoke kind")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 class Ledger:
     def __init__(self, path: Path | str, *, clock: Callable[[], datetime] = utcnow) -> None:
         self.path = Path(path)
@@ -359,6 +396,7 @@ class Ledger:
                     present = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
                     if column not in present:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                _admit_smoke_kind(conn, schema)
                 conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         finally:
             conn.close()
@@ -622,6 +660,70 @@ class Ledger:
             out[row.line] = out.get(row.line, 0.0) + float(after) - float(before)
         return out
 
+    # ------------------------------------------------------------------ smoke tickets
+    def smoke_positions(self) -> dict[int, str]:
+        """{position id: smoke decision id} of every position a smoke OPEN leg filled that no
+        filled full close (a smoke ticket's or any other decision's, e.g. a flatten) has closed
+        since (a partial close keeps it open). Ledger view only:
+        pass the live ids to `smoke_active` to drop positions the broker no longer holds."""
+        with self._read() as conn:
+            rows = conn.execute(
+                """SELECT l.decision_id, l.kind, l.state, l.position_id, l.position_ids_json
+                   FROM legs l JOIN decisions d ON d.decision_id = l.decision_id
+                   WHERE d.kind = ? OR l.kind = 'close'
+                   ORDER BY COALESCE(l.resolved_at, l.updated_at), l.seq""",
+                (SMOKE_KIND,),
+            ).fetchall()
+            smoke_ids = {r[0] for r in conn.execute("SELECT decision_id FROM decisions WHERE kind = ?",
+                                                    (SMOKE_KIND,))}
+        opened: dict[int, str] = {}
+        for r in rows:
+            if r["state"] not in FILLED_LEG_STATES:
+                continue
+            if r["kind"] == "open":
+                if r["decision_id"] not in smoke_ids:
+                    continue
+                for pid in json.loads(r["position_ids_json"] or "[]"):
+                    opened[int(pid)] = r["decision_id"]
+            elif r["kind"] == "close" and r["position_id"] is not None:
+                opened.pop(int(r["position_id"]), None)
+        return opened
+
+    def smoke_active(self, live_position_ids: Iterable[int] | None = None) -> list[str]:
+        """Why a live cycle may not seal a proposal now (gate K20; empty = no smoke activity):
+        `smoke_pending:<id>` (awaiting publication or proposed), `smoke_in_flight:<id>` (approved,
+        executing, execution_unknown or waiting for its market) and `smoke_position:<id>` (a
+        smoke-opened position still open; only those the broker still holds when `live_position_ids`
+        is given, e.g. after a stop hit)."""
+        in_flight = ("approved", "executing", "execution_unknown", WAITING_STATE)
+        wanted = (*sorted(PENDING_STATES), *in_flight)
+        with self._read() as conn:
+            rows = conn.execute(
+                f"SELECT decision_id, state FROM decisions WHERE kind = ? AND state IN ({','.join('?' * len(wanted))})",
+                (SMOKE_KIND, *wanted),
+            ).fetchall()
+        out = [f"smoke_{'pending' if r['state'] in PENDING_STATES else 'in_flight'}:{r['decision_id']}"
+               for r in rows]
+        live = None if live_position_ids is None else {int(i) for i in live_position_ids}
+        for pid, decision_id in sorted(self.smoke_positions().items()):
+            if live is None or pid in live:
+                out.append(f"smoke_position:{decision_id}")
+        return sorted(dict.fromkeys(out))
+
+    def smoke_baseline_due(self) -> bool:
+        """True once, when the NAV baseline must restart after the token-day smoke tickets: some
+        smoke leg reached the broker, no other decision was ever created (the first live cycle has
+        not proposed yet) and the reset was not done (`smoke_baseline_reset`). Track S's S7 runs
+        after go-live and never resets the baseline."""
+        if self.get_runtime(SMOKE_BASELINE_RESET_KEY):
+            return False
+        with self._read() as conn:
+            others = conn.execute("SELECT COUNT(*) FROM decisions WHERE kind != ?", (SMOKE_KIND,)).fetchone()[0]
+            sent = conn.execute(
+                """SELECT COUNT(*) FROM legs l JOIN decisions d ON d.decision_id = l.decision_id
+                   WHERE d.kind = ? AND l.submitted_at IS NOT NULL""", (SMOKE_KIND,)).fetchone()[0]
+        return int(others) == 0 and int(sent) > 0
+
     # ------------------------------------------------------------------ legs
     def insert_legs(
         self,
@@ -867,7 +969,8 @@ class Ledger:
         line: str | None = None,
         kinds: Iterable[str] | None = None,
     ) -> list[sqlite3.Row]:
-        """Resolved legs that moved exposure (FILLED_LEG_STATES, never modify_sl), with `done_at`
+        """Resolved legs that moved exposure (FILLED_LEG_STATES, never modify_sl, never a smoke
+        ticket's), with `done_at`
         = resolved_at (else updated_at); optionally since a time, for one line, or for some
         decision kinds."""
         states = ",".join("?" * len(FILLED_LEG_STATES))
@@ -875,9 +978,9 @@ class Ledger:
             f"""SELECT l.line, l.state, l.kind, l.detail_json, d.kind AS decision_kind,
                        COALESCE(l.resolved_at, l.updated_at) AS done_at
                 FROM legs l JOIN decisions d ON d.decision_id = l.decision_id
-                WHERE l.state IN ({states}) AND l.kind != 'modify_sl'"""
+                WHERE l.state IN ({states}) AND l.kind != 'modify_sl' AND d.kind != ?"""
         ]
-        args: list[Any] = list(FILLED_LEG_STATES)
+        args: list[Any] = [*FILLED_LEG_STATES, SMOKE_KIND]     # M-3: smoke never feeds the book
         if since is not None:
             sql.append("AND COALESCE(l.resolved_at, l.updated_at) >= ?")
             args.append(ts(since))

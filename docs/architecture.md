@@ -77,11 +77,32 @@ the model never sees the filing's content. With no news item the news analyst ma
 Every model call's exact input (the desk it read, the earlier turns, the news items, the instruction
 tail) is recorded privately before the call is sent, with every raw reply and any correction turn
 (`state_dir/calls/`, never inside the repository). The operator reads it in the operator terminal:
-`council inputs <cycle> [--role bear] [--html]` prints or renders what each agent saw and the news
+`council inputs show <cycle> [--role bear] [--html]` prints or renders what each agent saw and the news
 reading list (for every item: made into a card, cited, or not used), and `council inputs verify`
 re-checks every hash. These commands, and `council purge-licensed`, refuse any agent context,
 because their output can hold broker feed text. The public record publishes salted commitments,
 never the private text.
+
+## Operator boundary and onboarding
+Every operator command carries one decorator (`@operator_command`) that refuses unless it runs in
+the operator's own terminal: a TTY, `COUNCIL_ROLE=operator`, no agent variables or ancestors, not
+under launchd. Commands that touch the broker, the write keychain or private attestations also
+refuse unless they run from the installed release, a clean checkout of a tag verified on `origin`
+(`ops/install.sh`). The unattended runner (`cycle`, `watch` under launchd) holds the READ token
+only and never imports the broker writer; a test enforces it.
+
+`council doctor --ready` reports every readiness gate (owned by the agents, the user or the token)
+with a code and the next command; `ops/install.sh --load` refuses until the token
+gates are green. Before any real order the operator runs minimum-size **smoke tickets** (S1–S7):
+each goes through the normal `approve` path, its record stays private, and only a weightless ops
+row is published, because a weight would reveal the NAV. Each passed step switches on one
+**capability** (real ETF, stop-loss modify, partial close, real crypto, CFD short, …); the planner
+skips a leg whose capability is not verified (`capability_missing:<name>`). Token day is rehearsed twice against a loopback fake
+broker in a marked throwaway sandbox: automatically in CI (`tests/rehearsal`,
+`council rehearse onboarding`) and by the operator (`ops/rehearse-onboarding.sh`), followed by a
+48-hour launchd soak on a local remote. `council why` renders the per-line decision trail from the
+public record ([data rights](data-rights.md#decision-trail)); the steps are in the
+[runbook](runbook.md).
 
 ## Why so much code around the models
 The research that preceded this repo found that rules written only in prompts were overridden often,

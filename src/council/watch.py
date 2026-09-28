@@ -3,6 +3,10 @@
   - expires stale proposals (atomic),
   - reveals sealed cycles once their decision is terminal (exact sealed bytes + salt),
   - publishes execution records written by the operator terminal (the operator never runs git),
+  - publishes the weightless ops row of each smoke ticket (M5-D2, `journal/ops/smoke.jsonl`) when
+    its public state changes, and moves a ticket from awaiting_publication to proposed once its
+    row reached the remote; a smoke execution is never published otherwise (no book or status
+    file here either). A vanished smoke position is never recorded as a stop hit (M-3),
   - kill switch: on a fresh HALT it creates a standing flatten PROPOSAL and sends an urgent alert,
   - checks that every open position carries a stop-loss and that the cycle heartbeat is fresh,
   - records a vanished position as a broker stop-loss hit (R4d cool-off). With a stock sleeve, a
@@ -56,6 +60,7 @@ class WatchOutcome:
     revealed: list[str] = field(default_factory=list)
     executions_published: list[str] = field(default_factory=list)
     ops_rows_published: list[str] = field(default_factory=list)
+    smoke_rows_published: list[str] = field(default_factory=list)
     alerts: list[str] = field(default_factory=list)
     broker_error: str | None = None     # fixed code when the broker checks could not run
     urgent: list[str] = field(default_factory=list)   # fixed codes of URGENT conditions this run
@@ -114,13 +119,16 @@ def _run(ctx: CycleContext) -> WatchOutcome:
     unpublished: list[str] = []
     out.executions_published = _executions(ctx, files, unpublished)
     out.ops_rows_published = _ops_rows(ctx, files, unpublished)
+    smoke_rows = _smoke_rows(ctx, files, unpublished)
+    out.smoke_rows_published = sorted(smoke_rows)
     out.urgent += [code.split(":")[0] for code in dict.fromkeys(unpublished)]
     for code in dict.fromkeys(unpublished):          # a bad record never stops the loop; retried
         what = "a public ops row" if code.startswith("ops_row") else "an execution report"
         urgent.send_once(ctx, code, "council watch", f"{what} is unpublished ({code})", now)
     if files and ctx.publisher is not None:
         try:
-            ctx.publisher.publish(files, f"watch {now.strftime('%Y-%m-%dT%H%MZ')}: reveals/executions")
+            result = ctx.publisher.publish(files, f"watch {now.strftime('%Y-%m-%dT%H%MZ')}: reveals/executions")
+            _smoke_published(ctx, smoke_rows, getattr(result, "commit_sha", None), now)
             ledger.set_runtime("revealed", sorted(set(ledger.get_runtime("revealed", [])) | set(out.revealed)))
             ledger.set_runtime("executions_published",
                                sorted(set(ledger.get_runtime("executions_published", []))
@@ -292,6 +300,67 @@ def _ops_rows(ctx: CycleContext, files: dict[str, bytes], unpublished: list[str]
     return done
 
 
+# ---------------------------------------------------------------------------- smoke rows
+SMOKE_ROWS_PUBLISHED = "smoke_rows_published"   # = operator.smoke.ROWS_PUBLISHED: {id: public state}
+
+
+def _smoke_rows(ctx: CycleContext, files: dict[str, bytes], unpublished: list[str] | None = None) -> dict[str, str]:
+    """M5-D2 (§8.4): the weightless public row of every smoke ticket whose public state changed
+    (proposed → completed | blocked | rejected), in `journal/ops/smoke.jsonl`. Returns {id: state}
+    of the rows added to `files`; `_smoke_published` records them after a successful publish."""
+    from council.publish import smoke_row
+
+    ledger = ctx.ledger
+    done = dict(ledger.get_runtime(SMOKE_ROWS_PUBLISHED, {}) or {})
+    rows, states = [], {}
+    for d in ledger.decisions(limit=1000):
+        if d.kind != "smoke" or not d.commitment_sha:
+            continue
+        try:
+            executed = any(r.submitted_at is not None for r in ledger.legs(d.decision_id))
+            state = smoke_row.public_smoke_state(d.state, previous=done.get(d.decision_id), executed=executed)
+            if state is None or done.get(d.decision_id) == state:
+                continue
+            rows.append(smoke_row.PublicSmokeRow(
+                id=d.decision_id, step=str((d.target or {}).get("smoke_step", "")), state=state,
+                commitment=d.commitment_sha))
+            states[d.decision_id] = state
+        except Exception as exc:  # noqa: BLE001 - one bad record never stops the watch
+            if unpublished is not None:
+                unpublished.append(f"ops_row_unpublished:{type(exc).__name__}")
+    if not rows:
+        return {}
+    try:
+        existing = files.get(smoke_row.SMOKE_PATH) or _read_existing(ctx, smoke_row.SMOKE_PATH)
+        files.update(smoke_row.smoke_files(existing, rows))
+    except Exception as exc:  # noqa: BLE001
+        if unpublished is not None:
+            unpublished.append(f"ops_row_unpublished:{type(exc).__name__}")
+        return {}
+    return states
+
+
+def _smoke_published(ctx: CycleContext, states: dict[str, str], commit_sha: str | None, now: datetime) -> None:
+    """After a successful publish: remember each row's public state, and move a ticket whose
+    `proposed` row reached the remote from awaiting_publication to proposed (its published commit
+    is what `approve` re-checks). Without a commit (a dry run) nothing becomes approvable."""
+    if not states:
+        return
+    ledger = ctx.ledger
+    done = dict(ledger.get_runtime(SMOKE_ROWS_PUBLISHED, {}) or {})
+    for decision_id, state in states.items():
+        if state == "proposed" and not commit_sha:
+            continue
+        done[decision_id] = state
+        if state != "proposed":
+            continue
+        d = ledger.get_decision(decision_id)
+        if d.state == "awaiting_publication":
+            ledger.set_published_commit(decision_id, commit_sha, now=now)
+            ledger.transition(decision_id, "proposed", "smoke ops row published", now=now)
+    ledger.set_runtime(SMOKE_ROWS_PUBLISHED, done, now=now)
+
+
 # ------------------------------------------------------------------------ broker checks
 def _broker_checks(ctx: CycleContext, now: datetime) -> list[str]:
     from council.cycle import _snapshot_and_kill
@@ -400,6 +469,7 @@ def _stop_hits(ctx: CycleContext, snapshot: Any, now: datetime) -> list[str]:
     ours = {row.position_id for row in ledger.legs_in_states(
                 ["filled", "partially_filled", "submitted", "in_flight", WAITING_STATE])
             if row.kind in ("close", "partial_close") and row.position_id is not None}
+    ours |= set(ledger.smoke_positions())       # M-3: a smoke position never feeds R4d cool-off
     raw_sigma = ledger.get_runtime(STOCK_SIGMA_4H_KEY, {})
     sigma = {str(k): _positive(v) for k, v in raw_sigma.items()} if isinstance(raw_sigma, dict) else {}
     vanished = corporate.classify_vanished_positions(seen, live, ours, ctx.policy, sigma_4h=sigma)

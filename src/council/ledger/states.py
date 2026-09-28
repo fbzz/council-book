@@ -15,8 +15,10 @@ waiting_for_market decision holds every line too unless every waiting leg is a s
 holds only the satellite sleeve (scope `satellite`; `blockers()` reports it as "satellite:<id>").
 Such a hold that times out to blocked keeps its satellite scope; a broken fill resets it to `all`.
 - Terminal states never move again.
-Priority: flatten > compliance > rebalance (policy risk.priority); a lower priority never
-supersedes a pending higher one.
+Priority: flatten > compliance > rebalance > smoke (policy risk.priority); a lower priority never
+supersedes a pending higher one. A `smoke` ticket (m5-readiness §8, operator-proposed onboarding
+test) has priority 0 under the same rule: any other decision (a flatten first of all) supersedes a
+pending smoke ticket, and a smoke ticket supersedes nothing but an older smoke ticket.
 """
 
 from __future__ import annotations
@@ -55,8 +57,9 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     **{state: frozenset() for state in TERMINAL_STATES},
 }
 
-DecisionKind = Literal["rebalance", "flatten", "compliance"]
-PRIORITY: dict[str, int] = {"flatten": 3, "compliance": 2, "rebalance": 1}
+DecisionKind = Literal["rebalance", "flatten", "compliance", "smoke"]
+PRIORITY: dict[str, int] = {"flatten": 3, "compliance": 2, "rebalance": 1, "smoke": 0}
+SMOKE_KIND = "smoke"
 
 LEG_ACTIVE_STATES: frozenset[str] = frozenset({"submitting", "submitted", "in_flight", "unknown"})
 LEG_TERMINAL_STATES: frozenset[str] = frozenset(
