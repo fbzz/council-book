@@ -66,7 +66,13 @@ Rules (every one is tested):
   (`"patch"`); a target closer than the config's minTakeProfitPercentage goes to the broker not at
   all (`"none"`, noted `<line>: tp_below_broker_minimum`). An `exit` order fully closes the line's
   positions; a `set_tp` order (an `open_tp_missing` trade, `set_tp_orders`) PATCHes the approved
-  target onto each position with its current stop. Swing legs never count toward the core leg caps
+  target onto each position with its current stop. Swing legs are priced from the policy's stock
+  cost floors (`per_side_bps` / `carry_bps_day` of a single stock at 1x, the quote's half-spread when
+  wider), never from the core `cost_bps` table; an entry whose cost cannot be priced is skipped
+  `cost_unavailable` (fail closed, never a zero cost). An entry above the swing size, stop or
+  loss-at-stop ceiling (`invariants.SWING_MAX_*`, tightened by `policy.swing`) is skipped
+  `swing_size_above_cap` / `swing_stop_above_cap` / `swing_loss_at_stop_above_cap`; a config that
+  does not allow editing the take-profit gets no `modify_tp` / `set_tp` (`tp_not_editable`). Swing legs never count toward the core leg caps
   (core legs are never dropped for a swing leg); at most MAX_SWING_OPENS swing opens and as many
   `modify_tp` legs per plan. Every swing leg carries `sleeve="swing"` and its `swing_trade_id`.
 """
@@ -279,6 +285,7 @@ class _Builder:
         capabilities: Any | None = None,
     ) -> None:
         self.nav = nav
+        self.policy = policy
         self.capabilities = capabilities       # M5-D1 gates (operator.capabilities.Capabilities) or None
         self.by_line = policy.universe.by_symbol()
         self.vehicle_for = vehicle_for
@@ -596,11 +603,59 @@ class _Builder:
         draft.time_stop_date = order.time_stop_date
         return draft
 
-    def _swing_cost(self, line: str, symbol: str, direction: Direction) -> tuple[float, float, float]:
+    def _swing_cost(self, direction: Direction, settlement: str,
+                    half_spread_bps: float | None = None) -> tuple[float, float, float]:
+        """(per side, carry, fee) of a swing leg from the policy's stock cost floors (the core
+        `cost_bps` table knows only universe lines, so it is never asked about a swing line). A
+        single stock at 1x: real long or CFD short. Raises when the floors cannot be read (an entry
+        then fails closed with `cost_unavailable`; never a silent zero)."""
+        from council.risk.costs import carry_bps_day, fee_applies, per_side_bps
+
+        per_side = per_side_bps(settlement, "stock", None, half_spread_bps, self.policy)
+        carry = carry_bps_day(direction, settlement, 1, "stock", None, self.policy)
+        fee = self.economics.fee_nav_bps if self.economics is not None and fee_applies(settlement, "stock") else 0.0
+        values = (per_side, carry, fee)
+        if not all(math.isfinite(v) and v >= 0 for v in values):
+            raise ValueError("swing cost floors are not finite and non-negative")
+        return values
+
+    def _swing_limits(self, direction: Direction) -> tuple[float, float, float]:
+        """(max size NAV, max stop distance, max loss NAV at the stop) of one swing entry: the code
+        ceilings of `council.invariants`, tightened by `policy.swing` when it is loaded. The engine
+        sized the order already; this is the planner's last structural check before a write."""
+        from council import invariants as inv
+
+        size, loss = inv.SWING_MAX_SIZE_NAV, (inv.SWING_MAX_LONG_LOSS_NAV if direction == "long"
+                                              else inv.SWING_MAX_SHORT_LOSS_NAV)
+        stop = inv.SWING_MAX_LONG_STOP_PCT if direction == "long" else inv.SWING_MAX_SHORT_STOP_PCT
+        sp = getattr(self.policy, "swing", None)
+        if sp is not None:
+            size = min(size, float(sp.size.target_nav))
+            loss = min(loss, float(sp.size.max_loss_nav_at_stop if direction == "long"
+                                   else sp.size.short_max_loss_nav_at_stop))
+            stop = min(stop, float(sp.stops.max_long_pct if direction == "long" else sp.stops.max_short_pct))
+        return size, stop, loss
+
+    def _swing_close(self, line: str, p: Position, order: SwingOrder) -> _Draft:
+        """A full close of one swing position, priced from the swing cost floors (a risk-reducing
+        leg is never refused for a cost it cannot price: zero, noted)."""
+        direction: Direction = "long" if p.is_buy else "short"
         try:
-            return _split_cost(self.cost_bps(line, symbol, direction, 1))
-        except Exception:  # noqa: BLE001 - a core cost table may not know a swing line (swing/costs.py prices it)
-            return 0.0, 0.0, 0.0
+            per_side, _carry, fee = self._swing_cost(direction, p.settlement)
+        except Exception:  # noqa: BLE001 - an exit is risk-reducing; it goes, the gap is noted
+            per_side, fee = 0.0, 0.0
+            self.skip(line, "exit_cost_unpriced")
+        exposure = p.units * self.unit_value(p)
+        dw = exposure / self.nav
+        draft = _Draft(
+            key=self._next_key(), kind="close", line=line, symbol=p.symbol,
+            instrument_id=p.instrument_id, direction=direction, settlement=p.settlement,
+            leverage=p.leverage, delta_w=-dw if p.is_buy else dw, units=p.units, amount_usd=exposure,
+            risk_increasing=False, reason=order.reason or f"{line}: swing exit",
+            position_id=p.position_id, cost_bps_nav=per_side * dw, whole_units=self.whole(p.symbol),
+        )
+        self.drafts.append(self._swing_marks(self.stamp(draft, fee), order))
+        return draft
 
     def swing_order(self, order: SwingOrder, positions: list[Position]) -> None:
         if order.action == "enter":
@@ -609,7 +664,7 @@ class _Builder:
             if not positions:
                 self.skip(order.line, "swing_exit_no_position")
             for p in positions:
-                self._swing_marks(self.close(order.line, p, order.reason or f"{order.line}: swing exit"), order)
+                self._swing_close(order.line, p, order)
         elif order.action == "set_tp":
             self.swing_set_tp(order, positions)
         else:
@@ -658,6 +713,16 @@ class _Builder:
         if not (math.isfinite(size) and size > 0):
             self.skip(line, "no_size")
             return
+        max_size, max_stop, max_loss = self._swing_limits(direction)
+        if size > max_size + 1e-9:
+            self.skip(line, "swing_size_above_cap")
+            return
+        if stop > max_stop + 1e-9:
+            self.skip(line, "swing_stop_above_cap")
+            return
+        if size * stop > max_loss + 1e-9:
+            self.skip(line, "swing_loss_at_stop_above_cap")
+            return
         price = ask if direction == "long" else bid
         whole = whole_units_only(row)
         units = _floor_units(size * self.nav / price, whole)
@@ -682,9 +747,17 @@ class _Builder:
             self.skip(line, "tp_below_broker_minimum")
         elif self.capabilities is not None and self.capabilities.allows_vehicle((TP_ON_OPEN,)):
             mode = "body"
-        else:
+        elif config.allow_edit_tp:
             mode = "patch"
-        per_side, carry, fee = self._swing_cost(line, order.symbol, direction)
+        else:
+            mode = "none"
+            self.skip(line, "tp_not_editable")
+        mid = (bid + ask) / 2
+        try:
+            per_side, carry, fee = self._swing_cost(direction, settlement, (ask - bid) / 2 / mid * 1e4)
+        except Exception:  # noqa: BLE001 - fail closed: an entry is never priced at zero
+            self.skip(line, "cost_unavailable")
+            return
         dw = exposure / self.nav
         draft = _Draft(
             key=self._next_key(), kind="open", line=line, symbol=order.symbol,
@@ -726,6 +799,9 @@ class _Builder:
             row = self.eligibility.get(p.symbol)
             direction: Direction = "long" if p.is_buy else "short"
             config = select_config(row, direction, p.leverage, settlement=p.settlement) if row else None
+            if config is not None and not config.allow_edit_tp:
+                self.skip(line, "tp_not_editable")
+                continue
             if config is not None and abs(rate / price - 1) * p.leverage * 100 < config.min_tp_pct - 1e-9:
                 self.skip(line, "tp_below_broker_minimum")
                 continue

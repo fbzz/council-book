@@ -890,7 +890,6 @@ class FakeEtoro:
                 "marginAccountCurrency": order.filled_units * order.fill_price / order.leverage,
                 "remainingUnits": pos.units if pos else 0.0,
                 "stopLossRate": order.sl_rate,
-                "takeProfitRate": pos.tp_rate if pos else order.tp_rate,
                 "openingData": {
                     "executionTime": _iso(order.requested_at), "units": order.filled_units,
                     "avgPrice": order.fill_price, "marketSpread": 0.0, "markup": 0.0,

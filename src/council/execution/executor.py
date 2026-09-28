@@ -18,13 +18,19 @@ Rules (each one has a chaos test against broker/fake.py):
   (`modify_sl`, `set_tp`) → refresh equity → core opens → swing opens → the swing opens'
   `modify_tp` legs (swing-book §4.4, §4.6).
   Open units are re-derived from fresh equity (approved units × equity_now / NAV at approval) but
-  never above approved units × 1.02. An open whose dependencies did not fill is skipped.
+  never above approved units × 1.02 (a SWING open: never above the approved units, §4.3). An open
+  whose dependencies did not fill is skipped.
 - After every open fill, exposure (filled units × fill price, and the broker-reported exposure)
   must be within risk.approval.post_fill_exposure_tolerance of the intended exposure (units sent
   × planned price); otherwise the decision is BLOCKED and nothing else is sent.
 - The first rejected open, or any rejected close, stops the remaining opens → completed_partial.
   Scoped by sleeve (swing-book §4.6): a rejected (or held) SWING open stops only the later swing
-  opens and skips its own `modify_tp`; a rejected core open or close stops every later open.
+  opens and skips its own `modify_tp`; a swing close that did not go (rejected, vanished, market
+  closed) stops only the swing opens; a rejected core open or close stops every later open. An
+  unconfirmed swing take-profit PATCH (it resends the current stop) is a swing-scoped unknown: later
+  swing opens stop, core legs go on, the decision ends execution_unknown with the swing scope. An
+  ambiguous close (swing or core) is still a book-wide unknown. A take-profit PATCH on the wrong
+  side of the stop, or for a position of the other direction, is never sent.
 - Swing take-profit (swing-book §4.4, SW-5): an entry with `tp_mode="body"` sends takeProfitRate in
   the open body and needs no PATCH. A `modify_tp` / `set_tp` leg is ledgered `submitting` with its
   request id before its PATCH like every leg; the PATCH always resends the position's CURRENT
@@ -328,6 +334,7 @@ class _Run:
     partial: bool = False
     stop_opens: bool = False
     stop_swing: bool = False        # a swing open failed: later SWING opens stop, core ones do not
+    swing_unknown: bool = False     # a swing take-profit PATCH is unconfirmed: swing-scoped unknown
     waiting: bool = False
     writes: int = 0
     allow_cancel: bool = True       # False in resume: lookups only, never a write
@@ -533,28 +540,40 @@ class Executor:
                 self._skip(run, leg, MARKET_CLOSED)
                 continue
             whole = leg.whole_units or self._whole_units.get(leg.symbol, False)
-            units = self._rederive_units(leg.units, scale, whole=whole)
+            # a swing entry's units are never raised above the engine-checked units (§4.3: the
+            # loss at the stop and the 8% size were approved at those units)
+            units = self._rederive_units(leg.units, min(scale, 1.0) if leg.is_swing else scale, whole=whole)
             if units <= 0:
                 self._skip(run, leg, "no units left after the equity refresh")
                 continue
             self._open_leg(run, leg, units)
 
     # ================================================================== closes
+    @staticmethod
+    def _stop_for_close(run: _Run, leg: _LegCtx) -> None:
+        """A close that did not go stops the later opens: a SWING close only the swing opens (a
+        swing exit that drops drops every swing entry, §4.1; core legs are never dropped because
+        of a swing leg), a core close every open."""
+        if leg.is_swing:
+            run.stop_swing = True
+        else:
+            run.stop_opens = True
+
     def _close_leg(self, run: _Run, leg: _LegCtx) -> None:
         if leg.position_id is None or leg.instrument_id is None:
             self._skip(run, leg, "close leg without a position")
-            run.stop_opens = True
+            self._stop_for_close(run, leg)
             return
         pos = run.before.position(leg.position_id) if run.before else None
         if pos is None:
             self._skip(run, leg, "position no longer open")
-            run.stop_opens = True
-            run.reason(f"{leg.symbol}: position set changed; opens stopped")
+            self._stop_for_close(run, leg)
+            run.reason(f"{leg.symbol}: position set changed; {self._scope_word(leg)}opens stopped")
             return
         if self._market_closed(leg):
             self._skip(run, leg, MARKET_CLOSED)
-            run.stop_opens = True            # the drop rule: a risk-reducing leg did not go
-            run.reason(f"{leg.symbol}: market closed; opens stopped")
+            self._stop_for_close(run, leg)   # the drop rule: a risk-reducing leg did not go
+            run.reason(f"{leg.symbol}: market closed; {self._scope_word(leg)}opens stopped")
             return
         units_before = pos.units
         deduct = (
@@ -572,8 +591,9 @@ class Executor:
         )
         if sent.outcome in ("rejected", "invalid"):
             self._resolve(run, leg, "rejected", error=sent.error)
-            run.partial = run.stop_opens = True
-            run.reason(f"{leg.symbol}: close rejected; opens stopped")
+            run.partial = True
+            self._stop_for_close(run, leg)
+            run.reason(f"{leg.symbol}: close rejected; {self._scope_word(leg)}opens stopped")
             return
         order_id = None
         if sent.outcome == "accepted":
@@ -594,8 +614,9 @@ class Executor:
             self._resolve(run, leg, "filled", order_id=order_id, position_ids=[leg.position_id])
         elif verdict == "rejected":
             self._resolve(run, leg, "rejected", order_id=order_id, error="close order failed")
-            run.partial = run.stop_opens = True
-            run.reason(f"{leg.symbol}: close failed at the broker; opens stopped")
+            run.partial = True
+            self._stop_for_close(run, leg)
+            run.reason(f"{leg.symbol}: close failed at the broker; {self._scope_word(leg)}opens stopped")
         else:
             self._resolve(run, leg, "unknown", order_id=order_id, error="close not confirmed")
             run.unknown = True
@@ -707,6 +728,10 @@ class Executor:
         if sl <= 0:
             self._skip(run, leg, "take-profit not sent: no stop-loss to resend with it")
             return
+        if (leg.direction == "long") != pos.is_buy or (pos.is_buy and not tp > sl) or (
+                not pos.is_buy and not tp < sl):
+            self._skip(run, leg, "take-profit not sent: on the wrong side of the stop or the position")
+            return
         sent = self._submit(
             run, leg, {"position_id": position_id, "sl_rate_sent": sl, "tp_rate_sent": tp},
             lambda rid: self.write.patch_stop_loss(  # type: ignore[union-attr]
@@ -725,8 +750,18 @@ class Executor:
             self._resolve(run, leg, "filled", position_ids=[position_id])
         else:
             self._resolve(run, leg, "unknown", error="take-profit change not confirmed")
-            run.unknown = True
+            self._tp_unknown(run, leg)
             run.reason(f"{leg.symbol}: take-profit change unknown (open_tp_missing)")
+
+    @staticmethod
+    def _tp_unknown(run: _Run, leg: _LegCtx) -> None:
+        """An unconfirmed take-profit PATCH (it resends the current stop, so the stop is not in
+        doubt): a swing leg is a swing-scoped unknown (later swing opens stop, core legs go on, the
+        decision ends execution_unknown with the swing scope); anything else a book-wide unknown."""
+        if leg.is_swing:
+            run.swing_unknown = run.stop_swing = True
+        else:
+            run.unknown = True
 
     def _await_sl_tp(self, position_id: int, sl: float | None, tp: float, window: float, *,
                      immediate: bool) -> bool:
@@ -1087,7 +1122,7 @@ class Executor:
                 run.partial = True
             else:
                 self._resolve(run, leg, "unknown", error="take-profit change not confirmed")
-                run.unknown = True
+                self._tp_unknown(run, leg)
         else:
             ok = bool(leg.position_id and leg.sl_rate) and self._await_sl(
                 leg.position_id, float(leg.sl_rate), AMBIGUITY_WINDOW_S, immediate=True  # type: ignore[arg-type]
@@ -1259,7 +1294,7 @@ class Executor:
     def _final_state(self, run: _Run, rec: ReconcileResult | None) -> str:
         """The decision's final state from the run and the post-execution reconcile (after
         `_corporate_reconcile`: pending corporate actions and credited positions do not block)."""
-        if run.unknown:
+        if run.unknown or run.swing_unknown:
             return "execution_unknown"
         if run.blocked:
             return "blocked"

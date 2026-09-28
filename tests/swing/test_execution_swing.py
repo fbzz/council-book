@@ -36,7 +36,7 @@ NVDA, NVDA_ID, BID, ASK = "NVDA", 201, 100.0, 100.1
 LINE = "SW_NVDA"
 TRADE = "trade:t1"
 SYMBOLS = {**{iid: sym for sym, (iid, _b, _a) in INSTRUMENTS.items()}, NVDA_ID: NVDA}
-BASE_CAPS = frozenset(CAPABILITIES) | {"stock_real_long", "stock_cfd_short"}
+BASE_CAPS = (frozenset(CAPABILITIES) - {"tp_on_open"}) | {"stock_real_long", "stock_cfd_short"}   # SW-5b: tp_on_open is a listed capability now
 STOPS = {"SPX": 0.08, "NDX": 0.08, "GOLD": 0.08, "EURUSD": 0.04}
 
 
@@ -57,7 +57,7 @@ def _executor(make_executor, **kw):
     return make_executor(**kw)
 
 
-def _plan(fake, fclock, policy, *, caps, orders, target=None, ledger=None, snapshot=None):
+def _plan(fake, fclock, policy, *, caps, orders, target=None, ledger=None, snapshot=None, cost_bps=None):
     raw = [inst.row for inst in fake.instruments.values()]
     elig = {r.symbol: r for r in parse_eligibility({"eligibilities": raw}, fclock.now())}
     quotes = {i.symbol: Quote(symbol=i.symbol, instrument_id=i.instrument_id, bid=i.bid, ask=i.ask, at=fclock.now())
@@ -70,7 +70,7 @@ def _plan(fake, fclock, policy, *, caps, orders, target=None, ledger=None, snaps
         snapshot=snapshot, target_w=target or {},
         vehicle_for=lambda line, d, lev: resolve_vehicle(lines[line], d, lev, elig, lambda v, r, c: 5.0),
         quotes=quotes, stop_distance=STOPS, leverage_for={}, eligibility=elig,
-        cost_bps=lambda line, sym, d, lev: (5.0, 0.0), nav_usd=NAV, policy=policy,
+        cost_bps=cost_bps or (lambda line, sym, d, lev: (5.0, 0.0)), nav_usd=NAV, policy=policy,
         capabilities=Capabilities(verified=frozenset(caps)), swing=orders,
         swing_map=swing_vehicle_map(ledger, policy) if ledger is not None else None,
     )
@@ -305,3 +305,143 @@ def test_ambiguous_tp_patch_holds_new_swing_entries_only(fake, fclock, policy, l
     assert report.final_state == "execution_unknown"
     assert ledger.swing_trade(TRADE).state == "open_tp_missing"
     assert ledger.blockers() == sorted([f"swing:{decision}", f"swing:{TRADE}"])   # the core is not held
+
+
+# ------------------------------------------------------------------------------ review fixes (SW-5a)
+def _core_cost_only(policy):
+    """The cycle's core cost table: it knows universe lines only (a swing line raises)."""
+    lines = policy.universe.by_symbol()
+
+    def cost(line, sym, d, lev):
+        lines[line]                                   # KeyError for SW_<ticker>
+        return (5.0, 0.0)
+
+    return cost
+
+
+def test_swing_entry_cost_never_falls_back_to_zero(fake, fclock, policy):
+    plan = _plan(fake, fclock, policy, caps=BASE_CAPS | {"tp_on_open"}, orders=[_entry()],
+                 cost_bps=_core_cost_only(policy))
+    (leg,) = plan.legs
+    assert leg.cost_bps_nav > 0                        # priced from the stock floors, not zero
+
+
+def test_swing_entry_fails_closed_when_the_cost_cannot_be_priced(fake, fclock, policy, monkeypatch):
+    import council.risk.costs as costs
+
+    def broken(*_a, **_k):
+        raise ValueError("no floors")
+
+    monkeypatch.setattr(costs, "per_side_bps", broken)
+    plan = _plan(fake, fclock, policy, caps=BASE_CAPS, orders=[_entry()])
+    assert not plan.legs and f"{LINE}: cost_unavailable" in plan.skipped
+
+
+def test_swing_exit_plans_when_the_core_cost_table_does_not_know_the_line(
+        fake, fclock, policy, ledger, approve, make_executor, read_client):
+    ledger.create_swing_trade(TRADE, ticker=NVDA, side="long")
+    plan = _plan(fake, fclock, policy, caps=BASE_CAPS | {"tp_on_open"}, orders=[_entry()])
+    _executor(make_executor).execute(approve(), plan, nav_usd=NAV)
+    snap = snapshot_from_portfolio(parse_pnl(read_client.pnl(), SYMBOLS.get), fclock.now())
+    exit_order = SwingOrder(line=LINE, trade_id=TRADE, side="long", action="exit", symbol=NVDA,
+                            instrument_id=NVDA_ID)
+    nxt = _plan(fake, fclock, policy, caps=BASE_CAPS, orders=[exit_order], ledger=ledger, snapshot=snap,
+                cost_bps=_core_cost_only(policy))
+    (leg,) = nxt.legs
+    assert leg.kind == "close" and leg.sleeve == "swing" and leg.swing_trade_id == TRADE
+    assert leg.cost_bps_nav > 0
+
+
+@pytest.mark.parametrize(("side", "size", "stop", "code"), [
+    ("long", 0.10, 0.06, "swing_size_above_cap"),
+    ("long", 0.08, 0.13, "swing_stop_above_cap"),
+    ("short", 0.08, 0.07, "swing_loss_at_stop_above_cap"),   # 0.56% > the 0.5% short cap
+])
+def test_swing_entry_above_a_size_or_loss_ceiling_is_never_planned(fake, fclock, policy, side, size, stop, code):
+    order = SwingOrder(line=LINE, trade_id=TRADE, side=side, action="enter", symbol=NVDA,
+                       instrument_id=NVDA_ID, size_nav=size, stop_pct=stop, target_pct=0.10)
+    plan = _plan(fake, fclock, policy, caps=BASE_CAPS, orders=[order])
+    assert not plan.legs and f"{LINE}: {code}" in plan.skipped
+
+
+def test_swing_entry_short_is_a_1x_cfd_and_a_long_is_real(fake, fclock, policy):
+    for side, settlement in (("long", "real"), ("short", "cfd")):
+        (leg, *_rest) = _plan(fake, fclock, policy, caps=BASE_CAPS, orders=[_entry(side)]).legs
+        assert (leg.settlement, leg.leverage) == (settlement, 1)
+        assert (leg.tp_rate > leg.sl_rate) if side == "long" else (leg.tp_rate < leg.sl_rate)
+
+
+def test_swing_open_units_are_never_raised_by_the_equity_refresh(fake, ledger, approve, make_executor):
+    decision = approve()
+    plan = plan_of(open_leg(1, "SPX500", units=10), _swing_leg(2, "long", trade="trade:s1"))
+    _executor(make_executor).execute(decision, plan, nav_usd=NAV / 2)   # equity is 2x the approval NAV
+    core, swing = _opens(fake)
+    assert core.body["units"] == pytest.approx(10.2)
+    assert swing.body["units"] == pytest.approx(8.0)                    # the approved units, not 8.16
+
+
+def _swing_position(fake, *, tp=None):
+    return fake.add_position(NVDA, is_buy=True, units=8.0, leverage=1, sl_rate=ASK * 0.94,
+                             settlement="real", tp_rate=tp)
+
+
+def _swing_close_leg(seq, pos, trade="trade:s0"):
+    return Leg(seq=seq, kind="close", symbol=NVDA, line=LINE, instrument_id=NVDA_ID, direction="long",
+               settlement="real", weight_before=8.0 * ASK / NAV, weight_after=0.0, risk_increasing=False,
+               amount_usd=8.0 * ASK, units=8.0, position_id=pos.position_id, sleeve="swing",
+               swing_trade_id=trade)
+
+
+@pytest.mark.parametrize("how", ["vanished", "rejected"])
+def test_a_swing_close_that_does_not_go_stops_swing_opens_only(fake, ledger, approve, make_executor, how):
+    pos = _swing_position(fake)
+    decision = approve()
+    plan = plan_of(_swing_close_leg(1, pos), open_leg(2, "SPX500"), _swing_leg(3, "long", trade="trade:s1"))
+    if how == "vanished":
+        fake.hit_stop(pos.position_id)            # the swing SL fired inside the window
+    else:
+        fake.script_close("http_4xx")
+    fake.script_open("fill")
+    _executor(make_executor).execute(decision, plan, nav_usd=NAV)
+    assert ledger.get_leg(decision, 1).state in ("skipped", "rejected")
+    assert ledger.get_leg(decision, 2).state == "filled"             # the core open still goes
+    assert ledger.get_leg(decision, 3).state == "skipped"            # swing entries drop with the exit
+    assert len(_opens(fake)) == 1
+
+
+def _set_tp_leg(seq, pos, tp, trade="trade:s0"):
+    return Leg(seq=seq, kind="set_tp", symbol=NVDA, line=LINE, instrument_id=NVDA_ID, direction="long",
+               settlement="real", weight_before=0.0, weight_after=0.0, risk_increasing=False,
+               amount_usd=8.0 * ASK, units=8.0, position_id=pos.position_id, sl_rate=pos.sl_rate,
+               tp_rate=tp, sleeve="swing", swing_trade_id=trade)
+
+
+def test_ambiguous_set_tp_does_not_stop_core_opens(fake, ledger, approve, make_executor):
+    pos = _swing_position(fake)
+    decision = approve()
+    plan = plan_of(_set_tp_leg(1, pos, ASK * 1.10), open_leg(2, "SPX500"))
+    fake.script_patch("http_5xx_not_processed")
+    fake.script_open("fill")
+    report = _executor(make_executor).execute(decision, plan, nav_usd=NAV)
+    assert ledger.get_leg(decision, 1).state == "unknown"
+    assert ledger.get_leg(decision, 2).state == "filled"
+    assert report.final_state == "execution_unknown"
+    assert ledger.blockers() == [f"swing:{decision}"]                  # the core is not held
+    assert fake.positions[pos.position_id].sl_rate == pytest.approx(ASK * 0.94)
+
+
+def test_tp_patch_on_the_wrong_side_of_the_stop_is_never_sent(fake, ledger, approve, make_executor):
+    pos = _swing_position(fake)
+    decision = approve()
+    _executor(make_executor).execute(decision, plan_of(_set_tp_leg(1, pos, ASK * 0.90)), nav_usd=NAV)
+    assert not _patches(fake)
+    assert ledger.get_leg(decision, 1).state == "skipped"
+    assert fake.positions[pos.position_id].sl_rate == pytest.approx(ASK * 0.94)
+
+
+def test_tp_not_editable_gets_no_modify_tp(fake, fclock, policy):
+    cfg = leverage_config(settlement="REAL", direction="LONG", leverage_values=(1,), min_tp_pct=2.0)
+    cfg["allowEditTakeProfit"] = False
+    fake.instrument(NVDA).row = eligibility_row(NVDA, NVDA_ID, configs=[cfg])
+    (leg,) = _plan(fake, fclock, policy, caps=BASE_CAPS, orders=[_entry()]).legs
+    assert leg.tp_mode == "none"

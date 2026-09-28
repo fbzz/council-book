@@ -210,6 +210,8 @@ def _same_planned_legs(rows: Sequence[LegRow], legs: Sequence[Leg], lines: Seque
             and _close(row.detail.get("weight_after"), leg.weight_after)
             and row.detail.get("swing_trade_id") == leg.swing_trade_id
             and _close(row.detail.get("tp_rate"), leg.tp_rate)
+            and row.detail.get("tp_mode") == leg.tp_mode
+            and (row.detail.get("sleeve") == "swing") == leg.is_swing
         )
         if not same:
             return False
