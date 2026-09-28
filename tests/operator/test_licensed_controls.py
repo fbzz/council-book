@@ -57,7 +57,8 @@ def test_sweeper_removes_payloads_before_seven_days_and_keeps_fresh_ones(root):
     assert not old.exists() and fresh.exists()
     assert list((root / RECEIPTS_DIR).glob("*.json"))
     _age(fresh, 6.5)
-    assert licensed.sweep(root, now + timedelta(hours=1)) == []   # once per UTC day
+    later = min(now + timedelta(hours=1), now.replace(hour=23, minute=59, second=59))   # same UTC day
+    assert licensed.sweep(root, later) == []   # once per UTC day
     assert fresh.exists()
 
 
