@@ -3,6 +3,10 @@
     "id": "council-desk_brief/v1",
     "sha256": "6a20aaab3ab778480091b46735a5773ae88b98eb77381abf9e5982edcfb72332"
   },
+  "_swing_brief": {
+    "id": "council-swing_brief/v1",
+    "sha256": "045e796bc52696910d4710ef8d04be3e738e943e86a823282bb604500aeae660"
+  },
   "bear": {
     "id": "council-bear/v1",
     "sha256": "b156946ac8ff38634d86077e8a49bb6bebfde6e70a7a4a5a248cea38741fc0eb"
@@ -27,8 +31,28 @@
     "id": "council-pm/v1",
     "sha256": "3732a765b3c2586616786c12f7e20b9604e8d49e6afaa9c9fb4e0410894701e7"
   },
+  "scout": {
+    "id": "council-scout/v1",
+    "sha256": "7cc86d8d047986abc834016f96cbc28e32c1c402ab39992698ea42f552643a14"
+  },
   "single_agent": {
     "id": "council-single_agent/v1",
     "sha256": "a66e23487d2151162636366bad2050e6f2a0d80018ca32781a852ff4dff225c9"
+  },
+  "skeptic": {
+    "id": "council-skeptic/v1",
+    "sha256": "317e4f220887ad76a01a1a446f8112e3668e55abcfb8d84a91ee8642321ec157"
+  },
+  "swing_bear": {
+    "id": "council-swing_bear/v1",
+    "sha256": "8cb26d335f000e67a68f018f705ef8925455b6faf10e62eadece45f7972fbfc5"
+  },
+  "swing_bull": {
+    "id": "council-swing_bull/v1",
+    "sha256": "407e5420ec7562554783ec1a5bf6ab995d135db1b7f3346a7691e2e5b8b1c13c"
+  },
+  "swing_pm": {
+    "id": "council-swing_pm/v1",
+    "sha256": "398026e9d0586def096f9f38ca06bd38bfacc71c3f9ba888675ee34af3fcf474"
   }
 }

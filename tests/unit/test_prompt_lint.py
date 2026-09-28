@@ -41,8 +41,10 @@ def test_raw_prompt_files_are_clean(path):
 
 
 def test_rendered_prompts_are_clean(policy):
+    from council.swing.council import swing_prompt_context
+
     reg = PromptRegistry()
-    ctx = prompt_context(policy)
+    ctx = {**prompt_context(policy), **swing_prompt_context(policy)}
     assert reg.roles(), "no prompt roles registered"
     for role in reg.roles():
         assert lint(reg.render(role, **ctx)) == [], role

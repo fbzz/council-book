@@ -14,12 +14,13 @@ from council.llm.prompts import PromptError, PromptRegistry
 from council.paths import PROMPTS_DIR
 
 ROLES = ["bear", "bull_open", "bull_rebuttal", "macro", "news", "pm", "single_agent"]
+SWING_ROLES = ["scout", "skeptic", "swing_bear", "swing_bull", "swing_pm"]   # tests/swing/test_prompts_swing.py
 
 
 def test_registry_lists_roles_and_ids(reg):
-    assert reg.roles() == ROLES
-    assert reg.names() == ["_desk_brief", *ROLES]
-    for role in ROLES:
+    assert reg.roles() == sorted(ROLES + SWING_ROLES)
+    assert reg.names() == ["_desk_brief", "_swing_brief", *sorted(ROLES + SWING_ROLES)]
+    for role in ROLES + SWING_ROLES:
         assert reg.prompt_id(role) == f"council-{role}/v1"
     assert reg.manifest()["_desk_brief"]["id"] == "council-desk_brief/v1"
 
@@ -117,5 +118,5 @@ def test_write_manifest_is_deterministic(tmp_path, reg):
     a = reg.write_manifest(tmp_path / "a.json").read_bytes()
     b = reg.write_manifest(tmp_path / "b.json").read_bytes()
     assert a == b
-    assert set(json.loads(a)) == {"_desk_brief", *ROLES}
+    assert set(json.loads(a)) == {"_desk_brief", "_swing_brief", *ROLES, *SWING_ROLES}
     assert len(reg.manifest_sha()) == 64
