@@ -277,7 +277,8 @@ AUDIT_WORDS = {
 # Plan skips publish collapsed (M5-N): a size skip is `R11`, anything unexplained `not_ordered`.
 # `below_broker_minimum` stays for journals sealed before the collapse.
 SKIP_WORDS = {"R11": "too small to trade", "not_ordered": "not ordered",
-              "below_broker_minimum": "below the broker's minimum order size"}
+              "below_broker_minimum": "below the broker's minimum order size",
+              "swing_book_not_live": "the swing book is paper-only for now"}
 WHY_WORDS = {"scheduled": "a scheduled review", "vol_shock": "a volatility shock", "event": "a scheduled event",
              "manual": "a manual run", "kill_switch": "the kill switch"}
 CADENCE_WORDS = {"every_cycle": "every run", "first_cycle_of_utc_day": "first run of each UTC day"}
@@ -4228,7 +4229,27 @@ DROP_WORDS = {
     "stage_aborted": "the slot stopped before this step", "no_facts": "no fact card (stale or missing bars)",
     "catalyst_not_admitted": "the cited item was not in the slot's reading list",
     "catalyst_not_about_ticker": "the cited item is not about this company",
+    "reproposal_limit": "proposed again too often after a missed entry: expired",
 }
+# Swing-book cycle flags (`trace_rules.SWING_FLAG_CODES`; a test checks every key has words).
+SWING_FLAG_WORDS = {
+    "swing_source_unavailable:*": "a swing data source had no credential, so the swing council did not run",
+    "swing_source_error:*": "a swing data request failed; the ideas it fed were left out",
+    "swing_eligibility_unverified": "paper run: broker eligibility could not be checked (no broker connected)",
+    "swing_paper_assumed_book": "paper run: the swing rules assumed a flat book at its peak",
+    "paper_reference_last_close": "paper entry priced at the last close (no fresher reference)",
+    "swing_screen_missing": "no after-close movers screen for this session",
+    "swing_drop:reproposal_limit": "an idea proposed again too often after a missed entry was expired",
+    "swing_book_not_live": "the swing book is paper-only for now: no swing order was sent",
+}
+
+
+def flag_words(flag: str) -> str:
+    """The plain words of a swing flag ("" for any other flag: it shows as its code only)."""
+    from council.publish.trace_rules import swing_flag_key
+
+    key = swing_flag_key(flag)
+    return SWING_FLAG_WORDS.get(key, "") if key else ""
 OVERRIDE_WORDS = {"skeptic_mostly_wait": "code: mostly priced in → wait", "skeptic_stale_wait": "code: old news → wait",
                   "skeptic_prior_wait": "code: big move, no independent fact → wait",
                   "skeptic_incoherent": "code: fully priced in → reject", "catalyst_misread": "code: catalyst misread"}
@@ -4461,6 +4482,7 @@ def make_env(lines: Lines | list[str] | None = None) -> Environment:
         signed=fmt_signed, move=move_dir, count=fmt_int, secs=fmt_secs, ticker=ticker, short_when=fmt_short_when,
         share1=fmt_share1, cap=lambda s: str(s)[:1].upper() + str(s)[1:],
         asset=lambda k: asset_page(k) if k in line_set.info else "",
+        flag_words=flag_words,
     )
     env.globals.update(
         decision_chip=lambda state: chip(DECISION_CHIP, state),

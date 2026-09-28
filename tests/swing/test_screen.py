@@ -134,3 +134,33 @@ def test_a_later_sessions_bar_never_shifts_the_screen_day():
     with_next = sc.day_metric("TSTA", bars, date(2026, 9, 25))
     alone = sc.day_metric("TSTA", bars.iloc[:-1], date(2026, 9, 25))
     assert with_next is not None and with_next == alone
+
+
+def test_screen_fits_a_month_of_two_slots(tmp_path):
+    """SW-7b: a ~600-name universe (+ the sector ETFs), 23 sessions x 2 swing slots, the screen
+    rebuilt at BOTH slots (worse than the cached once-per-session): never out of budget. The request
+    counts once per multi-symbol call and the month counts distinct symbols."""
+    from datetime import timedelta
+
+    names = [f"N{i:03d}" for i in range(600)]
+    universe = sc.build_universe(names, {})
+    fake = panel.FakeAlpaca({})
+    month = [d for d in panel.sessions(date(2026, 10, 30), 23)]
+    assert len(month) == 23
+    per_screen = -(-(len(names) + len(set(sc.SECTOR_ETF.values()))) // sc.SYMBOLS_PER_REQUEST)
+    total = 0
+    for day in month:
+        for hour in (1, 2):                          # after D's close, two builds (21:00 / 22:00 NY)
+            now = datetime(day.year, day.month, day.day, hour, 0, tzinfo=UTC) + timedelta(days=1)
+            clock = iter(range(0, 100_000))
+            out = sc.run_screen(universe, now=now, keys=panel.keys(), state_dir=tmp_path, client=fake.client(),
+                                sleep=lambda _s: None, monotonic=lambda c=clock: float(next(c)) * 0.1,
+                                budget_now=lambda n=now: n)
+            assert out.session == day.isoformat(), (out.session, day)
+            assert not {"screen_budget", "screen_request_cap", "screen_time_budget"} & set(out.flags), out.flags
+            assert out.requests == per_screen
+            total += out.requests
+    assert total == 23 * 2 * per_screen <= 23 * sc.LIMITS.requests_per_day
+    budget = RequestBudget(sc.PROVIDER, tmp_path / f"{sc.PROVIDER}_budget.json", sc.LIMITS)
+    for seen in budget.state["months"].values():      # a calendar month's distinct symbols
+        assert len(seen) == 600 + len(set(sc.SECTOR_ETF.values())) <= sc.LIMITS.symbols_per_month

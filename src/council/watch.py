@@ -549,11 +549,12 @@ def classify_swing_close(side: str, sl_rate: float | None, tp_rate: float | None
 
 
 def trade_outcome_detail(trade: Any, close_rate: float | None, exit_kind: str, now: datetime, *,
-                         sector_etf_ret: float | None = None,
+                         sector_etf_ret: float | None = None, closed_cycle: str | None = None,
                          declared_cost_pct_per_leg: float = DECLARED_COST_PCT_PER_LEG) -> dict[str, Any]:
     """A closed trade's percent-only outcome for its detail (numbers and short codes only):
-    r_declared, net_ret, size_nav, beta, sector_etf_ret, exit_kind, days_held. Without a close rate
-    only the codes and counts are kept (the metrics then leave the trade out)."""
+    r_declared, net_ret, size_nav, beta, sector_etf_ret, exit_kind, days_held and `closed_cycle`
+    (the cycle whose book the close belongs to, when known). Without a close rate only the codes
+    and counts are kept (the metrics then leave the trade out)."""
     from council.swing.rules import sessions_until
 
     d = dict(trade.detail or {})
@@ -561,6 +562,8 @@ def trade_outcome_detail(trade: Any, close_rate: float | None, exit_kind: str, n
     out: dict[str, Any] = {"exit_kind": exit_kind, "days_held": int(held),
                            "size_nav": _num(d.get("size_nav")), "beta": _num(d.get("beta")),
                            "sector_etf_ret": _num(sector_etf_ret)}
+    if isinstance(closed_cycle, str) and closed_cycle:
+        out["closed_cycle"] = closed_cycle
     if close_rate and trade.open_rate:
         sign = 1.0 if trade.side == "long" else -1.0
         net = sign * (close_rate / trade.open_rate - 1.0) - 2.0 * declared_cost_pct_per_leg / 100.0
@@ -571,6 +574,17 @@ def trade_outcome_detail(trade: Any, close_rate: float | None, exit_kind: str, n
         if stop:
             out["r_declared"] = round(net / stop, 6)
     return out
+
+
+def last_cycle_id(ledger: Any) -> str | None:
+    """The last cycle that ran (runtime `last_cycle`): a close the watch sees between cycles
+    belongs to that cycle's book."""
+    try:
+        last = ledger.get_runtime("last_cycle")
+    except Exception:  # noqa: BLE001 - an old ledger
+        return None
+    cid = last.get("cycle_id") if isinstance(last, dict) else None
+    return cid if isinstance(cid, str) and cid else None
 
 
 def _num(value: Any) -> float | None:
@@ -599,7 +613,8 @@ def record_swing_close(ledger: Any, read: Any, trade_id: str, position_id: int |
 
     sector = sector_etf_return(trade.detail or {}, trade.opened_at, now, sector_bars)
     ledger.update_swing_trade(trade_id, detail=trade_outcome_detail(trade, rate, state.removeprefix("closed_"),
-                                                                    now, sector_etf_ret=sector), now=now)
+                                                                    now, sector_etf_ret=sector,
+                                                                    closed_cycle=last_cycle_id(ledger)), now=now)
     ledger.transition_swing_trade(trade_id, state, close_rate=rate, now=now,
                                   reason=f"broker_close:{state.removeprefix('closed_')}")
     return state

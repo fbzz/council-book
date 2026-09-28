@@ -55,7 +55,9 @@ class SwingSources:
     `daily_bars(tickers, day)` completed daily bars for `paper.settle`; `benchmark_returns(day)`
     the SQ-8 names' and SPX's returns of that close; `matched_legs(day)` the open trades as
     `benchmark.sq8.MatchedLeg`s. `prepare(slot, now)` is a per-cycle code step (the after-close
-    screen) returning flags. `unavailable`: fail-closed codes; the swing council does not run.
+    screen) returning flags. `canary_event(slot)` a qualifying `swing.canary.PastEvent` for the
+    weekly Skeptic canary (None: no canary this week, flag `swing_canary_no_event`; the field None:
+    no canary source). `unavailable`: fail-closed codes; the swing council does not run.
     `flags`: data flags collected by the callbacks, drained into the cycle record."""
 
     inputs: Any
@@ -67,6 +69,7 @@ class SwingSources:
     benchmark_returns: Any = None
     matched_legs: Any = None
     prepare: Any = None
+    canary_event: Any = None
     unavailable: tuple[str, ...] = ()
     flags: list[str] = field(default_factory=list)
 

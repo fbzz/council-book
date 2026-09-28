@@ -219,7 +219,7 @@ PRIVATE_FLAG_PREFIXES: tuple[str, ...] = ("size_floor_binding",)
 
 def public_flags(flags: Iterable[str]) -> list[str]:
     """Record flags as public codes, without the private ones."""
-    return [_code(f) for f in flags if not str(f).strip().startswith(PRIVATE_FLAG_PREFIXES)]
+    return [_code(trace_rules.public_swing_flag(str(f))) for f in flags if not str(f).strip().startswith(PRIVATE_FLAG_PREFIXES)]
 
 
 # ------------------------------------------------------------------------------ numbers

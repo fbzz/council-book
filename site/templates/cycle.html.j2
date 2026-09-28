@@ -507,7 +507,7 @@
 </details>
 {% endif %}
 {{ swm.health(sw.health) }}
-{% if sw.flags %}<p class="small">Swing flags: {% for f in sw.flags %}<code>{{ f }}</code> {% endfor %}</p>{% endif %}
+{% if sw.flags %}<p class="small">Swing flags: {% for f in sw.flags %}<code>{{ f }}</code>{% if f|flag_words %} ({{ f|flag_words }}){% endif %} {% endfor %}</p>{% endif %}
 {% endcall %}
 {% set ns.n = ns.n + 1 %}
 {% call m.section("swing-book", ns.n, "Swing book", "skeptic") %}
@@ -587,6 +587,6 @@
 </div>
 <p class="small muted">{{ t.foot }}</p>
 {% endif %}
-{% if c.flags %}<p class="small">Flags: {% for f in c.flags %}<code>{{ f }}</code> {% endfor %}</p>{% endif %}
+{% if c.flags %}<p class="small">Flags: {% for f in c.flags %}<code>{{ f }}</code>{% if f|flag_words %} ({{ f|flag_words }}){% endif %} {% endfor %}</p>{% endif %}
 {% endcall %}
 {% endblock %}

@@ -104,10 +104,12 @@ def close_filled_exit(ledger: Any, trade_id: str, decision_id: str, now: datetim
         v = rec.get("closeRate") if rec else None
         rate = float(v) if isinstance(v, int | float) and not isinstance(v, bool) and v > 0 else None
     sector = sector_etf_return(detail, t.opened_at, now, sector_bars)
-    ledger.update_swing_trade(trade_id, detail=watch.trade_outcome_detail(t, rate, exit_kind, now,
-                                                                          sector_etf_ret=sector), now=now)
-    state = exit_state(exit_kind)
     d = ledger.get_decision(decision_id)
+    closed_cycle = getattr(d, "cycle_id", None) or watch.last_cycle_id(ledger)
+    ledger.update_swing_trade(trade_id, detail=watch.trade_outcome_detail(t, rate, exit_kind, now,
+                                                                          sector_etf_ret=sector,
+                                                                          closed_cycle=closed_cycle), now=now)
+    state = exit_state(exit_kind)
     ledger.transition_swing_trade(trade_id, state, close_rate=rate, reason=f"exit_filled:{exit_kind}",
                                   cycle_id=getattr(d, "cycle_id", None), now=now,
                                   **({"actor": actor} if actor else {}))

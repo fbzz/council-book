@@ -13,6 +13,7 @@ cost quote, so the public record never copies a note: it maps each one through t
 | R15 | SR_be and its limit only when every input is public: the line's cost from the policy floors (`costs:floor`) and its volatility from Tiingo / Binance history (SR_be = (RT + carry x hold) / (sigma x hold / 365), so with sigma and hold public it gives the round trip back) | otherwise the bare `R15` |
 | R15_fee, R14_fee | never (D18: the fee in bps of NAV encodes the NAV) | the bare code |
 | Swing book (SW-4): `swing_book_limit:<rule>` (a whole swing entry removed by a book limit) and a swing S-rule drop `<rule>:<code>` (`swing.rules.public_code`) | never | as written (codes only) |
+| Swing-book cycle flags and plan skips (SW-7b, `SWING_FLAG_CODES`): `swing_source_unavailable:<source>`, `swing_source_error:<source>:<type>`, `swing_eligibility_unverified`, `swing_paper_assumed_book`, `paper_reference_last_close`, `swing_screen_missing`, `swing_drop:reproposal_limit`, the skip `swing_book_not_live` | never | as written (codes only; a source name outside `[a-z0-9_]` becomes `other`); the site's words: `site/build.py` `SWING_FLAG_WORDS` |
 | Anything else | never | its bare rule code, else `held` (fail closed) |
 
 The same table serves the structured trace (T5b) through `public_trace_code` / `value_allowed`:
@@ -96,6 +97,43 @@ _SWING_LIMIT = re.compile(r"^swing_book_limit:R\d{1,2}$")
 _SWING_RULE = re.compile(r"^(?:S\d{1,2}|SB\d{1,2}|R20):[a-z][a-z_]{0,39}$")
 _SKIP_NOTE = re.compile(r"^([A-Za-z0-9_.]{1,40}): (.+)$")
 _SKIP_WORD = re.compile(r"^[a-z][a-z_ ]{0,39}$")
+
+
+# Swing-book cycle flags (and the planner skip `swing_book_not_live`): the public table keys. A key
+# ending in ":*" stands for the source-named family; the site gives each key its words.
+SWING_FLAG_CODES: frozenset[str] = frozenset({
+    "swing_source_unavailable:*", "swing_source_error:*", "swing_eligibility_unverified",
+    "swing_paper_assumed_book", "paper_reference_last_close", "swing_screen_missing",
+    "swing_drop:reproposal_limit", "swing_book_not_live",
+})
+_SWING_SOURCE_FLAG = re.compile(r"^(swing_source_(?:unavailable|error)):(.*)$")
+_SWING_SOURCE_PART = re.compile(r"^[a-z0-9_]{1,40}$")
+_SWING_ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,39}$")
+
+
+def swing_flag_key(flag: str | None) -> str | None:
+    """The `SWING_FLAG_CODES` key of a swing flag, else None."""
+    raw = _squash(flag)
+    m = _SWING_SOURCE_FLAG.match(raw)
+    if m is not None:
+        return f"{m.group(1)}:*"
+    return raw if raw in SWING_FLAG_CODES else None
+
+
+def public_swing_flag(flag: str) -> str:
+    """A swing source flag as a public code: `swing_source_unavailable:<source>` and
+    `swing_source_error:<source>:<type>` keep a plain source word and exception type name (else
+    `other`); every other flag is returned unchanged."""
+    raw = _squash(flag)
+    m = _SWING_SOURCE_FLAG.match(raw)
+    if m is None:
+        return raw
+    family, rest = m.groups()
+    source, _, kind = rest.partition(":")
+    source = source if _SWING_SOURCE_PART.match(source) else "other"
+    if family.endswith("unavailable"):
+        return f"{family}:{source}"
+    return f"{family}:{source}:{kind if _SWING_ERROR_TYPE.match(kind) else 'other'}"
 
 
 def _squash(text: str | None) -> str:

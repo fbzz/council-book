@@ -164,3 +164,39 @@ Outstanding opens after an incident need a fresh proposal; nothing re-sends an o
 - The ops page: missed cycles, parse failures, fallbacks.
 - The main account's mirror against the published book (percentages only).
 - `council-op stocks status` once the stock sleeve is live.
+
+## 7. Paper swing run (no broker)
+
+The swing pipeline on real data and real models, with no broker token and nothing published
+(`council cycle --paper`: own state dir `<state>/paper`, where `<state>` is
+`~/Library/Application Support/council-book` unless `COUNCIL_STATE_DIR` says otherwise).
+
+1. **Keychain items** (no-echo prompt): `council-op keys store alpaca-key-id`, `alpaca-secret`
+   (or `alpaca` for both), `sec-user-agent` and `tiingo`. A missing one fails closed: the cycle
+   shows `swing_source_unavailable:<source>` and the swing council does not run.
+2. **Funded NAV, once** (private, costs only; without it every entry drops `cost_unavailable`):
+   ```sh
+   mkdir -p "<state>/paper/account" && umask 077
+   echo '{"funded_real_nav_usd": <N>}' > "<state>/paper/account/swing.json"
+   ```
+3. **Run** within about 2 hours after a swing slot (14:40 UTC in US summer time, 18:40 UTC in
+   winter; `--slot auto` runs the due slot up to 120 minutes late):
+   ```sh
+   COUNCIL_MODE=dry_run council-op cycle --paper
+   COUNCIL_STATE_DIR="<state>/paper" council-op swing status
+   COUNCIL_STATE_DIR="<state>/paper" council-op inputs show <cycle> --html
+   ```
+   Expected flags on a paper run: `swing_eligibility_unverified`, `swing_paper_assumed_book` and
+   sometimes `paper_reference_last_close` or `swing_screen_missing` (the after-close screen is
+   built once per session after 20:30 New York).
+
+## 8. Swing book incidents (rehearsal sign-off)
+
+| Situation | What to do |
+|---|---|
+| Swing brake (S15) or canary pause | New swing entries stop; exits continue. Read `council-op swing status` (the pause rule, the Skeptic test, the brake line). **Not built yet:** the design's `council swing brake --lift "<reason>"` does not exist, and nothing sets the brake or the canary pause automatically today (SW-4 follow-up). Until it does, stop entries by rejecting them: `council-op reject <id> --reason "swing paused: …"`. |
+| A trade in `open_tp_missing` | Its take-profit is not at the broker; it holds a `swing:` blocker (new swing entries only). The next swing slot proposes a `set_tp` leg: check with `council-op show <id>`, then `council-op approve <id>`. The stop-loss is at the broker throughout. |
+| 3 unapproved time-stop exits (URGENT) | An exit is re-proposed every swing slot from 2 slots before it is due. Approve the newest exit proposal (`council-op inbox`, `council-op approve <id>`), or close by hand in the eToro UI and let the watch record it. The URGENT after `urgent_after_unapproved_slots: 3` is policy; its alert is **not built yet**, so check `council-op swing status` for exits past their time stop. |
+| `swing:` blocker scope | A swing decision `blocked` / `execution_unknown` / `entry_unknown` halts new swing entries only, never the core. `council-op resume-exec <id>` (lookups only); for a `blocked` decision with no active or waiting leg, check the broker, then `council-op ops review <id> --reason "…"`. |
+| `closed_unclassified` (URGENT) | The broker closed the position and no closed-trade record could be read: never a guessed stop hit. Check the close in the eToro UI and write it in the incident note; the trade stays out of the metrics (no close rate). |
+| Forced close of a short (`closed_external`, URGENT) | Check the eToro UI for the reason (borrow recall, corporate action). A forced close is a stop-at-once condition (design §8.3): reject new swing entries until reviewed (`council-op reject <id> --reason "…"`) and record the capability result. |

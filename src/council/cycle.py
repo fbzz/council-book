@@ -326,11 +326,24 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     swing = await run_swing(ctx, rec, snapshot=snapshot, kill_state=kill_state, nav=nav, slot=slot, now=now,
                             econ=econ, sink=sink)
     rec.flags += [f for f in swing.flags if f not in rec.flags]
-    for call in swing.calls:            # private: the swing roles' calls go to the ledger only
+    # the swing roles' calls join the cycle's calls (the site counts them; `_calls` publishes role,
+    # status, latency and tokens only); the canary's stay private (ledger only, H11)
+    rec.calls = [*rec.calls, *swing.calls]
+    for call in swing.private_calls:
         try:
             ledger.record_role_call(cycle_id, call)
         except Exception as exc:  # noqa: BLE001 - a record failure never stops the cycle
             rec.flags.append(f"swing_call_record_error:{type(exc).__name__}")
+    if swing.calls and sink is not None:     # re-capture: the swing roles' inputs join the core's
+        try:
+            from council.deliberation.capture import write_cycle_inputs
+
+            rec.flags += [f for f in write_cycle_inputs(ctx.state_dir, sink, cycle_id=cycle_id,
+                                                        captured_at=ctx.clock()) if f not in rec.flags]
+        except Exception as exc:  # noqa: BLE001 - capture never stops a cycle
+            rec.flags.append(f"inputs_capture_error:{type(exc).__name__}")
+    if swing.live and swing.slot_ok and ledger.get_runtime(SWING_LIVE_SINCE_KEY) is None:
+        ledger.set_runtime(SWING_LIVE_SINCE_KEY, slot.astimezone(clock.NEW_YORK).date().isoformat(), now=now)
 
     # ---- risk engine
     fps, material_changed = _material(ledger, pack, rec.cards, kill_state)
@@ -1248,7 +1261,8 @@ def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: 
         return False, None
     lines = ctx.policy.universe
     try:
-        public = redact.public_cycle(rec, pack, lines=lines, install_key=cycle_install_key(ctx, rec))
+        public = redact.public_cycle(rec, pack, lines=lines, install_key=cycle_install_key(ctx, rec),
+                                     **swing_seal_inputs(ctx, rec))
     except Exception as exc:  # V11: never a crash; no commitment, so the decision cannot be approved
         code = f"{REDACT_ERROR}:{type(exc).__name__}"
         rec.flags.append(code)
@@ -1273,6 +1287,8 @@ def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: 
     if not smoke_open:
         files.update(journal.status_files(redact.public_status(
             state, last_cycle_id=rec.cycle_id, last_cycle_at=rec.slot, kill_state=rec.kill_state)))
+    if not smoke_open and getattr(ctx.sources, "swing", None) is not None:
+        files.update(swing_book_files(ctx, rec))
     if snapshot is not None and rec.risk is not None and not smoke_open:
         ref_w = rec.reference.weights() if rec.reference else None
         files.update(journal.book_files(redact.public_book(
@@ -1286,6 +1302,68 @@ def _seal_and_publish(ctx: CycleContext, rec: CycleRecord, pack, *, reveal_now: 
     if rec.decision_id and result.commit_sha:
         ctx.ledger.set_commitment(rec.decision_id, commitment.commitment_sha256)
     return bool(result.pushed or result.dry_run), result.commit_sha
+
+
+def swing_seal_inputs(ctx: CycleContext, rec: CycleRecord) -> dict[str, Any]:
+    """`public_cycle`'s swing arguments for a swing slot (`rec.extras["swing"]`): the licensed feed
+    texts of this cycle and of every carried idea's origin cycles (unreadable -> withheld, fail
+    closed), the open swing trades and the Skeptic-health line. {} without a swing record."""
+    record = rec.extras.get("swing") if isinstance(rec.extras, Mapping) else None
+    if not isinstance(record, Mapping):
+        return {}
+    from council.swing.models import OPEN_STATES
+    from council.swing.record import origin_texts
+
+    origins = [c for row in record.get("ideas") or [] for c in (row.get("carried_from") or [])
+               if isinstance(c, str)]
+    out: dict[str, Any] = {"swing_texts": {}, "swing_trades": [], "swing_health": None}
+    try:
+        out["swing_texts"] = origin_texts(ctx.state_dir, [rec.cycle_id, *origins])
+    except Exception as exc:  # noqa: BLE001 - no texts: every quoted text is withheld
+        rec.flags.append(f"swing_texts_error:{type(exc).__name__}")
+    try:
+        out["swing_trades"] = ctx.ledger.swing_trades(states=sorted(OPEN_STATES))
+        out["swing_health"] = swing_health(ctx.ledger)
+    except Exception as exc:  # noqa: BLE001
+        rec.flags.append(f"swing_seal_error:{type(exc).__name__}")
+    return out
+
+
+def _day(value: Any) -> Any:
+    from datetime import date as _date
+
+    if isinstance(value, datetime):
+        return value.astimezone(clock.NEW_YORK).date() if value.tzinfo else value.date()
+    if isinstance(value, _date):
+        return value
+    try:
+        return datetime.fromisoformat(str(value)).date() if value else None
+    except ValueError:
+        return None
+
+
+def swing_book_files(ctx: CycleContext, rec: CycleRecord) -> dict[str, bytes]:
+    """`journal/swing/latest.json`: the swing page's document from the ledger's swing trades, paper
+    trades and SQ-8 benchmark days (percent-only; `public_swing_book`). A failure is a flag and no
+    file (the page keeps its last version)."""
+    from council import invariants
+    from council.publish import journal, redact
+
+    try:
+        ledger = ctx.ledger
+        paper_rows = ledger.paper_trades()
+        opened = [d for d in (_day(r.get("opened_at")) for r in paper_rows) if d is not None]
+        book = redact.public_swing_book(
+            list(ledger.swing_trades()), as_of=rec.slot, paper_rows=paper_rows,
+            benchmark_days=ledger.benchmark_days(), health=swing_health(ledger),
+            live=bool(invariants.SWING_BOOK_LIVE) and ctx.sources.broker is not None,
+            live_since=_day(ledger.get_runtime(SWING_LIVE_SINCE_KEY)),
+            paper_since=min(opened) if opened else None,
+            today=rec.slot.astimezone(clock.NEW_YORK).date())
+        return journal.swing_files(book)
+    except Exception as exc:  # noqa: BLE001 - the swing page never stops a publish
+        rec.flags.append(f"swing_book_error:{type(exc).__name__}")
+        return {}
 
 
 def _seal(commit_reveal, public, rec, ctx):
@@ -1370,6 +1448,7 @@ class SwingRun:
     exits: dict[str, str] = field(default_factory=dict)       # trade id -> exit kind
     flags: list[str] = field(default_factory=list)
     calls: list[Any] = field(default_factory=list)
+    private_calls: list[Any] = field(default_factory=list)    # the weekly canary (H11: ledger only)
     paper: list[str] = field(default_factory=list)            # paper ids tracked this slot
 
 
@@ -1403,6 +1482,8 @@ async def run_swing(ctx: CycleContext, rec: CycleRecord, *, snapshot: Any, kill_
         if src is not None and getattr(src, "prepare", None) is not None and not src.unavailable:
             stage = "prepare"
             out.flags += src.prepare(slot, now)          # the after-close screen, once per session
+        stage = "canary"
+        await _swing_canary(ctx, out, slot=slot, now=now)
         stage = "slot"
         from council.swing.slots import is_swing_slot
 
@@ -1433,6 +1514,29 @@ async def run_swing(ctx: CycleContext, rec: CycleRecord, *, snapshot: Any, kill_
     if not out.live:
         out.lines, out.orders = [], []
     return out
+
+
+async def _swing_canary(ctx: CycleContext, out: SwingRun, *, slot: datetime, now: datetime) -> None:
+    """The weekly Skeptic canary (swing-book §2, H11) when the sources can plant a past event: ONE
+    Skeptic call, graded by code, the grade kept in the runtime health record. Its call goes to
+    the ledger only (never `rec.calls`, never the capture): a canary reaches no public record but
+    the health line."""
+    from council.swing.canary import canary_due
+    from council.swing.council import run_canary
+
+    src = getattr(ctx.sources, "swing", None)
+    event_fn = getattr(src, "canary_event", None)
+    if event_fn is None or getattr(src, "unavailable", ()) or not canary_due(slot):
+        return
+    event = event_fn(slot)
+    if event is None:
+        out.flags.append("swing_canary_no_event")
+        return
+    res = await run_canary(ctx.gateway, ctx.registry, ctx.policy, event, slot=slot,
+                           skeptic_gw=src.skeptic_gateway, sink=None)
+    out.private_calls += list(res.calls)
+    out.flags += [f for f in res.flags if f not in out.flags]
+    record_canary_grade(ctx.ledger, res.grade, now)
 
 
 def settle_swing(ledger: Any, now: datetime) -> list[str]:
@@ -1702,18 +1806,24 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
                                            time_stop_days=agg.time_stop_days, **extras))
         aggs[agg.ref] = agg
     accepted, rule_dropped = R.final_pass(cands, book, policy.swing, cost_fn)
+    rule_codes: dict[str, str] = {}
     for v in rule_dropped:
-        out.flags.append(f"swing_drop:{R.public_code(v.code or 'unknown')}")
+        code = R.public_code(v.code or "unknown")
+        out.flags.append(f"swing_drop:{code}")
+        rule_codes[v.ref] = code
     ok = {v.ref: v for v in accepted}
     cycle_id = rec.cycle_id
     short = _swing_short(cycle_id)
+    idea_ids: dict[str, str] = {}
     for k, (ref, idea) in enumerate(sorted(result.ideas.items()), start=1):
         v = ok.get(ref)
         if v is not None and reproposal_refused(ledger, policy, idea.ticker, idea.idea.side, now):
             v = None                                    # §4.3: over the re-proposal limit -> expired
-            out.flags.append("swing_drop:reproposal_limit")
+            out.flags.append(REPROPOSAL_FLAG)
+            rule_codes[ref] = REPROPOSAL_CODE
         status = "accepted" if v is not None else "dropped"
         idea_id = _swing_ledger_idea(ledger, cycle_id, idea, status, now)
+        idea_ids[ref] = idea_id
         verdict = idea.verdict.verdict if idea.verdict is not None else None
         if v is not None:
             agg = aggs[ref]
@@ -1738,6 +1848,88 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
             out.entries.append(entry)
         _paper_track(ctx, out, result, ref, idea, idea_id, v, slot=slot, now=now, cycle_id=cycle_id,
                      skeptic=verdict.verdict if verdict is not None else None)
+    try:                                # PRIVATE (ledger): the slot's full chain (`swing.record`)
+        rec.extras["swing"] = _swing_slot_record(ctx, out, result, inputs, accepted=[r for r in ok if r not in rule_codes],
+                                                 rule_codes=rule_codes, idea_ids=idea_ids, cycle_id=cycle_id)
+    except Exception as exc:  # noqa: BLE001 - a record failure never stops the cycle; nothing is published
+        out.flags.append(f"swing_record_error:{type(exc).__name__}")
+    out.flags += record_skeptic_verdicts(ledger, result, now)
+
+
+REPROPOSAL_FLAG = "swing_drop:reproposal_limit"
+REPROPOSAL_CODE = "reproposal_limit"
+SKEPTIC_HEALTH_KEY = "swing_skeptic_health"   # runtime: canary grades + the Skeptic's own verdicts
+SKEPTIC_HEALTH_KEEP = 200
+SWING_LIVE_SINCE_KEY = "swing_live_since"     # runtime: the US day of the first live swing slot
+
+
+def _swing_slot_record(ctx: CycleContext, out: SwingRun, result: Any, inputs: Any, *, accepted: list[str],
+                       rule_codes: Mapping[str, str], idea_ids: Mapping[str, str], cycle_id: str) -> dict[str, Any]:
+    """`swing.record.swing_record` for this slot: the catalyst index the council used, the ledger
+    idea ids, each carried idea's earlier cycles (origin + carry cycles, this one excluded) and the
+    public links of the reading list's public-domain items."""
+    from council.swing.record import swing_record
+    from council.swing.roles import catalyst_index
+
+    catalysts = catalyst_index(inputs.reading, inputs.screen_rows, slot=inputs.slot,
+                               screen_available_at=inputs.screen_available_at)
+    carried: dict[str, list[str]] = {}
+    for ref, iid in idea_ids.items():
+        row = ctx.ledger.swing_idea(iid) or {}
+        cycles = [row.get("origin_cycle"), *(row.get("carry_cycles") or [])]
+        earlier = [c for c in dict.fromkeys(cycles) if isinstance(c, str) and c and c != cycle_id]
+        if earlier:
+            carried[ref] = earlier
+    links = {str(i.id): str(i.link) for i in inputs.reading
+             if str(getattr(i, "id", "")).startswith("P:") and getattr(i, "link", None)}
+    return swing_record(result, catalysts=catalysts, live=out.live, accepted=accepted, rule_codes=rule_codes,
+                        idea_ids=idea_ids, carried_from=carried, links=links,
+                        live_setups=ctx.policy.swing.setups_live)
+
+
+def _health_state(ledger: Any) -> dict[str, list[str]]:
+    raw = ledger.get_runtime(SKEPTIC_HEALTH_KEY) or {}
+    return {"canary_grades": [str(g) for g in raw.get("canary_grades") or []],
+            "verdicts": [str(v) for v in raw.get("verdicts") or []]}
+
+
+def record_skeptic_verdicts(ledger: Any, result: Any, now: datetime) -> list[str]:
+    """Append the Skeptic's OWN verdicts of this slot (the model's word before any code rule;
+    canaries never) to the runtime health record. Returns flags; never raises."""
+    try:
+        own = []
+        for ref in sorted(result.ideas, key=lambda r: int(r.split(":")[1]) if r.split(":")[-1].isdigit() else 0):
+            idea = result.ideas[ref]
+            if getattr(idea, "canary", False) or idea.verdict is None or idea.verdict.verdict is None:
+                continue
+            word = getattr(idea.verdict.verdict, "verdict", None)
+            if word in ("pass", "wait", "reject"):
+                own.append(word)
+        if not own:
+            return []
+        state = _health_state(ledger)
+        state["verdicts"] = (state["verdicts"] + own)[-SKEPTIC_HEALTH_KEEP:]
+        ledger.set_runtime(SKEPTIC_HEALTH_KEY, state, now=now)
+        return []
+    except Exception as exc:  # noqa: BLE001 - measurement never stops a cycle
+        return [f"skeptic_health_error:{type(exc).__name__}"]
+
+
+def record_canary_grade(ledger: Any, grade: str, now: datetime) -> None:
+    """Append one canary grade (`caught` / `missed`) to the runtime health record."""
+    if grade not in ("caught", "missed"):
+        return
+    state = _health_state(ledger)
+    state["canary_grades"] = (state["canary_grades"] + [grade])[-SKEPTIC_HEALTH_KEEP:]
+    ledger.set_runtime(SKEPTIC_HEALTH_KEY, state, now=now)
+
+
+def swing_health(ledger: Any) -> Any:
+    """The public Skeptic-health line from the runtime record (`public_skeptic_health`)."""
+    from council.publish.redact import public_skeptic_health
+
+    state = _health_state(ledger)
+    return public_skeptic_health(state["canary_grades"], state["verdicts"])
 
 
 def _paper_group(result: Any, ref: str, idea: Any, accepted: bool, live: bool) -> str:

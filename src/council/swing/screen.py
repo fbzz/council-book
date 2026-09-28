@@ -52,6 +52,12 @@ from council.stocks.universe import try_normalise_id
 from council.swing import series
 
 PROVIDER = "alpaca_screen"
+# The screen's own ceilings, far below Alpaca's free plan (200 requests a minute, no symbol quota:
+# `facts.market.BUDGET_LIMITS`). One multi-symbol request counts ONCE against the hour and day
+# limits, and `symbols_per_month` counts DISTINCT symbols (`RequestBudget.reserve`), so re-pulling
+# the same ~612 names every session costs nothing more. One screen = ceil(612 / 100) = 7 requests,
+# built once per session (`sources.prepare` caches it); a month of 23 sessions x 2 slots, even
+# rebuilt at both, is 322 requests and ~612 symbols (test_screen_fits_a_month_of_two_slots).
 LIMITS = BudgetLimits(requests_per_hour=30, requests_per_day=60, symbols_per_month=1_500)
 PACE_S = 2.0
 DEADLINE_S = 240.0
