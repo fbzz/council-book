@@ -1,5 +1,12 @@
 # Changelog
 
+## Skeptic moves to the Scout's model — policy change (2026-09-29)
+- **Policy change**: `policy/swing.yaml` `llm.skeptic_model` `glm-5.3-flash:cloud` → `deepseek-v4.1-flash:cloud`,
+  `skeptic_model_family` `other` → `same` (user decision). On the third real paper run GLM returned
+  parseable JSON on 1 of 3 Skeptic calls: it ignores structured output and `think: false` and spends
+  its budget reasoning in prose. The Skeptic stays blind by input (claim, catalyst, fact card; never
+  the Scout's thesis); cycles carry the `skeptic_same_model` flag.
+
 ## Swing paper-run fixes: Skeptic JSON, fact parity, unscreened names, FINRA, SEC feed — policy change (prompts) (2026-09-28)
 - **Policy change (prompts)**: `council-skeptic/v2` and `council-scout/v2` (manifest regenerated, so
   the manifest SHA changes). Skeptic: a HOW TO REPLY block (the JSON object only, starting with `{`;

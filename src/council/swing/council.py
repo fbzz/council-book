@@ -263,8 +263,10 @@ def model_family(model: str) -> str:
 
 async def choose_skeptic(gw: Gateway, skeptic_gw: Gateway | None, policy: Policy) -> tuple[Gateway, list[str]]:
     """The Skeptic's gateway and flags (Q-S9). Never raises."""
-    if skeptic_gw is None or _swing(policy).llm.skeptic_model_family == "same":
+    if skeptic_gw is None:
         return gw, ["skeptic_same_model"]
+    same = _swing(policy).llm.skeptic_model_family == "same"   # user 2026-09-29: the Scout's model,
+    # still on the Skeptic's own gateway (structured output, its own budget and timeout ladder)
     verify = getattr(skeptic_gw, "verify_model", None)
     try:
         ok = bool(await verify()) if verify is not None else True
@@ -272,7 +274,7 @@ async def choose_skeptic(gw: Gateway, skeptic_gw: Gateway | None, policy: Policy
         ok = False
     if not ok:
         return gw, ["skeptic_same_model", "skeptic_model_unavailable"]
-    if model_family(skeptic_gw.model) == model_family(gw.model):
+    if same or model_family(skeptic_gw.model) == model_family(gw.model):
         return skeptic_gw, ["skeptic_same_model"]
     return skeptic_gw, []
 

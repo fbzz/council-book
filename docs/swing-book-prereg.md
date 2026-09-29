@@ -28,7 +28,9 @@ happened next. It is judged only on trades opened after go-live.
 - Net reward / risk at entry >= 1.2 after the round-trip cost.
 - One swing slot per US session (winter 18:40 UTC); an entry's approval is valid 60 minutes.
 - Earnings exits are proposals for the human, never automatic.
-- The Skeptic runs on `glm-5.3-flash:cloud` (a different family from the Scout).
+- The Skeptic runs on `deepseek-v4.1-flash:cloud`, the Scout's model (user decision 2026-09-29, after
+  `glm-5.3-flash:cloud` returned parseable JSON on 1 of 3 real calls). It stays blind by input: it never
+  sees the Scout's thesis, only the claim, the catalyst and the fact card.
 - The SQ-8 mechanical stock rule is a public PAPER benchmark only; it never trades.
 
 ## 3. Primary metric

@@ -60,7 +60,8 @@ def test_full_path_enters_on_2_of_3_and_stays_within_budget(reg, policy):
     assert res.entries()[0].votes_for == 3
     assert res.calls_used <= 9 and res.calls_used == 1 + 3 + 2 + 3
     assert roles_called(skg) == ["skeptic"] * 3            # the Skeptic ran on its own gateway
-    assert "skeptic_same_model" not in res.flags and res.skeptic_model == OTHER
+    same = policy.swing.llm.skeptic_model_family == "same"   # user 2026-09-29: the Scout's model
+    assert ("skeptic_same_model" in res.flags) == same and res.skeptic_model == OTHER
 
 
 def test_pm_one_of_three_is_no_entry(reg, policy):

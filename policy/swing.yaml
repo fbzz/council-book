@@ -108,8 +108,8 @@ llm:                           # §5
   max_skeptic_calls: 3         # one Skeptic call per idea, at most 3 ideas
   pm_replicates: 3
   pm_entry_votes: 2
-  skeptic_model: glm-5.3-flash:cloud   # Q-S9: a different model family from the Scout
-  skeptic_model_family: other
+  skeptic_model: deepseek-v4.1-flash:cloud   # user 2026-09-29: GLM could not return JSON reliably
+  skeptic_model_family: same                  # same model as the Scout; blindness is by input only
 
 budget:
   idle: cash                   # Q-S1: idle swing budget stays in cash

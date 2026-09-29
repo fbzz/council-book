@@ -59,8 +59,9 @@ def test_repository_swing_policy_loads_with_the_users_decisions():
     assert swing.slots.summer_utc == ["14:40", "18:40"]
     assert swing.earnings.exit_mode == "proposal"
     assert swing.budget.idle == "cash"
-    assert swing.llm.skeptic_model == "glm-5.3-flash:cloud"
-    assert swing.llm.skeptic_model != policy.council["model"]  # a different model from the Scout
+    assert swing.llm.skeptic_model == "deepseek-v4.1-flash:cloud"
+    assert swing.llm.skeptic_model_family == "same"
+    assert swing.llm.skeptic_model == policy.council["model"]  # user 2026-09-29: the Scout's model
     assert swing.llm.max_calls_per_slot == 9
     assert swing.public_record.declared_cost_pct_per_leg == 1.25
     assert swing.tracking.paper_track_every_idea is True
@@ -158,15 +159,21 @@ def test_drawdown_scaling_cannot_be_relaxed_to_full_size():
 def test_skeptic_family_must_match_the_model_choice(tmp_path):
     work = _copy_policy(tmp_path)
     scout = yaml.safe_load((work / "council.yaml").read_text())["model"]
-    (work / SWING_FILE).write_text(yaml.safe_dump(_with(("llm", "skeptic_model"), scout)))
+
+    def write(model, family):
+        data = _with(("llm", "skeptic_model"), model)
+        data["llm"]["skeptic_model_family"] = family
+        (work / SWING_FILE).write_text(yaml.safe_dump(data))
+
+    write(scout, "other")
     with pytest.raises(InvariantViolation, match="skeptic_model_family 'other'"):
         check_policy(Policy.load(work, include_sleeve=False))
-    (work / SWING_FILE).write_text(yaml.safe_dump(_with(("llm", "skeptic_model_family"), "same")))
+    write("glm-5.3-flash:cloud", "same")
     with pytest.raises(InvariantViolation, match="skeptic_model_family 'same'"):
         check_policy(Policy.load(work, include_sleeve=False))
-    data = _with(("llm", "skeptic_model"), scout)
-    data["llm"]["skeptic_model_family"] = "same"
-    (work / SWING_FILE).write_text(yaml.safe_dump(data))
+    write("glm-5.3-flash:cloud", "other")
+    check_policy(Policy.load(work, include_sleeve=False))
+    write(scout, "same")
     check_policy(Policy.load(work, include_sleeve=False))   # the declared same-model fallback
 
 
