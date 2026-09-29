@@ -71,6 +71,8 @@ CURRENT_FORMS: tuple[str, ...] = ("8-K", "6-K")
 FORMS: frozenset[str] = frozenset({"8-K", "8-K/A", "6-K"})
 LINK = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker}&type={form}"
 FEED_TIMEOUT = gov_news.FETCH_TIMEOUT
+CURRENT_TIMEOUT = httpx.Timeout(30.0, connect=5.0)   # the slow `getcurrent` pages (fetch_current)
+CURRENT_REUSE_S = 600.0
 SIX_K_TITLE = "6-K: report of a foreign private issuer"
 _ITEM = re.compile(r"\bItem\s+(\d\.\d{2})\b")
 _ITEM_CODE = re.compile(r"^\d\.\d{2}$")
@@ -247,12 +249,24 @@ class _Timed:
 
 
 def fetch_current(client: SecClient, form: str) -> list[Filing]:
-    """One current-filings Atom page for `form`, through the client's limiter."""
+    """One current-filings Atom page for `form`, through the client's limiter.
+
+    EDGAR's `getcurrent` page is slow at times (the 6-K page took 3 s to 60 s to its first byte on
+    2026-09-28, so the 10 s news read timeout failed it twice: `news_source_error:sec:timeout`).
+    It gets its own read timeout (CURRENT_TIMEOUT), and a successful page is reused for
+    CURRENT_REUSE_S on the same client: one cycle reads each page up to twice (the swing screen and
+    the swing inputs), which must not double the wait or the requests."""
+    memo = client.__dict__.setdefault("_current_pages", {}) if hasattr(client, "__dict__") else {}
+    held = memo.get(form)
+    if held is not None and time.monotonic() - held[0] < CURRENT_REUSE_S:
+        return list(held[1])
     http = client._http  # the client's paced session (its request hook is the shared limiter)
-    response = get_with_retry(_Timed(http, FEED_TIMEOUT), CURRENT_URL.format(form=quote(form, safe="")),
+    response = get_with_retry(_Timed(http, CURRENT_TIMEOUT), CURRENT_URL.format(form=quote(form, safe="")),
                               what=f"sec current {form}", retries=gov_news.RETRIES,
                               backoff_s=gov_news.BACKOFF_S, fail_fast_429=True)
-    return parse_current_atom(response.content)
+    filings = parse_current_atom(response.content)
+    memo[form] = (time.monotonic(), tuple(filings))
+    return filings
 
 
 def fetch_submissions(client: SecClient, cik: int) -> dict[str, Any]:

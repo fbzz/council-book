@@ -328,3 +328,35 @@ def test_correction_message_lists_errors():
 def test_input_hash_depends_on_both_parts():
     assert input_hash_of("a", "b") != input_hash_of("ab", "")
     assert len(input_hash_of("a", "b")) == 64
+
+
+# ------------------------------------------------------------------ structured output (Skeptic, GLM)
+def test_structured_gateway_sends_the_inlined_schema_as_format():
+    """2026-09-28: GLM ignored `format: "json"` and answered in prose; the Skeptic's gateway sends
+    the schema itself (Ollama structured output), refs inlined, on both the first and the retry."""
+    from council.llm.gateway import inline_schema
+    from council.swing.models import SkepticVerdict
+
+    fmt = inline_schema(SkepticVerdict)
+    blob = json.dumps(fmt)
+    assert "$ref" not in blob and "$defs" not in blob
+    assert list(fmt["properties"])[0] == "analysis"                     # the bounded working field first
+    assert fmt["properties"]["reasons"]["items"]["properties"]["text"]["maxLength"] == 200
+    script = Script(chat("Let me work through this carefully..."), chat(json.dumps(GOOD)))
+    gw, _ = gateway(script, structured=True)
+    res = complete(gw)
+    assert res.call.status == "ok"
+    first, retry = script.bodies()
+    assert first["format"] == inline_schema(PMDecision) == retry["format"] and first["think"] is False
+    assert "JSON object only" in retry["messages"][-1]["content"]
+    plain = Script(chat(json.dumps(GOOD)))
+    gw, _ = gateway(plain)
+    complete(gw)
+    assert plain.bodies()[0]["format"] == "json"                         # other roles unchanged
+
+
+def test_unclosed_think_block_is_stripped_before_decoding():
+    from council.llm.gateway import parse_json_object
+
+    assert parse_json_object("<think>reasoning without a close tag\n" + json.dumps(GOOD)) == GOOD
+    assert parse_json_object("<think>a</think>" + json.dumps(GOOD)) == GOOD

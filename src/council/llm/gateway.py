@@ -1,8 +1,12 @@
 """Async Ollama gateway: one role call in, one `LLMResult` out. It never raises.
 
 Rules (each one tested):
-  - Ollama Cloud ignores JSON schemas, so the request sends `format: "json"`, `think: false`,
-    temperature 0 and a fixed seed; the reply is validated STRICTLY after decoding.
+  - The request sends `format: "json"`, `think: false`, temperature 0 and a fixed seed; the reply
+    is validated STRICTLY after decoding. A gateway built with `structured=True` sends the
+    requested schema itself as `format` (Ollama structured output, refs inlined) instead: some
+    cloud models ignore `"json"` and answer in prose (the Skeptic on GLM, 2026-09-28).
+  - Reasoning a model leaks despite `think: false` is removed before decoding: a closed
+    `<think>...</think>` block, and an unclosed one up to the first `{`.
   - Decoding: the whole reply as JSON first, then the LAST top-level JSON object in the text
     (a model may quote another agent's JSON before its own).
   - Every string in the decoded object is sanitized before validation (see `sanitize.py`).
@@ -35,6 +39,7 @@ from council.models.cycle import CallStatus, RoleCall
 Sleep = Callable[[float], Awaitable[None]]
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S)
+_OPEN_THINK = re.compile(r"^\s*<think>[^{]*", re.S)
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 MAX_ERRORS_IN_CORRECTION = 12
 MAX_ERROR_CHARS = 300
@@ -90,7 +95,7 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
     markdown fences), else the LAST top-level `{...}` object that decodes. None if there is none."""
     if not isinstance(text, str):
         return None
-    cleaned = _THINK_BLOCK.sub("", text).strip()
+    cleaned = _OPEN_THINK.sub("", _THINK_BLOCK.sub("", text)).strip()
     stripped = _FENCE.sub("", cleaned).strip()
     try:
         obj = json.loads(stripped)
@@ -142,14 +147,34 @@ def correction_message(errors: Sequence[str]) -> str:
     return (
         "Your previous reply was not accepted by the checker. Problems:\n"
         f"{lines}{more}\n"
-        "Reply again with ONE corrected JSON object containing exactly the fields described in "
-        "the instructions. No prose, no markdown fences."
+        "Reply with the JSON object only: ONE corrected JSON object containing exactly the fields "
+        "described in the instructions, starting with { and ending with }. No reasoning or prose "
+        "before or after it, no markdown fences."
     )
 
 
 def input_hash_of(system: str, user: str) -> str:
     """Hash of exactly what the model is shown."""
     return hashlib.sha256(system.encode() + b"\0" + user.encode()).hexdigest()
+
+
+def inline_schema(schema: type[BaseModel]) -> dict[str, Any]:
+    """The JSON schema of `schema` with every local `$ref` inlined (no `$defs`), for Ollama's
+    structured-output `format` (grammar converters differ in their `$ref` support)."""
+    full = schema.model_json_schema()
+    defs = full.pop("$defs", {})
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                return walk(defs[ref.rsplit("/", 1)[-1]])
+            return {k: walk(v) for k, v in node.items() if k != "title"}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+
+    return walk(full)
 
 
 def _short_error(text: str) -> str:
@@ -209,12 +234,14 @@ class OllamaGateway:
         sleep: Sleep = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         backoff_s: float = 2.0,
+        structured: bool = False,
     ) -> None:
         if not timeouts:
             raise ValueError("timeout ladder must have at least one step")
         self.host = host.rstrip("/")
         self.model = model
         self.think = False
+        self.structured = bool(structured)
         self.num_ctx = int(num_ctx)
         self.timeouts = tuple(float(t) for t in timeouts)
         self._transport = transport
@@ -240,12 +267,14 @@ class OllamaGateway:
             timeout=httpx.Timeout(timeout if timeout is not None else 10.0),
         )
 
-    def _body(self, messages: list[dict[str, str]], seed: int, num_predict: int) -> dict[str, Any]:
+    def _body(self, messages: list[dict[str, str]], seed: int, num_predict: int,
+              schema: type[BaseModel] | None = None) -> dict[str, Any]:
+        fmt: Any = inline_schema(schema) if self.structured and schema is not None else "json"
         return {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "format": "json",
+            "format": fmt,
             "think": False,
             "options": {
                 "temperature": 0,
@@ -351,7 +380,7 @@ class OllamaGateway:
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             try:
                 raw, t_in, t_out = await self._post_with_ladder(
-                    self._body(messages, seed, num_predict), failed, "first")
+                    self._body(messages, seed, num_predict, schema), failed, "first")
             except _AttemptFailure as exc:
                 return result(None, exc.status, str(exc))
             tokens_in, tokens_out = t_in, t_out
@@ -369,7 +398,7 @@ class OllamaGateway:
             first_errors = "; ".join(errors)
             try:
                 raw2, t_in, t_out = await self._post_with_ladder(
-                    self._body(retry_messages, seed, num_predict), failed, "correction"
+                    self._body(retry_messages, seed, num_predict, schema), failed, "correction"
                 )
             except _AttemptFailure as exc:
                 return result(None, "parse_fail", f"{first_errors} | correction {exc.status}: {exc}")

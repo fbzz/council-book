@@ -64,3 +64,22 @@ def test_limits_and_errors():
     with pytest.raises(DataError):
         finra.fetch_short_interest(["NVDA"], asof=ASOF, client=_client(body={"not": "a list"}))
     assert finra.fetch_short_interest([], asof=ASOF) == {}
+
+
+def test_request_has_no_sort_and_unsorted_rows_still_pick_the_latest():
+    """2026-09-28: FINRA answered HTTP 400 ("Sorting is allowed only if all partitions keys are
+    specified in EQUAL CompareFilter ... settlementDate") to a `sortFields` request, so every slot
+    had `swing_source_error:finra:DataError`. The body carries no sort; `parse_rows` picks the
+    latest settlement whatever the row order."""
+    body = finra.request_body(["HBM", "EGO"], ASOF.date())
+    assert "sortFields" not in body and body["limit"] >= 8
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "sortFields" in json.loads(request.content):
+            return httpx.Response(400, json={"statusCode": 400, "message": "Sorting is allowed only if ..."})
+        rows = [{"symbolCode": "HBM", "settlementDate": d, "currentShortPositionQuantity": q}
+                for d, q in (("2026-08-14", 3), ("2026-09-15", 1), ("2026-08-29", 2))]
+        return httpx.Response(200, json=rows)
+
+    out = finra.fetch_short_interest(["HBM", "EGO"], asof=ASOF, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert set(out) == {"HBM"} and out["HBM"].settlement_date == date(2026, 9, 15) and out["HBM"].short_shares == 1

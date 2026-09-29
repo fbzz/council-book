@@ -1,7 +1,10 @@
 """The after-close movers screen (design swing-book.md rev 2, §1.2; SW-1). Facts, not picks.
 
 Built ONCE per US trading day after the close, for the screen universe (S&P 500 + Nasdaq-100 + the
-AI list, ~600 names, plus the FF12 sector ETFs), from COMPLETED daily bars only:
+AI list, ~600 names, plus the FF12 sector ETFs and the market-context ETFs SPY / QQQ / IWM / VIXY),
+from COMPLETED daily bars only. The ETFs' D moves are kept in `Screen.context` (the Scout's MARKET
+CONTEXT). A screen for D is available to a slot from D 20:30 New York (`ready_at`), whenever its
+cache file was written (the cycle writes it at its own clock, which is at or after the slot):
 
 - Readiness: the screen is for the latest session D whose D 20:30 New York has passed, when
   Alpaca's completed SIP bar for D exists (the bar-availability rule is D 20:00 New York; the extra
@@ -74,6 +77,17 @@ SECTOR_MOVE_SIGMA = 2.0
 SECTOR_MIN_MEMBERS = 3
 LAGGARD_MAX_SIGMA = 0.5
 LISTS = ("movers", "volume", "unmoved", "laggard")
+SECTOR_ETF_LABEL: Mapping[str, str] = {
+    "XLP": "consumer staples", "XLY": "consumer discretionary", "XLI": "industrials", "XLE": "energy",
+    "XLB": "materials", "XLK": "technology", "XLC": "communication services", "XLU": "utilities",
+    "XLV": "health care", "XLF": "financials",
+}
+# Broad-market ETFs whose D move is kept as the Scout's market context (VIXY: a VIX-futures ETF,
+# the volatility proxy; no index level is ever read).
+CONTEXT_ETFS: Mapping[str, str] = {
+    "SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF", "IWM": "Russell 2000 ETF",
+    "VIXY": "VIX short-term futures ETF, volatility proxy",
+}
 # FF12 sector -> SPDR sector ETF ("Other" has none).
 SECTOR_ETF: Mapping[str, str] = {
     "NoDur": "XLP", "Durbl": "XLY", "Manuf": "XLI", "Enrgy": "XLE", "Chems": "XLB", "BusEq": "XLK",
@@ -106,6 +120,7 @@ class Screen:
     requests: int = 0
     names_scored: int = 0
     ready: bool = True
+    context: dict[str, dict[str, float]] = field(default_factory=dict)   # ETF: {move_pct, move_sigma}
 
     def fact_ids(self) -> list[str]:
         return [row["id"] for k in LISTS for row in self.lists.get(k, [])]
@@ -142,9 +157,14 @@ def screen_session(now: datetime) -> date | None:
     return None
 
 
+def ready_at(session: date) -> datetime:
+    """When D's screen facts become available (D READY_AFTER New York, as UTC): its completed
+    bars and D's filing window are both known then, whenever the cache file is written."""
+    return datetime(session.year, session.month, session.day, *READY_AFTER, tzinfo=NEW_YORK).astimezone(UTC)
+
+
 def is_ready(now: datetime, session: date) -> bool:
-    ready = datetime(session.year, session.month, session.day, *READY_AFTER, tzinfo=NEW_YORK)
-    return now >= ready and session_hours("us", session) is not None
+    return now >= ready_at(session) and session_hours("us", session) is not None
 
 
 # --------------------------------------------------------------------------------- universe
@@ -250,6 +270,33 @@ def catalysts_in_window(filings: Iterable[tuple[str, datetime]], session: date) 
     return out
 
 
+def context_of(etf_metrics: Mapping[str, Metric]) -> dict[str, dict[str, float]]:
+    """{ETF: {move_pct, move_sigma}} of D for the context and sector ETFs (percent and sigma only)."""
+    return {e: {"move_pct": round(m.move_pct, 2), "move_sigma": round(m.move_sigma, 2)}
+            for e, m in sorted(etf_metrics.items())}
+
+
+def market_context(context: Mapping[str, Mapping[str, float]], session: str) -> list[tuple[str, str]]:
+    """(evidence id, line) market-context rows: the broad ETFs, then the sector ETFs by |sigma|.
+    Ids `F:<ETF>:ret1d_sigma` (the market-fact vocabulary); facts only, never an index level."""
+    rows: list[tuple[str, str]] = []
+
+    def line(etf: str, label: str) -> None:
+        m = context.get(etf)
+        if m is None:
+            return
+        rows.append((f"F:{etf}:ret1d_sigma", f"{etf} ({label}) moved {m['move_pct']:+g}% "
+                     f"({m['move_sigma']:+g} sigma of 20 sessions) in the {session} session"))
+
+    for etf, label in CONTEXT_ETFS.items():
+        line(etf, label)
+    sectors = sorted((e for e in set(SECTOR_ETF.values()) if e in context),
+                     key=lambda e: (-abs(context[e]["move_sigma"]), e))
+    for etf in sectors:
+        line(etf, f"{SECTOR_ETF_LABEL.get(etf, 'sector')} sector ETF")
+    return rows
+
+
 # --------------------------------------------------------------------------------- fetch
 
 
@@ -288,7 +335,7 @@ def run_screen(
         screen.flags.append("screen_breaker_open")
         screen.ready = False
         return screen
-    etfs = sorted(set(SECTOR_ETF.values()))
+    etfs = sorted(set(SECTOR_ETF.values()) | set(CONTEXT_ETFS))
     names = [n.line_id for n in universe]
     tickers = list(dict.fromkeys([*etfs, *names]))
     started = monotonic()
@@ -330,6 +377,7 @@ def run_screen(
         for sym, df in got.items():
             bars[sym.replace(".", "_")] = df
     etf_metrics = {e: m for e in etfs if (m := day_metric(e, bars.get(e), session)) is not None}
+    screen.context = context_of(etf_metrics)
     metrics = [m for n in universe if (m := day_metric(n.line_id, bars.get(n.line_id), session, n.sector))]
     screen.names_scored = len(metrics)
     missing = len(universe) - len(metrics)

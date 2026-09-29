@@ -182,6 +182,8 @@ def cycle(
     stub_llm: bool = typer.Option(False, "--stub-llm", help="Canned replies that hold the reference (no model calls)."),
     paper: bool = typer.Option(False, "--paper", help="Paper run: real data and models, NO broker token, own state dir (<state>/paper), publishes nothing. Needs COUNCIL_MODE=dry_run."),
     force: bool = typer.Option(False, help="Re-run a slot that already has a record."),
+    at: str = typer.Option(None, "--at", help="--paper only: run as if the clock read this UTC time "
+                                             "(e.g. 2026-09-28T18:40Z), to replay a missed swing slot."),
 ) -> None:
     """Run the council cycle for the current 4-hour slot."""
     from council.cycle import run_cycle
@@ -204,11 +206,34 @@ def cycle(
         ctx = _ctx(mode="dry_run", stub_llm=stub_llm, publish="preview")
     else:
         ctx = _ctx(mode="live", stub_llm=stub_llm, publish="push")
+    if at is not None:
+        if not paper or sandbox is not None:
+            _refuse("--at is for --paper runs only (a live or rehearsal slot runs on the wall clock)")
+        ctx.clock = paper_clock(at)
     outcome = run_cycle(ctx, force=force)
     typer.echo(json.dumps(outcome.__dict__, default=str, indent=1))
 
 
 PAPER_STATE = "paper"
+
+
+def paper_clock(at: str):
+    """A fixed clock for a replayed paper slot: an aware UTC time no later than now. The paper
+    state dir and `publish="none"` keep it away from the live ledger and the public record."""
+    from datetime import UTC, datetime
+
+    from council.clock import utcnow
+
+    try:
+        ts = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        _refuse(f"--at: not an ISO time: {at!r}")
+    if ts.tzinfo is None:
+        _refuse("--at needs a UTC offset (e.g. 2026-09-28T18:40Z)")
+    ts = ts.astimezone(UTC)
+    if ts > utcnow():
+        _refuse("--at may not be in the future")
+    return lambda: ts
 
 
 def paper_context(settings, *, stub_llm: bool = False):

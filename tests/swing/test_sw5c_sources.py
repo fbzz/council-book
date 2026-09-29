@@ -106,7 +106,7 @@ def _idea(ticker="TSTA", side="long"):
     return SwingIdea(ref="idea:1", idea=si, line_id=ticker)
 
 
-def _real(policy, tmp_path, *, allow_unverified, bars_fail=False):
+def _real(policy, tmp_path, *, allow_unverified, bars_fail=False, last=None):
     panel = {"TSTA": tf.STOCK, "XLK": tf.SECTOR, "SPY": tf.SPY, "QQQ": tf.QQQ}
     asked: list[list[str]] = []
 
@@ -123,7 +123,7 @@ def _real(policy, tmp_path, *, allow_unverified, bars_fail=False):
     src = ss.real_swing_sources(policy, state_dir=tmp_path, keys_loader=lambda: object(),
                                 sec_user_agent=lambda: "Council Test ops@example.org", sec_factory=FakeSec,
                                 fetch_bars=bars, fetch_short_interest=si, allow_unverified=allow_unverified,
-                                wall=lambda: tf.SLOT)
+                                wall=lambda: tf.SLOT, fetch_last=last or (lambda *a, **k: {}))
     return src, asked
 
 
@@ -214,3 +214,55 @@ def test_run_cycle_at_a_swing_slot_exercises_the_swing_stage_offline(tmp_path):
     assert {"scout", "skeptic", "swing_bull", "swing_bear", "swing_pm"} <= roles, roles
     assert len(ctx.ledger.paper_trades()) == 1
     e2e._assert_clean(preview)
+
+
+def test_paper_at_clock_is_fixed_past_utc_and_paper_only():
+    import pytest
+    import typer
+    from typer.testing import CliRunner
+
+    from council import cli
+
+    clk = cli.paper_clock("2026-09-28T18:40Z")
+    assert clk().isoformat() == "2026-09-28T18:40:00+00:00"
+    for bad in ("2026-09-28T18:40", "not-a-time", "2999-01-01T00:00Z"):
+        with pytest.raises((SystemExit, typer.Exit)):
+            cli.paper_clock(bad)
+    res = CliRunner().invoke(cli.app, ["cycle", "--stub-llm", "--at", "2026-09-28T18:40Z"])
+    assert res.exit_code != 0
+
+
+def test_unscreened_ticker_gets_the_reaction_since_news_and_the_skeptic_sees_it(policy, tmp_path):
+    """2026-09-28: HBM/EGO/DPRO/KNRX were outside the screen universe. The card is built for any
+    resolvable ticker (the universe is not a filter), and a paper run without a broker takes the
+    intraday reaction from Alpaca's delayed bars, which the Skeptic's input shows."""
+    from council.swing.council import SwingInputs, skeptic_input
+    from council.swing.roles import catalyst_index
+
+    (tmp_path / "swing").mkdir()
+    (tmp_path / "swing" / "universe.json").write_text(json.dumps({"asof": tf.SLOT.isoformat(), "tickers": ["AAPL"]}))
+    asked: list[tuple[list[str], datetime]] = []
+
+    def last(symbols, *, keys, now):
+        asked.append((list(symbols), now))
+        return {"TSTA": float(tf.STOCK["close"].iloc[-1]) * 1.05}
+
+    src, _ = _real(policy, tmp_path, allow_unverified=True, last=last)
+    idea = _idea()
+    (res,) = _gate(src, idea).values()
+    assert res.ok and asked == [(["TSTA"], tf.SLOT)]                      # never past the slot
+    f = res.card.fields
+    assert f["move_since_news_close_sigma"] is not None and f["move_since_news_live_pct"] is not None
+    assert "swing_reaction_delayed_alpaca" in src.drain()
+    idea.card = res.card
+    inputs = SwingInputs(slot=tf.SLOT, reading=[tf.SEC_ITEM])
+    text = skeptic_input(idea, catalysts=catalyst_index([tf.SEC_ITEM], slot=tf.SLOT), inputs=inputs)[0][0].items[0].text
+    assert "X:TSTA:move_since_news_close_sigma" in text and "X:TSTA:move_since_news_live_sigma" in text
+
+    def broken(*_a, **_k):
+        raise RuntimeError("down")
+
+    src, _ = _real(policy, tmp_path, allow_unverified=True, last=broken)
+    (res,) = _gate(src, _idea()).values()
+    assert res.ok and "move_since_news_live_pct" not in {k for k, v in res.card.fields.items() if v is not None}
+    assert "swing_source_error:alpaca_intraday:RuntimeError" in src.drain()

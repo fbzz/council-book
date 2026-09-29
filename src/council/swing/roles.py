@@ -86,6 +86,7 @@ class CatalystMeta:
     title: str = ""
     form: str | None = None
     items: tuple[str, ...] = ()
+    summary: str = ""        # a public-domain (P:) item's cleaned summary; "" for feed / screen ids
 
     @property
     def market_wide(self) -> bool:
@@ -103,7 +104,8 @@ def catalyst_index(reading: Iterable[Any], screen_rows: Iterable[Mapping[str, An
         syms = frozenset(s for s in (try_normalise_id(x) for x in item.symbols) if s)
         out[item.id] = CatalystMeta(id=item.id, available_at=item.available_at, symbols=syms,
                                     title=item.title, form=getattr(item, "form", None),
-                                    items=tuple(getattr(item, "items", ()) or ()))
+                                    items=tuple(getattr(item, "items", ()) or ()),
+                                    summary=str(getattr(item, "summary", "") or "") if item.id.startswith("P:") else "")
     if screen_available_at is not None and screen_available_at < slot:
         for row in screen_rows:
             out[str(row["id"])] = CatalystMeta(id=str(row["id"]), available_at=screen_available_at,

@@ -73,10 +73,11 @@ if TYPE_CHECKING:
     from council.deliberation.capture import InputSink
 
 SWING_ROLES = ("scout", "skeptic", "swing_bull", "swing_bear", "swing_pm")
-NUM_PREDICT = {"scout": 2400, "skeptic": 1200, "swing_bull": 1600, "swing_bear": 1800, "swing_pm": 1400}
+NUM_PREDICT = {"scout": 2400, "skeptic": 3000, "swing_bull": 1600, "swing_bear": 1800, "swing_pm": 1400}
 SEEDS = {"scout": 42, "skeptic": 42, "swing_bull": 42, "swing_bear": 43}
 SKEPTIC_FIRST_IDEAS = 2            # the drop order keeps the Skeptic for the first 2 ideas
 MAX_SCOUT_IDEAS = 5
+READING_SUMMARY_MAX = 1200          # characters of a public item's summary shown to the Scout
 LIVE_FIELDS = ("move_since_news_live_pct", "move_since_news_live_sigma", "move_today_live_pct",
                "move_today_live_sigma")
 # Never prompted: the feed copy of the catalyst items, and a money amount (percent-only reasoning;
@@ -136,6 +137,7 @@ class SwingInputs:
     recent_rejections: Mapping[str, datetime] = field(default_factory=dict)
     code_exits: Sequence[str] = ()                       # trade refs exited by code (no LLM)
     max_entries: int | None = None                       # room S1-S4 leave
+    screened: frozenset[str] | None = None               # the movers-screen universe (line ids); None = unknown
 
 
 # ---------------------------------------------------------------------------------- results
@@ -305,7 +307,8 @@ def card_rows(card: FactCard | None) -> list[tuple[str, str]]:
 
 def catalyst_rows(ids: Sequence[str], catalysts: Mapping[str, CatalystMeta], card: FactCard | None,
                   slot: datetime) -> list[tuple[str, str]]:
-    """The cited items with the CODE-attached metadata (form, item codes, official titles)."""
+    """The cited items with the CODE-attached metadata (form, item codes, official titles) and, for a
+    public-domain item, the summary the Scout read."""
     attached = {c["id"]: c for c in (card.catalyst_items if card is not None else [])}
     out = []
     for cid in ids:
@@ -321,7 +324,10 @@ def catalyst_rows(ids: Sequence[str], catalysts: Mapping[str, CatalystMeta], car
         elif meta.form:
             parts.append(f"form {meta.form}, items {', '.join(meta.items)}")
         tagged = ", ".join(sorted(meta.symbols)) or "market-wide"
-        out.append((cid, f"{meta.title} [{tagged}] ({'; '.join(parts)})"))
+        # the same cleaned summary the Scout read (fact parity: an SEC item's exhibit headline and
+        # excerpt), so a reviewer can check the claim against the text and not a bare form header
+        body = f" | {meta.summary[:READING_SUMMARY_MAX]}" if meta.summary else ""
+        out.append((cid, f"{meta.title} [{tagged}] ({'; '.join(parts)}){body}"))
     return out
 
 
@@ -379,8 +385,17 @@ def scout_input(inputs: SwingInputs, catalysts: Mapping[str, CatalystMeta]) -> t
         meta = catalysts[item.id]
         hours = max(0, int((inputs.slot - meta.available_at).total_seconds() // 3600))
         tagged = ", ".join(sorted(meta.symbols)) or "market-wide"
-        form = f" {meta.form} items {', '.join(meta.items)}" if meta.form else ""
-        reading.append((item.id, f"[{tagged}]{form} {hours}h ago: {item.title}"))
+        # a name outside the screen universe can never be on the movers screen: say so, so its
+        # absence there is not read as "not traded yet"
+        unscreened = sorted(meta.symbols - inputs.screened) if inputs.screened is not None else []
+        tagged += f"] [not screened: {', '.join(unscreened)}" if unscreened else ""
+        form = f" {meta.form}" if meta.form else ""
+        form += f" items {', '.join(meta.items)}" if meta.form and meta.items else ""
+        # public-domain items carry their cleaned summary (an SEC item: company + filing text);
+        # a broker-feed item stays title only here, as before
+        summary = str(getattr(item, "summary", "") or "") if item.id.startswith("P:") else ""
+        body = f"{item.title} | {summary[:READING_SUMMARY_MAX]}" if summary else item.title
+        reading.append((item.id, f"[{tagged}]{form} {hours}h ago: {body}"))
     screen = [(str(r["id"]), f"move {_num(r.get('move_sigma'))} sigma ({_num(r.get('move_pct'))}%), "
                f"volume x{_num(r.get('vol_ratio'))}, sector {r.get('sector') or 'n/a'}")
               for r in inputs.screen_rows if str(r["id"]) in catalysts]

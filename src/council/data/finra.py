@@ -4,7 +4,9 @@ Rules:
 - Source: FINRA's public Query API, dataset `otcMarket/consolidatedShortInterest` (the bi-monthly
   consolidated short interest for exchange-listed and OTC equities; no credential for public
   datasets). One POST per slot for at most MAX_SYMBOLS exact symbols (a `domainFilters` IN filter on
-  `symbolCode`, settlement dates within LOOKBACK_DAYS), connect 5 s / read 10 s, at most one retry
+  `symbolCode`, settlement dates within LOOKBACK_DAYS, NO `sortFields`: the API refuses a sort
+  unless the partition key `settlementDate` has an EQUAL filter, HTTP 400, found 2026-09-28; the
+  latest settlement is picked in `parse_rows`), connect 5 s / read 10 s, at most one retry
   on a transport error or a 5xx, a 429 fails at once. The endpoint shape is unverified until the
   opt-in canary runs (`COUNCIL_LIVE_CANARY=1`); a parse failure is `unknown`, never a guess.
 - Output per symbol: the latest settlement's short position and FINRA's average daily volume and
@@ -94,13 +96,12 @@ def parse_rows(payload: Any, *, asof: date) -> dict[str, ShortInterest]:
 def request_body(symbols: Sequence[str], asof: date) -> dict[str, Any]:
     start = asof - timedelta(days=LOOKBACK_DAYS)
     return {
-        "limit": 4 * len(symbols),
+        "limit": 6 * len(symbols),          # <= 4 settlements per symbol in LOOKBACK_DAYS, unsorted
         "fields": ["symbolCode", "settlementDate", "currentShortPositionQuantity",
                    "averageDailyVolumeQuantity", "daysToCoverQuantity"],
         "domainFilters": [{"fieldName": "symbolCode", "values": list(symbols)}],
         "dateRangeFilters": [{"fieldName": "settlementDate", "startDate": start.isoformat(),
                               "endDate": asof.isoformat()}],
-        "sortFields": ["-settlementDate"],
     }
 
 

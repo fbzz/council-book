@@ -144,7 +144,9 @@ def build_event(rec: Mapping[str, Any], slot: datetime) -> PastEvent | None:
     card = FactCard(line_id=line, side=str(rec["side"]), slot=slot.isoformat(), ok=True, fields=fields,
                     catalyst_items=[{"id": cid, "form": "8-K", "items": list(items), "titles": list(titles)}])
     meta = CatalystMeta(id=cid, available_at=datetime.combine(filed_day, AVAILABLE_UTC, tzinfo=UTC),
-                        symbols=frozenset({line}), title=f"8-K: {titles[0]}", form="8-K", items=items)
+                        symbols=frozenset({line}), title=f"8-K: {titles[0]}", form="8-K", items=items,
+                        # optional filing-text summary, so a canary reads like a real SEC catalyst
+                        summary=str(rec["summary"])[:1200] if isinstance(rec.get("summary"), str) else "")
     return PastEvent(ticker=str(rec["ticker"]), side=str(rec["side"]), catalysts=(meta,),
                      claim=str(rec["claim"]), card=card)
 

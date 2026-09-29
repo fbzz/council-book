@@ -110,6 +110,9 @@ def hold_reference_stub() -> dict[str, Any]:
     }
 
 
+SKEPTIC_MIN_TIMEOUT_S = 75.0
+
+
 def make_skeptic_gateway(policy: Policy, settings: Settings, *, stub: bool) -> Any:
     """The Skeptic's own gateway on `policy/swing.yaml` `llm.skeptic_model` (Q-S9: another model
     family); the fixture Skeptic when stubbed. None without a swing policy."""
@@ -123,11 +126,13 @@ def make_skeptic_gateway(policy: Policy, settings: Settings, *, stub: bool) -> A
     from council.llm.gateway import OllamaGateway
 
     c = policy.council
+    # The Skeptic's model reasons in its reply whatever `think` says (GLM, 2026-09-28: ~3000 tokens
+    # in ~30 s before any JSON), so each step of its ladder is at least SKEPTIC_MIN_TIMEOUT_S.
     return OllamaGateway(settings.ollama_host, str(sp.llm.skeptic_model),
                          calls_per_min=int(c["limiter"]["calls_per_min"]),
                          concurrency=int(c["limiter"]["concurrency"]),
-                         timeouts=tuple(float(t) for t in c["timeouts_s"]),
-                         num_ctx=int(c["num_ctx"]))
+                         timeouts=tuple(max(float(t), SKEPTIC_MIN_TIMEOUT_S) for t in c["timeouts_s"]),
+                         num_ctx=int(c["num_ctx"]), structured=True)
 
 
 def swing_sources(policy: Policy, settings: Settings, *, kind: Literal["real", "fixture"], broker: Any | None,

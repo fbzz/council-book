@@ -137,7 +137,7 @@ def test_a_later_sessions_bar_never_shifts_the_screen_day():
 
 
 def test_screen_fits_a_month_of_two_slots(tmp_path):
-    """SW-7b: a ~600-name universe (+ the sector ETFs), 23 sessions x 2 swing slots, the screen
+    """SW-7b: a ~600-name universe (+ the sector and market-context ETFs), 23 sessions x 2 swing slots, the screen
     rebuilt at BOTH slots (worse than the cached once-per-session): never out of budget. The request
     counts once per multi-symbol call and the month counts distinct symbols."""
     from datetime import timedelta
@@ -147,7 +147,8 @@ def test_screen_fits_a_month_of_two_slots(tmp_path):
     fake = panel.FakeAlpaca({})
     month = [d for d in panel.sessions(date(2026, 10, 30), 23)]
     assert len(month) == 23
-    per_screen = -(-(len(names) + len(set(sc.SECTOR_ETF.values()))) // sc.SYMBOLS_PER_REQUEST)
+    etfs = len(set(sc.SECTOR_ETF.values()) | set(sc.CONTEXT_ETFS))       # sector + market-context ETFs
+    per_screen = -(-(len(names) + etfs) // sc.SYMBOLS_PER_REQUEST)
     total = 0
     for day in month:
         for hour in (1, 2):                          # after D's close, two builds (21:00 / 22:00 NY)
@@ -163,4 +164,4 @@ def test_screen_fits_a_month_of_two_slots(tmp_path):
     assert total == 23 * 2 * per_screen <= 23 * sc.LIMITS.requests_per_day
     budget = RequestBudget(sc.PROVIDER, tmp_path / f"{sc.PROVIDER}_budget.json", sc.LIMITS)
     for seen in budget.state["months"].values():      # a calendar month's distinct symbols
-        assert len(seen) == 600 + len(set(sc.SECTOR_ETF.values())) <= sc.LIMITS.symbols_per_month
+        assert len(seen) == 600 + etfs <= sc.LIMITS.symbols_per_month

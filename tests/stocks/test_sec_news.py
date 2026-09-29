@@ -193,7 +193,9 @@ def test_sec_calls_go_through_the_limiter_with_the_user_agent(sleeve_policy):
     assert all(r.headers["User-Agent"] == UA for r in fake.seen)
     assert clock.sleeps and clock.t == pytest.approx((len(fake.seen) - 1) / 7)      # <= 7 a second, no burst
     atom = [r for r in fake.seen if r.url.path == "/cgi-bin/browse-edgar"]
-    assert all(r.extensions["timeout"]["connect"] == 5.0 and r.extensions["timeout"]["read"] == 10.0 for r in atom)
+    assert all(r.extensions["timeout"]["connect"] == 5.0 and r.extensions["timeout"]["read"] == 30.0 for r in atom)
+    subs = [r for r in fake.seen if r.url.host == "data.sec.gov"]
+    assert subs and all(r.extensions["timeout"]["read"] == 10.0 for r in subs)       # the news timeout
 
 
 def test_the_submissions_backfill_is_cached_for_the_day(sleeve_policy):
@@ -313,3 +315,27 @@ def test_a_bad_cik_is_refused_before_any_request(sleeve_policy):
             with pytest.raises(ValueError):
                 sec_news.fetch_submissions(client, bad)
     assert fake.seen == []
+
+
+def test_current_page_gets_a_longer_read_timeout_one_retry_and_is_reused_per_client():
+    """2026-09-28: EDGAR's 6-K `getcurrent` page took 11 s to 60 s to its first byte, past the 10 s
+    news read timeout on both attempts (`news_source_error:sec:timeout`). The page gets
+    CURRENT_TIMEOUT, a timed-out attempt is retried, and one client reuses a fetched page (the
+    swing screen and the swing inputs both read it in one cycle)."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, content=ATOM_6K)
+
+    clock = FakeClock()
+    with SecClient(UA, transport=httpx.MockTransport(handler), clock=clock, sleep=clock.sleep) as client:
+        first = sec_news.fetch_current(client, "6-K")
+        again = sec_news.fetch_current(client, "6-K")
+    assert first and again == first and len(seen) == 2
+    assert seen[0].extensions["timeout"]["read"] == sec_news.CURRENT_TIMEOUT.read >= 30.0
+    with SecClient(UA, transport=httpx.MockTransport(handler), clock=clock, sleep=clock.sleep) as other:
+        sec_news.fetch_current(other, "6-K")
+    assert len(seen) == 3                                        # another client fetches its own page

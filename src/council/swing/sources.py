@@ -4,7 +4,10 @@
   injected; `cycle` re-exports it).
 - `real_swing_sources`: production wiring from the SW-1 modules. News intake = the cycle's news
   fetch (gov + broker feed, fetched once per slot) + SEC's market-wide 8-K / 6-K
-  (`swing.intake.sec_market_wide`); the after-close movers screen (`swing.screen`, Alpaca SIP daily
+  (`swing.intake.sec_market_wide`), with public-domain filing text for a bounded number of filings
+  per slot (`swing.sec_text`, cached; movers and screen-universe filers ranked first); the MARKET
+  CONTEXT rows (the screen's ETF moves, the policy calendar's FOMC dates; the cycle adds its loaded
+  CPI / NFP / PCE events); the after-close movers screen (`swing.screen`, Alpaca SIP daily
   bars, built by `prepare` once per session after 20:30 New York and cached); the code gate =
   `swing.resolve.resolve_ideas` (one bounded eligibility read with the READ broker) + the fact card
   (`swing.facts.build_card`: Alpaca bars, SEC submissions/companyfacts, FINRA short interest);
@@ -43,6 +46,8 @@ CARD_HISTORY_DAYS = 600                 # calendar days of daily bars for a fact
 UNIVERSE_TTL = timedelta(days=7)
 UNIVERSE_SECTOR_BUDGET_S = 120.0
 RECENT_DAYS = 7                         # ~5 sessions of recent ideas / rejections for the Scout
+SEC_TEXT_MAX_FETCHES = 15               # uncached filings read per slot (<= 3 EDGAR requests each)
+EVENT_HORIZON = timedelta(days=45)      # scheduled macro events shown as market context
 
 
 @dataclass
@@ -103,6 +108,9 @@ def real_swing_sources(
     fetch_bars: Callable[..., Mapping[str, Any]] | None = None,
     fetch_short_interest: Callable[..., Mapping[str, Any]] | None = None,
     wall: Callable[[], datetime] | None = None,
+    sec_text_get: Callable[[str], str] | None = None,
+    sec_fetch: Callable[[Any, str], list[Any]] | None = None,
+    fetch_last: Callable[..., Mapping[str, float]] | None = None,
 ) -> SwingSources:
     """The production `SwingSources` (module rules). Every network callable is injectable (tests
     pass stubs); the defaults are the SW-1 clients. Builds no client and sends no request here:
@@ -123,7 +131,8 @@ def real_swing_sources(
 
     state = _RealState(policy=policy, state_dir=state_dir, broker=broker, news=news, ledger=ledger,
                        keys=keys, allow_unverified=allow_unverified, sec_factory=sec_factory,
-                       fetch_bars=fetch_bars, fetch_si=fetch_short_interest, wall=wall)
+                       fetch_bars=fetch_bars, fetch_si=fetch_short_interest, wall=wall,
+                       sec_text_get=sec_text_get, sec_fetch=sec_fetch, fetch_last=fetch_last)
     src = SwingSources(inputs=state.inputs, gate=state.gate, skeptic_gateway=skeptic_gateway,
                        reference_price=state.reference_price, candidate_extras=state.candidate_extras,
                        daily_bars=state.daily_bars if keys is not None else None,
@@ -149,7 +158,11 @@ class _RealState:
     fetch_bars: Any
     fetch_si: Any
     wall: Any
+    sec_text_get: Any = None
+    sec_fetch: Any = None
+    fetch_last: Any = None
     flags: list[str] = field(default_factory=list)
+    _now: datetime | None = None                     # the cycle's clock (set by `prepare`)
     _sec: Any = None
     _tickers: Any = None
     _slot: datetime | None = None
@@ -198,6 +211,7 @@ class _RealState:
     def prepare(self, slot: datetime, now: datetime) -> list[str]:
         from council.swing import screen as S
 
+        self._now = now
         if self.keys is None:
             return []
         session = S.screen_session(now)
@@ -239,6 +253,8 @@ class _RealState:
                 self.flags.append(_err(f"membership_{index}", exc))
         try:
             tickers += list(U.load_ai_list())
+        except FileNotFoundError:               # the AI list is optional (policy may not carry one)
+            self.flags.append("swing_ai_list_absent")
         except Exception as exc:  # noqa: BLE001
             self.flags.append(_err("ai_list", exc))
         by_line = U.ticker_map(self.company_tickers())
@@ -258,16 +274,67 @@ class _RealState:
         return build_universe(tickers, sectors)
 
     # ---- inputs
-    def sec_items(self, now: datetime, *, slot: datetime) -> tuple[list[Any], list[Any]]:
+    def sec_items(self, now: datetime, *, slot: datetime, enrich: bool = False,
+                  prefer: Mapping[str, int] | None = None) -> tuple[list[Any], list[Any]]:
+        from council.stocks import sec_news
         from council.swing.intake import cik_tickers, sec_market_wide
 
         try:
-            result, filings = sec_market_wide(self.sec(), cik_tickers(self.company_tickers()), now=now, slot=slot)
+            enricher = self.enricher() if enrich else None
+            result, filings = sec_market_wide(self.sec(), cik_tickers(self.company_tickers()), now=now, slot=slot,
+                                              fetch=self.sec_fetch or sec_news.fetch_current,
+                                              enrich=enricher, prefer=prefer)
         except Exception as exc:  # noqa: BLE001
             self.flags.append(_err("sec", exc))
             return [], []
         self.flags += list(result.flags)
         return list(result.items), filings
+
+    def enricher(self) -> Any:
+        """The slot's bounded, cached SEC filing-text reader (`swing.sec_text`)."""
+        from council.swing import sec_text
+
+        get = self.sec_text_get or sec_text.client_get(self.sec())
+        return sec_text.Enricher(get, cache_root=self.state_dir / "cache", max_fetches=SEC_TEXT_MAX_FETCHES,
+                                 flags=self.flags)
+
+    def screened(self) -> frozenset[str] | None:
+        """The cached screen universe as line ids (None when it is not cached or unreadable)."""
+        try:
+            from council.stocks.universe import try_normalise_id
+
+            cached = json.loads((self.state_dir / "swing" / "universe.json").read_text())
+            ids = frozenset(lid for lid in (try_normalise_id(str(t)) for t in cached.get("tickers") or []) if lid)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+        return ids or None
+
+    def preferred(self, scr: Any, universe: frozenset[str] | None = None) -> dict[str, int]:
+        """{line id: tier} for the SEC ranking: movers-screen names 0, the cached screen universe 1."""
+        out: dict[str, int] = dict.fromkeys(universe if universe is not None else (self.screened() or ()), 1)
+        if scr is not None:
+            for rows in (scr.lists or {}).values():
+                for row in rows:
+                    out[str(row.get("line_id"))] = 0
+        return out
+
+    def context_rows(self, scr: Any, session: date | None, slot: datetime) -> list[Any]:
+        """Market context: D's broad and sector ETF moves (from the screen, else one Alpaca pass)
+        and the policy calendar's FOMC decisions ahead. Facts only (percent, sigma, dates)."""
+        from council.data.calendar import fomc_events
+        from council.swing import screen as S
+        from council.swing.council import ContextRow
+
+        rows: list[Any] = []
+        if session is not None:
+            ctx = dict(scr.context) if scr is not None and scr.context else {}
+            if not ctx and self.keys is not None:
+                etfs = sorted(set(S.SECTOR_ETF.values()) | set(S.CONTEXT_ETFS))
+                got = self.bars(etfs, session - timedelta(days=S.LOOKBACK_DAYS), slot)
+                ctx = S.context_of({e: m for e in etfs if (m := S.day_metric(e, got.get(e), session)) is not None})
+            rows += [ContextRow(i, t) for i, t in S.market_context(ctx, session.isoformat())]
+        rows += event_rows(fomc_events(self.policy, slot, slot + EVENT_HORIZON), slot)
+        return rows
 
     def inputs(self, slot: datetime, open_trades: Sequence[Any], code_exits: Sequence[str]) -> Any:
         from council.swing import screen as S
@@ -293,24 +360,36 @@ class _RealState:
                         gov.append(item)
             except Exception as exc:  # noqa: BLE001
                 self.flags.append(_err("news", exc))
-        wide, self._filings = self.sec_items(max(self.wall(), slot), slot=slot)
-        reading = reading_list(sec + wide, feed, gov, slot=slot)
-        self._reading = {i.id: i for i in reading}
         rows: list[dict[str, Any]] = []
         available: datetime | None = None
-        session = S.screen_session(slot)
+        session = S.screen_session(slot)            # the latest session whose screen is ready at the slot
         scr = S.load(self.state_dir, session.isoformat()) if session is not None else None
-        if scr is not None:
-            built = datetime.fromisoformat(scr.built_at)
-            if built < slot:
-                rows = [row for k in S.LISTS for row in scr.lists.get(k, [])]
-                available = built
+        if scr is not None and scr.ready and scr.session == session.isoformat():
+            # D's facts are available from D 20:30 New York (<= the slot by `screen_session`),
+            # whenever the cache file was written (a screen built in this very cycle counts)
+            rows = [row for k in S.LISTS for row in scr.lists.get(k, [])]
+            available = S.ready_at(session)
         else:
+            scr = None
             self.flags.append("swing_screen_missing")
+        # admission and ages are relative to the slot (a replay never reads past it); the feed's
+        # future-skew check is against the real fetch time, i.e. the later of the wall and the cycle clock
+        now = max(self.wall(), self._now or slot, slot)
+        universe = self.screened()
+        prefer = self.preferred(scr, universe)
+        wide, self._filings = self.sec_items(now, slot=slot, enrich=True, prefer=prefer)
+        reading = reading_list(sec + wide, feed, gov, slot=slot)
+        self._reading = {i.id: i for i in reading}
+        try:
+            context = self.context_rows(scr, session, slot)
+        except Exception as exc:  # noqa: BLE001 - no context is not a reason to stop
+            self.flags.append(_err("context", exc))
+            context = []
         recent, rejected = self.recent(slot)
         return SwingInputs(slot=slot, reading=reading, screen_rows=rows, screen_available_at=available,
                            open_trades=tuple(open_trades), recent_ideas=recent, recent_rejections=rejected,
-                           code_exits=tuple(code_exits))
+                           code_exits=tuple(code_exits), context=context,
+                           screened=universe)
 
     def recent(self, slot: datetime) -> tuple[list[str], dict[str, datetime]]:
         """Code-written lines of the last RECENT_DAYS of paper-tracked ideas, and each ticker's
@@ -419,6 +498,7 @@ class _RealState:
         start = (slot - timedelta(days=CARD_HISTORY_DAYS)).date()
         bars = self.bars([r.line_id for _, r in passing] + etfs + ["SPY", "QQQ"], start, slot)
         si = self.short_interest([r.line_id for _, r in passing], slot)
+        live = self.delayed_prices([r.line_id for _, r in passing], slot) if self.broker is None else {}
         out: dict[str, Any] = {}
         for i, r in passing:
             lid = r.line_id
@@ -442,7 +522,8 @@ class _RealState:
                                   earnings_next=est[0].date() if est else None, earnings_confirmed=False,
                                   last_release_at=last_release, short_interest=si.get(lid),
                                   shares_outstanding=_shares_outstanding(facts.get(lid)),
-                                  fundamentals=sec_fundamentals(r.cik, facts.get(lid), slot=slot))
+                                  fundamentals=sec_fundamentals(r.cik, facts.get(lid), slot=slot),
+                                  live_price=live.get(lid))
             except Exception as exc:  # noqa: BLE001 - a card failure drops the idea
                 self.flags.append(_err("card", exc))
                 continue
@@ -450,6 +531,27 @@ class _RealState:
                 card.flags.append(UNVERIFIED_LABEL)
             out[i.ref] = card
             self._extras[lid] = {"sector": sector, "listing_days": listing, "last_report_at": last_release}
+        return out
+
+    def delayed_prices(self, line_ids: Sequence[str], slot: datetime) -> dict[str, float]:
+        """A paper run has no broker rate: the intraday reaction since the news (a filing of the
+        slot's own session has no completed bar after it, so the close-based move is 0 by
+        construction) uses Alpaca's delayed 15-minute SIP bars instead (`alpaca.fetch_delayed_last`,
+        never past the slot). Any failure leaves the live layer absent (flagged)."""
+        from council.data import alpaca
+
+        if self.keys is None or not line_ids:
+            return {}
+        fetch = self.fetch_last or alpaca.fetch_delayed_last
+        ids = list(dict.fromkeys(line_ids))[:alpaca.SYMBOLS_PER_REQUEST]
+        try:
+            got = fetch([_dot(x) for x in ids], keys=self.keys, now=slot)
+        except Exception as exc:  # noqa: BLE001 - no intraday price: the live layer stays absent
+            self.flags.append(_err("alpaca_intraday", exc))
+            return {}
+        out = {str(k).replace(".", "_").replace("-", "_"): float(v) for k, v in (got or {}).items()}
+        if out and "swing_reaction_delayed_alpaca" not in self.flags:
+            self.flags.append("swing_reaction_delayed_alpaca")
         return out
 
     def short_interest(self, line_ids: Sequence[str], slot: datetime) -> dict[str, Any]:
@@ -513,6 +615,22 @@ class _RealState:
             if r is not None:
                 out[name] = r
         return out if "SPX" in out else None
+
+
+def event_rows(events: Sequence[Any], slot: datetime, horizon: timedelta = EVENT_HORIZON) -> list[Any]:
+    """Scheduled macro events (`EventItem`: FOMC from the policy calendar, CPI / NFP / PCE when the
+    cycle loaded them) after the slot within `horizon`, as context rows (id `E:<kind>@<day>`)."""
+    from council.swing.council import ContextRow
+
+    names = {"fomc": "FOMC decision", "cpi": "CPI release", "nfp": "payrolls (NFP) release", "pce": "PCE release"}
+    out: dict[str, Any] = {}
+    for ev in sorted(events, key=lambda e: e.at_utc):
+        if ev.kind not in names or ev.symbols or not slot <= ev.at_utc <= slot + horizon:
+            continue
+        days = (ev.at_utc.date() - slot.date()).days
+        out.setdefault(ev.id, ContextRow(ev.id, f"{names[ev.kind]} scheduled {ev.at_utc:%Y-%m-%d %H:%M} UTC "
+                                                f"({days} days after the slot)"))
+    return list(out.values())
 
 
 def _day_return(bars: Any, day: date) -> float | None:

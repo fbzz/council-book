@@ -324,7 +324,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
 
     # ---- swing book (swing-book.md §1.1): never raises; paper-only while SWING_BOOK_LIVE is False
     swing = await run_swing(ctx, rec, snapshot=snapshot, kill_state=kill_state, nav=nav, slot=slot, now=now,
-                            econ=econ, sink=sink)
+                            econ=econ, sink=sink, events=pack.events)
     rec.flags += [f for f in swing.flags if f not in rec.flags]
     # the swing roles' calls join the cycle's calls (the site counts them; `_calls` publishes role,
     # status, latency and tokens only); the canary's stay private (ledger only, H11)
@@ -1458,7 +1458,8 @@ def _swing_short(cycle_id: str) -> str:
 
 
 async def run_swing(ctx: CycleContext, rec: CycleRecord, *, snapshot: Any, kill_state: str, nav: Any,
-                    slot: datetime, now: datetime, econ: Any = None, sink: Any = None) -> SwingRun:
+                    slot: datetime, now: datetime, econ: Any = None, sink: Any = None,
+                    events: Any = ()) -> SwingRun:
     """The swing stage of one cycle (swing-book.md rev 2, §1.1). Never raises (`CanaryLeak`, a code
     bug, excepted): a failure becomes `swing_error:<stage>:<type>` and the core cycle continues.
 
@@ -1499,7 +1500,7 @@ async def run_swing(ctx: CycleContext, rec: CycleRecord, *, snapshot: Any, kill_
         out.exits = swing_code_exits(ctx.ledger, ctx.policy, slot)
         stage = "council"
         await _swing_council(ctx, rec, out, snapshot=snapshot, kill_state=kill_state, nav=nav, slot=slot,
-                             now=now, econ=econ, sink=sink)
+                             now=now, econ=econ, sink=sink, events=events)
         if out.live:
             stage = "lines"
             _swing_lines_and_orders(ctx, out, snapshot=snapshot)
@@ -1872,7 +1873,7 @@ def expire_stale_ideas(ledger: Any, now: datetime) -> list[str]:
 
 
 async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, snapshot: Any, kill_state: str,
-                         nav: Any, slot: datetime, now: datetime, econ: Any, sink: Any) -> None:
+                         nav: Any, slot: datetime, now: datetime, econ: Any, sink: Any, events: Any = ()) -> None:
     from council.broker.instruments import InstrumentMap
     from council.swing import rules as R
     from council.swing.council import run_swing_stage
@@ -1887,6 +1888,15 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
         return
     views = _open_trade_views(ledger, snapshot, slot, out.exits)
     inputs = src.inputs(slot, views, list(out.exits))
+    if events:                                   # the cycle's scheduled macro events (CPI / NFP / PCE, FOMC)
+        from dataclasses import replace as _replace
+
+        from council.swing.sources import event_rows
+
+        have = {c.id for c in inputs.context}
+        extra = [r for r in event_rows(list(events), slot) if r.id not in have]
+        if extra:
+            inputs = _replace(inputs, context=[*inputs.context, *extra])
     result = await run_swing_stage(ctx.gateway, ctx.registry, policy, inputs, gate=src.gate,
                                    skeptic_gw=src.skeptic_gateway, sink=sink)
     out.flags += [f for f in result.flags if f not in out.flags]

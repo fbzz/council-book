@@ -1,5 +1,41 @@
 # Changelog
 
+## Swing paper-run fixes: Skeptic JSON, fact parity, unscreened names, FINRA, SEC feed — policy change (prompts) (2026-09-28)
+- **Policy change (prompts)**: `council-skeptic/v2` and `council-scout/v2` (manifest regenerated, so
+  the manifest SHA changes). Skeptic: a HOW TO REPLY block (the JSON object only, starting with `{`;
+  working notes go in a new optional, private `analysis` field of at most 1500 characters, listed
+  first; limits are generous, do not count characters). Scout: a reading-list name marked
+  `[not screened: TICKER]` is outside the movers-screen universe, so its absence from the screen is
+  not evidence that the news is unpriced.
+- Skeptic on `glm-5.3-flash:cloud` (all three calls of the second paper run were `parse_fail`): the
+  model ignores `format: "json"`, a JSON-schema `format` and `think: false` and reasons in the reply
+  (~3000 tokens) before any JSON. Its gateway now sends the Skeptic schema as `format` (Ollama
+  structured output, refs inlined; `OllamaGateway(structured=True)`), the Skeptic's output budget is
+  3000 tokens (was 1200), each step of its timeout ladder is at least 75 s, an unclosed `<think>`
+  block is stripped before decoding, and every correction turn now says "Reply with the JSON object
+  only". Replayed on rebuilt inputs (6 calls): the correction turn parsed on both runs that used it;
+  a first turn can still use up its whole budget on reasoning, so the correction turn is what
+  recovers it. `SkepticVerdict.analysis` is never read by code and never published.
+- Fact parity: each cited public (P:) catalyst in the Skeptic, bull, bear and PM inputs now carries the
+  same cleaned filing summary the Scout read (EX-99 headline and excerpt), not just the form header
+  (`CatalystMeta.summary`); a canary record may carry a `summary` so a canary still looks like a real
+  item.
+- Unscreened names: the swing inputs carry the cached screen universe (`SwingInputs.screened`). A
+  paper run with no broker rate takes the fact card's intraday reaction from Alpaca's delayed
+  15-minute SIP bars, never past the slot (`alpaca.fetch_delayed_last`; flag
+  `swing_reaction_delayed_alpaca`): a filing from the slot's own session has no completed bar after
+  it, so the close-based move is 0 by construction and the Skeptic read "0 sigma" as "priced at zero".
+- FINRA short interest: the Query API refuses `sortFields` unless `settlementDate` has an EQUAL filter
+  (HTTP 400, so every slot got `swing_source_error:finra:DataError`). The request has no sort now;
+  the latest settlement is picked in code.
+- SEC current feeds: EDGAR's 6-K `getcurrent` page took 3 s to 60 s to its first byte, past the 10 s
+  news read timeout (`news_source_error:sec:timeout`). The page gets a 30 s read timeout, and one SEC
+  client reuses a fetched page for 10 minutes (the swing screen and the swing inputs read it in the
+  same cycle).
+- Tests: `tests/council/test_gateway.py`, `tests/swing/test_scout_inputs.py`,
+  `tests/swing/test_sw5c_sources.py`, `tests/swing/test_finra.py`, `tests/stocks/test_sec_news.py`,
+  `tests/council/test_prompts.py`.
+
 ## swing book SW-0: decision record, invariants, `policy/swing.yaml` — policy change (2026-09-27)
 - **Policy change**: new `policy/swing.yaml` (v1), loaded as `Policy.swing`, strictly validated
   (unknown keys, strings or booleans for numbers, and inconsistent pairs are refused) and part of the

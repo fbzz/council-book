@@ -115,6 +115,9 @@ class SkepticReason(Strict):
 
 
 class SkepticVerdict(Strict):
+    # optional private working notes, FIRST so a model that must reason does it inside the object
+    # (bounded) rather than in prose around it; never read by code, never published
+    analysis: _text(1500) | None = None
     idea_ref: IdeaRef
     catalyst_supports_claim: bool                    # Q0 (H4b); false -> catalyst_misread
     claim_supports_side: bool                        # Q0; false -> catalyst_misread

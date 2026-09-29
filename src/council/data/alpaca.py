@@ -264,3 +264,66 @@ def fetch_daily(
         else:
             raise DataError(f"{what}: more than {MAX_PAGES} pages")
     return {symbols[s]: parse_bars(items, now=asof.to_pydatetime()) for s, items in rows.items()}
+
+
+INTRADAY_TIMEFRAME = "15Min"
+
+
+def fetch_delayed_last(
+    tickers: Sequence[str],
+    *,
+    keys: AlpacaKeys,
+    now: datetime,
+    client: httpx.Client | None = None,
+    retries: int = DEFAULT_RETRIES,
+) -> dict[str, float]:
+    """{ticker: the close of its latest 15-minute SIP bar of `now`'s UTC day that ENDED at or before
+    `now - END_LAG`} (the free plan's delay; a replay never reads past its as-of time). A ticker
+    with no such bar is absent. One request (plus continuation pages) for up to
+    SYMBOLS_PER_REQUEST tickers, same adjustment as the daily bars. This is a DELAYED price, used
+    by a paper run that has no broker rate for the fact card's intraday reaction."""
+    if keys is None:
+        raise DataError("alpaca: no API keys configured")
+    symbols: dict[str, str] = {}
+    for ticker in tickers:
+        symbols.setdefault(alpaca_symbol(ticker), ticker)
+    if not symbols:
+        return {}
+    if len(symbols) > SYMBOLS_PER_REQUEST:
+        raise ValueError(f"at most {SYMBOLS_PER_REQUEST} symbols per alpaca request")
+    asof = to_utc(now)
+    cut = asof - pd.Timedelta(END_LAG)
+    params: dict[str, Any] = {
+        "symbols": ",".join(sorted(symbols)), "timeframe": INTRADAY_TIMEFRAME,
+        "start": _rfc3339(asof.normalize()), "end": _rfc3339(cut), "adjustment": ADJUSTMENT, "feed": FEED,
+        "limit": PAGE_LIMIT, "sort": "asc",
+    }
+    what = f"alpaca intraday bars ({len(symbols)} symbols)"
+    last: dict[str, tuple[pd.Timestamp, float]] = {}
+    token: str | None = None
+    with client_scope(client) as http:
+        for _ in range(MAX_PAGES):
+            page = dict(params)
+            if token:
+                page["page_token"] = token
+            response = get_with_retry(http, BARS_URL, what=what, params=page, headers=keys.headers(),
+                                      retries=retries, fail_fast_429=True)
+            found, token = parse_page(json_body(response, what=what))
+            for symbol, items in found.items():
+                for raw in items:
+                    if not isinstance(raw, Mapping) or raw.get("t") is None:
+                        continue
+                    close = _num(raw, "c")
+                    start = pd.Timestamp(raw["t"])
+                    if close is None or close <= 0 or start.tzinfo is None:
+                        continue
+                    if start + pd.Timedelta(minutes=15) > cut:          # not complete at the cut
+                        continue
+                    held = last.get(symbol)
+                    if held is None or start > held[0]:
+                        last[symbol] = (start, close)
+            if not token:
+                break
+        else:
+            raise DataError(f"{what}: more than {MAX_PAGES} pages")
+    return {symbols[s]: px for s, (_, px) in last.items() if s in symbols}

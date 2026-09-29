@@ -32,16 +32,16 @@
     "sha256": "3732a765b3c2586616786c12f7e20b9604e8d49e6afaa9c9fb4e0410894701e7"
   },
   "scout": {
-    "id": "council-scout/v1",
-    "sha256": "7cc86d8d047986abc834016f96cbc28e32c1c402ab39992698ea42f552643a14"
+    "id": "council-scout/v2",
+    "sha256": "092ab39d4c852c709f104b12c0aaacfd5fa7a6fcc67124ad5dab5f0dfcc6cb0f"
   },
   "single_agent": {
     "id": "council-single_agent/v1",
     "sha256": "a66e23487d2151162636366bad2050e6f2a0d80018ca32781a852ff4dff225c9"
   },
   "skeptic": {
-    "id": "council-skeptic/v1",
-    "sha256": "317e4f220887ad76a01a1a446f8112e3668e55abcfb8d84a91ee8642321ec157"
+    "id": "council-skeptic/v2",
+    "sha256": "071cae99e9e8e943beb4bfe05f41bd102f736d0086a533c73d9053b29131b36f"
   },
   "swing_bear": {
     "id": "council-swing_bear/v1",
