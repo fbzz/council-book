@@ -174,6 +174,10 @@ The swing pipeline on real data and real models, with no broker token and nothin
 1. **Keychain items** (no-echo prompt): `council-op keys store alpaca-key-id`, `alpaca-secret`
    (or `alpaca` for both), `sec-user-agent` and `tiingo`. A missing one fails closed: the cycle
    shows `swing_source_unavailable:<source>` and the swing council does not run.
+   Data keys (never broker tokens) may instead sit in the git-ignored `.env` at the repository root
+   (or `COUNCIL_ENV_FILE`), mode 0600: `COUNCIL_ALPACA_KEY_ID`, `COUNCIL_ALPACA_SECRET`,
+   `COUNCIL_TIINGO_TOKEN`, `COUNCIL_SEC_USER_AGENT`, `COUNCIL_FRED_TOKEN`. The `.env` wins over the
+   Keychain; a group- or world-readable file is ignored; stub mode never reads it.
 2. **Funded NAV, once** (private, costs only; without it every entry drops `cost_unavailable`):
    ```sh
    mkdir -p "<state>/paper/account" && umask 077

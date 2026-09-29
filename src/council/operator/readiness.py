@@ -606,6 +606,12 @@ class Probes:
         return out
 
     def security_has(self, service: str) -> bool:
+        """The item is in the Keychain, or (data credentials only) in the git-ignored `.env`."""
+        from council.data import credentials
+
+        if service in credentials.DOTENV_NAMES and credentials._dotenv_values(credentials.env_file()).get(
+                credentials.DOTENV_NAMES[service]):
+            return True
         return self._memo(f"sec:{service}", lambda: self.run(
             [SECURITY, "find-generic-password", "-s", service]).returncode == 0)
 

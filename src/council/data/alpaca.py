@@ -104,11 +104,11 @@ def _keychain(service: str, runner: Runner) -> str | None:
 
 
 def _secret(service: str, env: str, runner: Runner) -> str | None:
-    """Stub mode (tests): the env override only, never `security`. Any other mode: the Keychain
-    only; the env override is ignored."""
+    """Stub mode (tests): the env override only, never `security`. Any other mode: the git-ignored
+    `.env` file (`credentials.dotenv_secret`), then the Keychain; the env override is ignored."""
     if os.environ.get("COUNCIL_MODE", "stub") == "stub":
         return os.environ.get(env, "").strip() or None
-    return _keychain(service, runner)
+    return credentials.dotenv_secret(service) or _keychain(service, runner)
 
 
 def load_keys(*, runner: Runner = subprocess.run) -> AlpacaKeys | None:

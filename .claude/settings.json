@@ -90,7 +90,9 @@
       "Write(~/Library/Application Support/council-book/readiness/**)",
       "Write(~/Library/Application Support/council-book/account/**)",
       "Write(~/Library/Application Support/council-book/salts/**)",
-      "Write(~/Library/Application Support/council-book/releases/**)"
+      "Write(~/Library/Application Support/council-book/releases/**)",
+      "Read(./.env)",
+      "Bash(cat .env:*)"
     ]
   }
 }

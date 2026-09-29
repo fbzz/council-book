@@ -42,6 +42,7 @@ def _isolated_state(tmp_path, monkeypatch, _core_policy):
     monkeypatch.setenv("COUNCIL_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("COUNCIL_ROLE", "dev")
     monkeypatch.setenv("COUNCIL_MODE", "stub")
+    monkeypatch.setenv("COUNCIL_ENV_FILE", str(tmp_path / "no.env"))   # never the developer's .env
     for name in ("ETORO_USER_KEY", "ETORO_API_KEY", "CLAUDECODE"):
         monkeypatch.delenv(name, raising=False)
     policy_module.default_policy.cache_clear()

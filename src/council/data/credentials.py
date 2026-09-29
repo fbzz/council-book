@@ -4,7 +4,9 @@ Rules:
 - Only the data services below are readable here. Broker tokens (`council-book.etoro.*`) are never
   read by the data layer; asking for one is a programming error.
 - An explicit env-var override wins (tests and CI).
-- Stub mode never touches the Keychain.
+- Then the git-ignored `.env` file (the repository root, or `COUNCIL_ENV_FILE`), outside stub mode
+  only, owner-readable only (mode 0600), data credentials only: `dotenv_secret`.
+- Stub mode never touches the Keychain or the `.env` file.
 - Values are never logged, printed or placed in exception messages.
 - The SEC user agent (EDGAR's fair-access rule: a name and a contact address on every request) is a
   required credential: `sec_user_agent()` raises when it is missing or malformed, and its errors
@@ -14,7 +16,9 @@ Rules:
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
+from pathlib import Path
 
 TIINGO = "council-book.tiingo"
 FRED = "council-book.fred"
@@ -24,6 +28,64 @@ ALLOWED_SERVICES = frozenset({TIINGO, FRED, SEC_USER_AGENT})
 KEYCHAIN_ACCOUNT = "council"
 KEYCHAIN_TIMEOUT_S = 10
 _SEC_UA_MIN, _SEC_UA_MAX = 8, 200
+
+
+# The `.env` names of the data credentials (user decision 2026-09-29: data keys may live in a
+# git-ignored .env). Broker tokens are never read from it: a line naming eToro is ignored.
+DOTENV_NAMES = {
+    TIINGO: "COUNCIL_TIINGO_TOKEN",
+    FRED: "COUNCIL_FRED_TOKEN",
+    SEC_USER_AGENT: SEC_USER_AGENT_ENV,
+    "council-book.alpaca-key-id": "COUNCIL_ALPACA_KEY_ID",
+    "council-book.alpaca-secret": "COUNCIL_ALPACA_SECRET",
+}
+ENV_FILE_ENV = "COUNCIL_ENV_FILE"
+_REPO_ENV = Path(__file__).resolve().parents[3] / ".env"
+
+
+def env_file() -> Path:
+    """The `.env` path: `COUNCIL_ENV_FILE`, else the repository root's `.env`."""
+    override = os.environ.get(ENV_FILE_ENV, "").strip()
+    return Path(override).expanduser() if override else _REPO_ENV
+
+
+def _dotenv_values(path: Path) -> dict[str, str]:
+    """The data-credential lines of `path` (KEY=VALUE, optional quotes/`export`); empty when the file
+    is missing, unreadable or readable by group/others. Values are never logged."""
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    if not stat.S_ISREG(st.st_mode) or st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        return {}
+    wanted = set(DOTENV_NAMES.values())
+    out: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return {}
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        name, value = text.split("=", 1)
+        name = name.removeprefix("export ").strip()
+        if name not in wanted or "ETORO" in name.upper():
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if value:
+            out[name] = value
+    return out
+
+
+def dotenv_secret(service: str) -> str | None:
+    """`service` from the `.env` file, or None (stub mode, no file, unsafe mode, no line)."""
+    name = DOTENV_NAMES.get(service)
+    if name is None or os.environ.get("COUNCIL_MODE", "stub") == "stub":
+        return None
+    return _dotenv_values(env_file()).get(name)
 
 
 class MissingCredential(RuntimeError):
@@ -38,8 +100,8 @@ def keychain_command(service: str) -> list[str]:
 def secret(service: str, env_override: str | None = None) -> str | None:
     """Return the credential for `service`, or None when it is not configured.
 
-    Order: the `env_override` variable (if named and non-empty), then the Keychain — except in
-    stub mode (COUNCIL_MODE unset or "stub"), which never runs `security`."""
+    Order: the `env_override` variable (if named and non-empty), then the `.env` file, then the
+    Keychain — except in stub mode (COUNCIL_MODE unset or "stub"), which reads neither."""
     if service not in ALLOWED_SERVICES:
         raise ValueError(f"service {service!r} is not a data-provider credential")
     if env_override:
@@ -48,6 +110,9 @@ def secret(service: str, env_override: str | None = None) -> str | None:
             return value
     if os.environ.get("COUNCIL_MODE", "stub") == "stub":
         return None
+    from_file = dotenv_secret(service)
+    if from_file:
+        return from_file
     try:
         proc = subprocess.run(
             keychain_command(service),
