@@ -1885,6 +1885,30 @@ def expire_stale_ideas(ledger: Any, now: datetime) -> list[str]:
     return out
 
 
+class SwingWideRefused(ValueError):
+    """A wide swing override on a context that is not a paper run (a code bug, never a slot)."""
+
+
+PAPER_STATE_DIR = "paper"
+
+
+def swing_wide_of(ctx: CycleContext, *, live: bool = False) -> int | None:
+    """The paper-only wide override (`council cycle --paper --ideas N`), or None. Raises
+    `SwingWideRefused` when it is set on anything but a paper run: live mode, a live swing book, a
+    broker, a publisher (rehearsal / dry-run preview) or a state dir other than `<state>/paper`."""
+    from council.swing.council import check_wide
+
+    wide = check_wide(getattr(ctx, "swing_wide", None))
+    if wide is None:
+        return None
+    paper = (not live and getattr(ctx.settings, "mode", "live") != "live" and ctx.publisher is None
+             and getattr(ctx.sources, "broker", None) is None and ctx.notifier is None
+             and ctx.state_dir.name == PAPER_STATE_DIR)
+    if not paper:
+        raise SwingWideRefused("swing_wide is for `council cycle --paper` runs only")
+    return wide
+
+
 async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, snapshot: Any, kill_state: str,
                          nav: Any, slot: datetime, now: datetime, econ: Any, sink: Any, events: Any = ()) -> None:
     from council.broker.instruments import InstrumentMap
@@ -1899,6 +1923,9 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
     if getattr(src, "unavailable", ()):             # fail closed: a missing credential, no council
         out.flags += [f for f in src.unavailable if f not in out.flags]
         return
+    wide = swing_wide_of(ctx, live=out.live)
+    if wide is not None:
+        out.flags.append(f"swing_wide:{wide}")
     views = _open_trade_views(ledger, snapshot, slot, out.exits)
     inputs = src.inputs(slot, views, list(out.exits))
     if events:                                   # the cycle's scheduled macro events (CPI / NFP / PCE, FOMC)
@@ -1911,7 +1938,7 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
         if extra:
             inputs = _replace(inputs, context=[*inputs.context, *extra])
     result = await run_swing_stage(ctx.gateway, ctx.registry, policy, inputs, gate=src.gate,
-                                   skeptic_gw=src.skeptic_gateway, sink=sink)
+                                   skeptic_gw=src.skeptic_gateway, sink=sink, wide=wide)
     out.flags += [f for f in result.flags if f not in out.flags]
     out.calls = list(result.calls)
     for ref in result.exits():                   # PM exits of open trades (code exits already in)

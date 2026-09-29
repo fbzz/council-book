@@ -184,6 +184,8 @@ def cycle(
     force: bool = typer.Option(False, help="Re-run a slot that already has a record."),
     at: str = typer.Option(None, "--at", help="--paper only: run as if the clock read this UTC time "
                                              "(e.g. 2026-09-28T18:40Z), to replay a missed swing slot."),
+    ideas: int = typer.Option(None, "--ideas", help="--paper only: a WIDE swing slot of N ideas (1..20), "
+                                                   "each reviewed by the Skeptic; budget and deadline scale."),
 ) -> None:
     """Run the council cycle for the current 4-hour slot."""
     from council.cycle import run_cycle
@@ -191,10 +193,12 @@ def cycle(
 
     settings = Settings.from_env()
     sandbox = _dress_context()
+    if ideas is not None and (not paper or sandbox is not None):
+        _refuse("--ideas is for --paper runs only (a live, rehearsal or dry-run slot keeps the policy caps)")
     if sandbox is not None:
         ctx = sandbox                         # [REHEARSAL] shell: stub model, fake broker, sandbox remote
     elif paper:
-        ctx = paper_context(settings, stub_llm=stub_llm)
+        ctx = paper_context(settings, stub_llm=stub_llm, ideas=ideas)
     elif rehearsal:
         from council import paths
         from council.context import build_context
@@ -236,18 +240,24 @@ def paper_clock(at: str):
     return lambda: ts
 
 
-def paper_context(settings, *, stub_llm: bool = False):
+def paper_context(settings, *, stub_llm: bool = False, ideas: int | None = None):
     """`council cycle --paper` (SW-5c): a dry-run context that never loads a broker token, in its
     own state dir (never the live ledger, so a live slot is never consumed), publishing nothing.
     Real data needs `COUNCIL_MODE=dry_run` (stub mode never reads the Keychain); refused in stub
-    mode unless the model is stubbed too."""
+    mode unless the model is stubbed too. `ideas` (`--ideas N`) makes the swing slot WIDE (the only
+    place `CycleContext.swing_wide` is set)."""
     from council import paths
     from council.context import build_context
+    from council.swing.council import WIDE_MAX_IDEAS
 
+    if ideas is not None and not 1 <= ideas <= WIDE_MAX_IDEAS:
+        _refuse(f"--ideas must be 1..{WIDE_MAX_IDEAS}")
     if settings.mode == "stub" and not stub_llm:
         _refuse("--paper needs COUNCIL_MODE=dry_run (stub mode reads no Keychain item, so no data)")
-    return build_context(mode="dry_run", stub_llm=stub_llm, publish="none", no_broker=True,
-                         state_dir=paths.state_dir() / PAPER_STATE)
+    ctx = build_context(mode="dry_run", stub_llm=stub_llm, publish="none", no_broker=True,
+                        state_dir=paths.state_dir() / PAPER_STATE)
+    ctx.swing_wide = ideas
+    return ctx
 
 
 @app.command()

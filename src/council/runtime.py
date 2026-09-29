@@ -100,6 +100,9 @@ class CycleContext:
     code_commit: str = ""
     policy_commit: str = ""                   # the commit a live policy snapshot was taken from
     policy_blockers: tuple[PolicyBlocker, ...] = ()   # e.g. sleeve_policy_untagged (satellite)
+    # `council cycle --paper --ideas N` only (cli.paper_context): a WIDE paper swing slot of N ideas.
+    # The cycle refuses it on any context that is not a paper run (cycle.swing_wide_of).
+    swing_wide: int | None = None
 
 
 # --------------------------------------------------------------------------------------- lock

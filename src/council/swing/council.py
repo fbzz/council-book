@@ -17,6 +17,11 @@
 - SKEPTIC MODEL: its own gateway on `llm.skeptic_model` (another family). Unavailable (no gateway,
   `verify_model` false, or a transport failure on the call) -> the Scout's gateway, flag
   `skeptic_same_model` (published). The same family on both gateways also sets the flag.
+- WIDE (paper only): `wide=N` (1..WIDE_MAX_IDEAS, set from `CycleContext.swing_wide`, which only
+  `council cycle --paper --ideas N` sets) lifts the Scout cap to N ideas, the Skeptic to N calls,
+  the call budget to 1 + 2N + 2 + PM replicates (N Skeptic calls, N fallback retries, the debate,
+  the PM) and the deadline to 360 + 45N s (`swing_limits`). The policy and the live invariants
+  are untouched; the cycle refuses a wide override on any context that is not a paper run.
 - BLIND SKEPTIC: `skeptic_input` builds its text only from the ticker, the side, the cited
   catalyst items with the code-attached form/items/titles, the one-line factual claim, the fact card,
   the market context and the open book. The thesis, why_not_priced_in, the setup and the Scout's
@@ -31,10 +36,11 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from dataclasses import replace as _replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, create_model
 
 from council.deliberation.common import call_role, pm_seeds, role_cfg
 from council.deliberation.segments import Item, Licence, Segmented
@@ -47,6 +53,7 @@ from council.swing.canary import PastEvent, build_canary, grade_canary
 from council.swing.facts import FactCard
 from council.swing.models import (
     AggregatedSwingAction,
+    ScoutIdea,
     ScoutOutput,
     SkepticVerdict,
     SwingBearCase,
@@ -77,6 +84,8 @@ NUM_PREDICT = {"scout": 2400, "skeptic": 3000, "swing_bull": 1600, "swing_bear":
 SEEDS = {"scout": 42, "skeptic": 42, "swing_bull": 42, "swing_bear": 43}
 SKEPTIC_FIRST_IDEAS = 2            # the drop order keeps the Skeptic for the first 2 ideas
 MAX_SCOUT_IDEAS = 5
+WIDE_MAX_IDEAS = 20                 # `council cycle --paper --ideas N`: 1 <= N <= 20 (paper only)
+WIDE_DEADLINE_PER_IDEA_S = 45
 READING_SUMMARY_MAX = 1200          # characters of a public item's summary shown to the Scout
 LIVE_FIELDS = ("move_since_news_live_pct", "move_since_news_live_sigma", "move_today_live_pct",
                "move_today_live_sigma")
@@ -198,9 +207,54 @@ def _pct(x: float) -> str:
     return f"{x * 100:g}"
 
 
-def swing_prompt_context(policy: Policy) -> dict[str, Any]:
+@dataclass(frozen=True)
+class SwingLimits:
+    max_ideas: int
+    max_skeptic: int
+    max_calls: int
+    deadline_s: float
+    wide: int | None = None
+
+
+def check_wide(wide: int | None) -> int | None:
+    """The paper-only wide override: None, or an int in 1..WIDE_MAX_IDEAS (else ValueError)."""
+    if wide is None:
+        return None
+    if isinstance(wide, bool) or not isinstance(wide, int) or not 1 <= wide <= WIDE_MAX_IDEAS:
+        raise ValueError(f"swing_wide must be an int in 1..{WIDE_MAX_IDEAS}, got {wide!r}")
+    return wide
+
+
+def swing_limits(policy: Policy, wide: int | None = None) -> SwingLimits:
+    """The slot's caps: the policy's (5 ideas, `max_skeptic_calls`, `max_calls_per_slot`,
+    `deadline_s`) unless a paper run asked for `wide` ideas."""
+    llm = _swing(policy).llm
+    n = check_wide(wide)
+    if n is None:
+        return SwingLimits(MAX_SCOUT_IDEAS, llm.max_skeptic_calls, llm.max_calls_per_slot, float(llm.deadline_s))
+    return SwingLimits(n, n, 1 + 2 * n + 2 + llm.pm_replicates,
+                       float(llm.deadline_s + WIDE_DEADLINE_PER_IDEA_S * n), wide=n)
+
+
+_WIDE_SCHEMAS: dict[int, type[ScoutOutput]] = {}
+
+
+def scout_schema(limits: SwingLimits) -> type[ScoutOutput]:
+    """`ScoutOutput` (at most 5 ideas) unless wide: then a subclass that admits up to N ideas."""
+    if limits.wide is None:
+        return ScoutOutput
+    n = limits.wide
+    if n not in _WIDE_SCHEMAS:
+        _WIDE_SCHEMAS[n] = create_model(  # type: ignore[call-overload]
+            f"ScoutOutputWide{n}", __base__=ScoutOutput,
+            ideas=(list[ScoutIdea], Field(default_factory=list, max_length=n)))
+    return _WIDE_SCHEMAS[n]
+
+
+def swing_prompt_context(policy: Policy, limits: SwingLimits | None = None) -> dict[str, Any]:
     """Numbers the swing prompts EXPLAIN (code enforces each independently). No fee number (D17)."""
     sw = _swing(policy)
+    limits = limits or swing_limits(policy)
     return {
         "valid_minutes": sw.entry_guard.valid_minutes,
         "target_nav_pct": _pct(sw.size.target_nav),
@@ -208,7 +262,7 @@ def swing_prompt_context(policy: Policy) -> dict[str, Any]:
         "max_short": sw.capacity.max_short,
         "max_new_7d": sw.capacity.max_new_7d,
         "min_net_rr": f"{sw.targets.min_net_rr:g}",
-        "max_ideas": MAX_SCOUT_IDEAS,
+        "max_ideas": limits.max_ideas,
         "chase_sigma": f"{sw.chase.max_move_since_news_sigma:g}",
         "prior_wait_sigma": f"{sw.chase.prior_wait_sigma:g}",
         "stop_min": f"{sw.stops.min_pct:g}",
@@ -462,10 +516,11 @@ def full_input(ideas: Sequence[SwingIdea], trades: Sequence[OpenTrade], *, catal
 # ---------------------------------------------------------------------------------------- run
 class _Runner:
     def __init__(self, gw: Gateway, reg: PromptRegistry, policy: Policy, result: SwingCouncilResult,
-                 *, sink: InputSink | None, max_calls: int, stage: list[str]) -> None:
+                 *, sink: InputSink | None, limits: SwingLimits, stage: list[str]) -> None:
         self.gw, self.reg, self.policy, self.result = gw, reg, policy, result
-        self.sink, self.max_calls, self.stage = sink, max_calls, stage
-        self.ctx = swing_prompt_context(policy)
+        self.sink, self.max_calls, self.stage = sink, limits.max_calls, stage
+        self.limits = limits
+        self.ctx = swing_prompt_context(policy, limits)
 
     async def call(self, role: str, schema: type[BaseModel], sections: list[Segmented], *,
                    gw: Gateway | None = None, seed: int | None = None, replicate: int = 0) -> LLMResult:
@@ -474,6 +529,8 @@ class _Runner:
         placeholder = len(self.result.calls)
         self.result.calls.append(None)  # type: ignore[arg-type]   # reserve before awaiting
         npred = int(role_cfg(self.policy, role).get("max_num_predict", NUM_PREDICT[role]))
+        if role == "scout" and self.limits.max_ideas > MAX_SCOUT_IDEAS:   # wide: room for N ideas
+            npred = npred * self.limits.max_ideas // MAX_SCOUT_IDEAS
         res = await call_role(gw or self.gw, self.reg, role=role, ctx=self.ctx, schema=schema,
                               seed=SEEDS.get(role, 42) if seed is None else seed, num_predict=npred,
                               replicate=replicate, sections=sections, sink=self.sink)
@@ -498,20 +555,22 @@ async def run_swing_council(
     sink: InputSink | None = None,
     result: SwingCouncilResult | None = None,
     stage: list[str] | None = None,
+    wide: int | None = None,
 ) -> SwingCouncilResult:
     """One swing slot's council. May raise; `run_swing_stage` is the never-raising wrapper."""
     sw = _swing(policy)
+    lim = swing_limits(policy, wide)
     result = result if result is not None else SwingCouncilResult(slot=inputs.slot.isoformat())
     stage = stage if stage is not None else ["setup"]
     result.code_exits = list(dict.fromkeys(inputs.code_exits))
-    run = _Runner(gw, reg, policy, result, sink=sink, max_calls=sw.llm.max_calls_per_slot, stage=stage)
+    run = _Runner(gw, reg, policy, result, sink=sink, limits=lim, stage=stage)
     catalysts = catalyst_index(inputs.reading, inputs.screen_rows, slot=inputs.slot,
                                screen_available_at=inputs.screen_available_at)
 
     # ② Scout
     stage[0] = "scout"
     sections, _ = scout_input(inputs, catalysts)
-    res = await run.call("scout", ScoutOutput, sections)
+    res = await run.call("scout", scout_schema(lim), sections)
     scout = res.parsed if isinstance(res.parsed, ScoutOutput) else None
     if scout is None:
         result.flags.append(f"scout_failed:{res.call.status}")
@@ -542,13 +601,13 @@ async def run_swing_council(
             _outcome(result, i, "gate", "chased")
             continue
         survivors.append(i)
-    for i in survivors[sw.llm.max_skeptic_calls:]:
+    for i in survivors[lim.max_skeptic:]:
         _outcome(result, i, "gate", "not_best_3")
-    survivors = survivors[:sw.llm.max_skeptic_calls]
+    survivors = survivors[:lim.max_skeptic]
 
     review = [t for t in inputs.open_trades if t.under_review and t.ref not in result.code_exits]
-    plan = plan_budget(len(survivors), len(review), max_calls=sw.llm.max_calls_per_slot,
-                       max_skeptic=sw.llm.max_skeptic_calls, pm_replicates=sw.llm.pm_replicates)
+    plan = plan_budget(len(survivors), len(review), max_calls=lim.max_calls,
+                       max_skeptic=lim.max_skeptic, pm_replicates=sw.llm.pm_replicates)
     result.flags.extend(plan.flags)
     for i in survivors[plan.skeptic_ideas:]:
         _outcome(result, i, "gate", "budget_no_skeptic")
@@ -644,15 +703,16 @@ async def run_swing_stage(
     skeptic_gw: Gateway | None = None,
     sink: InputSink | None = None,
     deadline_s: float | None = None,
+    wide: int | None = None,
 ) -> SwingCouncilResult:
     """The swing stage as the cycle calls it: bounded by the wall-clock deadline, never raises
     (except `CanaryLeak`, a code bug). On a timeout or an error no entry survives; code exits do."""
     result = SwingCouncilResult(slot=inputs.slot.isoformat(), code_exits=list(dict.fromkeys(inputs.code_exits)))
     stage = ["setup"]
-    timeout = float(deadline_s if deadline_s is not None else _swing(policy).llm.deadline_s)
+    timeout = float(deadline_s if deadline_s is not None else swing_limits(policy, wide).deadline_s)
     try:
         await asyncio.wait_for(run_swing_council(gw, reg, policy, inputs, gate=gate, skeptic_gw=skeptic_gw,
-                                                 sink=sink, result=result, stage=stage), timeout)
+                                                 sink=sink, result=result, stage=stage, wide=wide), timeout)
     except TimeoutError:
         _abort(result, "swing_error:timeout")
     except CanaryLeak:
@@ -698,7 +758,8 @@ async def run_canary(
     sw = _swing(policy)
     idea = build_canary(event)
     result = SwingCouncilResult(slot=slot.isoformat())
-    run = _Runner(gw, reg, policy, result, sink=sink, max_calls=1, stage=["canary"])
+    run = _Runner(gw, reg, policy, result, sink=sink, limits=_replace(swing_limits(policy), max_calls=1),
+                  stage=["canary"])
     sk_gw, flags = await choose_skeptic(gw, skeptic_gw, policy)
     inputs = SwingInputs(slot=slot, context=context, open_trades=open_trades)
     secs, admissible = skeptic_input(idea, catalysts={c.id: c for c in event.catalysts}, inputs=inputs)
