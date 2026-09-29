@@ -92,7 +92,8 @@ def test_the_licence_defaults_from_the_source():
     assert broker().source == "etoro_feed" and broker().licence == "broker_licensed"
     assert public().licence == "public_domain"
     assert public(source="treasury").licence == "federal_work_unverified"
-    assert set(DEFAULT_LICENCE) == PUBLIC_NEWS_SOURCES | {"etoro_feed"}
+    assert set(DEFAULT_LICENCE) == PUBLIC_NEWS_SOURCES | {"etoro_feed", "rss"}
+    assert public(source="rss").licence == "third_party_licensed"
 
 
 def test_an_explicit_licence_is_kept_even_when_it_does_not_match():

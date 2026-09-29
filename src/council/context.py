@@ -41,6 +41,11 @@ A broker that is connected while the switch is off or LC1 is unattested sets
 earnings then keep the SEC estimate). `N:` ids are keyed by the private install key. A source that
 fails becomes `news_source_error:<source>:<type>` (a 401/403 from the feed is `auth`) and never costs
 another source's items: the news role still runs on what arrived.
+Third-party RSS headlines (`council.data.rss_news`, `policy/council.yaml` `news.rss`, user decision
+2026-09-29): the market feeds run alongside the public sources in the same once-per-slot fetch
+(`public_and_rss`), so the core news role (quota `rss`) and the swing Scout share them; their text
+is licensed like the broker feed (`N:` ids, never published, purged within 7 days); a failing feed
+is `news_source_error:rss:<feed>`.
 """
 
 from __future__ import annotations
@@ -148,9 +153,12 @@ def swing_sources(policy: Policy, settings: Settings, *, kind: Literal["real", "
 
     if kind == "fixture":
         return ss.fixture_swing_sources(skeptic_gateway=make_skeptic_gateway(policy, settings, stub=True))
+    from council.data import rss_news
+
     return ss.real_swing_sources(policy, state_dir=state_dir, broker=broker, news=news, ledger=ledger,
                                  skeptic_gateway=make_skeptic_gateway(policy, settings, stub=False),
-                                 allow_unverified=not live and broker is None)
+                                 allow_unverified=not live and broker is None,
+                                 rss_tickers=rss_news.ticker_fetcher(policy, state_dir))
 
 
 def make_gateway(policy: Policy, settings: Settings, *, stub: bool) -> Any:
@@ -222,19 +230,56 @@ def feed_error_type(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def public_and_rss(policy: Policy, now: datetime, state_dir: Path | None = None, *, slot: datetime | None = None,
+                   **kw: Any) -> Any:
+    """The default news fetch: the public-domain sources (`gov_news.gather_public_news`) and, run
+    alongside them, the policy's RSS market feeds (`council.data.rss_news`, `news.rss`; licensed
+    third-party text, `N:` ids). An RSS failure is a flag, never a lost public item."""
+    import threading
+
+    from council.data import gov_news, rss_news
+    from council.data.gov_news import NewsFetch
+
+    cut = slot if slot is not None else now
+    try:
+        fetch_rss = rss_news.market_fetcher(policy, state_dir)
+    except Exception as exc:  # a malformed rss section costs the RSS items only
+        fetch_rss = None
+        rss_flags = [f"news_source_error:rss:{type(exc).__name__}"]
+    else:
+        rss_flags = []
+    held: list[Any] = []
+
+    def run_rss() -> None:
+        try:
+            held.append(fetch_rss(now, cut))  # type: ignore[misc]
+        except Exception as exc:  # noqa: BLE001
+            held.append(NewsFetch(flags=[f"news_source_error:rss:{type(exc).__name__}"]))
+
+    thread = None
+    if fetch_rss is not None:
+        thread = threading.Thread(target=run_rss, name="news-rss", daemon=True)
+        thread.start()
+    public = gov_news.gather_public_news(policy, now, state_dir, slot=slot, **kw)
+    if thread is not None:
+        thread.join(timeout=rss_news.MARKET_BUDGET_S + 5.0)
+        if not held:
+            rss_flags.append("news_source_error:rss:budget")
+    return rss_news.merge_fetches(public, *held, NewsFetch(flags=rss_flags))
+
+
 def news_sources(policy: Policy, *, broker: Any | None = None, state_dir: Path | None = None,
                  public: Any | None = None, clock: Any | None = None) -> tuple[Any, Any | None]:
     """(news(slot) -> NewsFetch, broker_feed(slot) -> list[NewsItem] or None when the feed is off).
 
     `public(policy, now, state_dir, slot=slot)` fetches the public-domain items (default
-    `gov_news.gather_public_news`; tests pass a fake); `clock()` is the fetch time for its skew rule
+    `public_and_rss`: `gov_news.gather_public_news` plus the RSS market feeds; tests pass a fake); `clock()` is the fetch time for its skew rule
     (default: the wall clock). The broker feed is fetched at most once per slot and shared with the
     earnings override. `news` never raises: a failing source becomes a flag."""
-    from council.data import gov_news
     from council.data.feeds import parse_news_feed, sort_news
     from council.data.gov_news import NewsFetch, SourceReport
 
-    fetch_public = public or gov_news.gather_public_news
+    fetch_public = public or public_and_rss
     wall = clock or (lambda: datetime.now(UTC))
     broker_feed = None
     if broker_feed_enabled(policy, broker, state_dir):

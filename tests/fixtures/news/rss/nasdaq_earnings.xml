@@ -1,0 +1,76 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Recorded 2026-09-29 with a browser user agent, trimmed to 6 items. Element structure, namespaces, dates, guids' shape and ticker tags are as served; every headline, description, link slug and byline is REPLACED by synthetic text: third-party feed text is licensed and is never committed (docs/data-rights.md). -->
+<rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:nasdaq="http://nasdaq.com/reference/feeds/1.0" version="2.0" xml:base="https://www.nasdaq.com/feed/rssoutbound">
+ <channel>
+  <title>Earnings Feed</title>
+  <link>https://www.nasdaq.com/feed/rssoutbound</link>
+  <description>This feed is responsible for generating the rss feed related to the topic Earnings</description>
+  <language>en</language>
+  <item>
+   <title>Sample nasdaq_earnings headline 1: company update</title>
+   <link>https://www.nasdaq.com/sample/nasdaq_earnings-1</link>
+   <description>Synthetic description 1 standing in for the recorded text.</description>
+   <pubDate>Tue, 29 Sep 2026 20:00:01 +0000</pubDate>
+   <guid isPermaLink="true">https://www.nasdaq.com/sample/nasdaq_earnings-1?time=1790710000</guid>
+   <dc:creator>Sample Author</dc:creator>
+   <category>Earnings</category>
+   <nasdaq:tickers>JBL,JBL,FDS</nasdaq:tickers>
+  </item>
+  <item>
+   <title>Sample nasdaq_earnings headline 2: company update</title>
+   <link>https://www.nasdaq.com/sample/nasdaq_earnings-2</link>
+   <description>Synthetic description 2 standing in for the recorded text.</description>
+   <pubDate>Tue, 29 Sep 2026 18:00:01 +0000</pubDate>
+   <guid isPermaLink="true">https://www.nasdaq.com/sample/nasdaq_earnings-2?time=1790710000</guid>
+   <dc:creator>Sample Author</dc:creator>
+   <category>Earnings</category>
+   <nasdaq:tickers />
+  </item>
+  <item>
+   <title>Sample nasdaq_earnings headline 3: company update</title>
+   <link>https://www.nasdaq.com/sample/nasdaq_earnings-3</link>
+   <description>Synthetic description 3 standing in for the recorded text.</description>
+   <pubDate>Mon, 28 Sep 2026 20:00:01 +0000</pubDate>
+   <guid isPermaLink="true">https://www.nasdaq.com/sample/nasdaq_earnings-3?time=1790710000</guid>
+   <dc:creator>Sample Author</dc:creator>
+   <category>Earnings</category>
+   <nasdaq:tickers>CCL,CCL,KMX,UE</nasdaq:tickers>
+  </item>
+  <item>
+   <title>Sample nasdaq_earnings headline 4: company update</title>
+   <link>https://www.nasdaq.com/sample/nasdaq_earnings-4</link>
+   <description>Synthetic description 4 standing in for the recorded text.</description>
+   <pubDate>Mon, 28 Sep 2026 18:00:01 +0000</pubDate>
+   <guid isPermaLink="true">https://www.nasdaq.com/sample/nasdaq_earnings-4?time=1790710000</guid>
+   <dc:creator>Sample Author</dc:creator>
+   <category>Earnings</category>
+   <nasdaq:tickers>JEF,JEF,MT</nasdaq:tickers>
+  </item>
+  <item>
+   <title>Sample nasdaq_earnings headline 5: company update (NASDAQ: SBUX)</title>
+   <link>https://www.nasdaq.com/sample/nasdaq_earnings-5</link>
+   <description>Synthetic description 5 standing in for the recorded text (NASDAQ: SBUX).</description>
+   <pubDate>Mon, 28 Sep 2026 17:50:00 +0000</pubDate>
+   <guid isPermaLink="true">https://www.nasdaq.com/sample/nasdaq_earnings-5?time=1790710000</guid>
+   <dc:creator>Sample Author</dc:creator>
+   <category>Earnings,Stocks,Management</category>
+   <nasdaq:tickers>SBUX,SBUX</nasdaq:tickers>
+   <nasdaq:partnerlink url="https://www.marketbeat.com/">Stock Market News from MarketBeat</nasdaq:partnerlink>
+   <nasdaq:partnerlink url="https://www.earlybirdpublishing.com/">MarketBeat's Pre-Market Newsletter</nasdaq:partnerlink>
+   <nasdaq:partnerlink url="https://www.dividendstocks.com/">Dividend Investing Tools</nasdaq:partnerlink>
+  </item>
+  <item>
+   <title>Sample nasdaq_earnings headline 6: company update</title>
+   <link>https://www.nasdaq.com/sample/nasdaq_earnings-6</link>
+   <description>Synthetic description 6 standing in for the recorded text.</description>
+   <pubDate>Mon, 28 Sep 2026 14:20:00 +0000</pubDate>
+   <guid isPermaLink="true">https://www.nasdaq.com/sample/nasdaq_earnings-6?time=1790710000</guid>
+   <dc:creator>Sample Author</dc:creator>
+   <category>Earnings,Technology,Stocks</category>
+   <nasdaq:tickers>STX,STX,ADBE,CHYM</nasdaq:tickers>
+   <nasdaq:partnerlink url="https://www.marketbeat.com/">Stock Market News from MarketBeat</nasdaq:partnerlink>
+   <nasdaq:partnerlink url="https://www.earlybirdpublishing.com/">MarketBeat's Pre-Market Newsletter</nasdaq:partnerlink>
+   <nasdaq:partnerlink url="https://www.dividendstocks.com/">Dividend Investing Tools</nasdaq:partnerlink>
+  </item>
+  </channel>
+</rss>

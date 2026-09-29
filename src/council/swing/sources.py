@@ -3,7 +3,9 @@
 - `SwingSources` is what `cycle.run_swing` reads from `ctx.sources.swing` (the SW-1 data layer,
   injected; `cycle` re-exports it).
 - `real_swing_sources`: production wiring from the SW-1 modules. News intake = the cycle's news
-  fetch (gov + broker feed, fetched once per slot) + SEC's market-wide 8-K / 6-K
+  fetch (gov + broker feed + the RSS market feeds, fetched once per slot and shared with the core)
+  + the per-ticker RSS feed for the open trades, carried ideas and movers-screen names (`rss_tickers`,
+  once per slot; ranked by `council.data.rss_news.rank_rss`; licensed text) + SEC's market-wide 8-K / 6-K
   (`swing.intake.sec_market_wide`), with public-domain filing text for a bounded number of filings
   per slot (`swing.sec_text`, cached; movers and screen-universe filers ranked first); the MARKET
   CONTEXT rows (the screen's ETF moves, the policy calendar's FOMC dates; the cycle adds its loaded
@@ -111,6 +113,7 @@ def real_swing_sources(
     sec_text_get: Callable[[str], str] | None = None,
     sec_fetch: Callable[[Any, str], list[Any]] | None = None,
     fetch_last: Callable[..., Mapping[str, float]] | None = None,
+    rss_tickers: Callable[[Sequence[str], datetime, datetime], Any] | None = None,
 ) -> SwingSources:
     """The production `SwingSources` (module rules). Every network callable is injectable (tests
     pass stubs); the defaults are the SW-1 clients. Builds no client and sends no request here:
@@ -132,7 +135,8 @@ def real_swing_sources(
     state = _RealState(policy=policy, state_dir=state_dir, broker=broker, news=news, ledger=ledger,
                        keys=keys, allow_unverified=allow_unverified, sec_factory=sec_factory,
                        fetch_bars=fetch_bars, fetch_si=fetch_short_interest, wall=wall,
-                       sec_text_get=sec_text_get, sec_fetch=sec_fetch, fetch_last=fetch_last)
+                       sec_text_get=sec_text_get, sec_fetch=sec_fetch, fetch_last=fetch_last,
+                       rss_tickers=rss_tickers)
     src = SwingSources(inputs=state.inputs, gate=state.gate, skeptic_gateway=skeptic_gateway,
                        reference_price=state.reference_price, candidate_extras=state.candidate_extras,
                        daily_bars=state.daily_bars if keys is not None else None,
@@ -161,6 +165,7 @@ class _RealState:
     sec_text_get: Any = None
     sec_fetch: Any = None
     fetch_last: Any = None
+    rss_tickers: Any = None                          # (line ids, now, slot) -> NewsFetch: the per-ticker RSS feeds
     flags: list[str] = field(default_factory=list)
     _now: datetime | None = None                     # the cycle's clock (set by `prepare`)
     _sec: Any = None
@@ -170,6 +175,7 @@ class _RealState:
     _extras: dict[str, dict[str, Any]] = field(default_factory=dict)
     _closes: dict[str, float] = field(default_factory=dict)
     _filings: list[Any] = field(default_factory=list)
+    _rss_memo: dict[Any, Any] = field(default_factory=dict)
 
     # ---- clients
     def sec(self) -> Any:
@@ -348,11 +354,14 @@ class _RealState:
         gov: list[Any] = []
         feed: list[Any] = []
         sec: list[Any] = []
+        rss: list[Any] = []
         if self.news is not None:
             try:
                 fetched = self.news(slot)
                 for item in getattr(fetched, "items", []) or []:
-                    if item.id.startswith("N:"):
+                    if getattr(item, "source", "") == "rss":
+                        rss.append(item)
+                    elif item.id.startswith("N:"):
                         feed.append(item)
                     elif getattr(item, "source", "") == "sec":
                         sec.append(item)
@@ -378,7 +387,8 @@ class _RealState:
         universe = self.screened()
         prefer = self.preferred(scr, universe)
         wide, self._filings = self.sec_items(now, slot=slot, enrich=True, prefer=prefer)
-        reading = reading_list(sec + wide, feed, gov, slot=slot)
+        rss = self.rss_items(rss, slot=slot, now=now, open_trades=open_trades, prefer=prefer)
+        reading = reading_list(sec + wide, feed, gov, slot=slot, rss=rss)
         self._reading = {i.id: i for i in reading}
         try:
             context = self.context_rows(scr, session, slot)
@@ -390,6 +400,49 @@ class _RealState:
                            open_trades=tuple(open_trades), recent_ideas=recent, recent_rejections=rejected,
                            code_exits=tuple(code_exits), context=context,
                            screened=universe)
+
+    def rss_priority(self, open_trades: Sequence[Any], prefer: Mapping[str, int]) -> list[str]:
+        """Line ids for the per-ticker RSS feed, in priority order: open swing trades, carried
+        (pending) ideas, then movers-screen names."""
+        from council.stocks.universe import try_normalise_id
+
+        names = [str(getattr(t, "ticker", "")) for t in open_trades]
+        if self.ledger is not None:
+            try:
+                names += [str(r["ticker"]) for r in self.ledger.swing_ideas(status="pending")]
+            except Exception as exc:  # noqa: BLE001
+                self.flags.append(_err("ledger", exc))
+        names += [lid for lid, tier in prefer.items() if tier == 0]
+        return list(dict.fromkeys(n for n in (try_normalise_id(x) for x in names) if n))
+
+    def rss_items(self, market: Sequence[Any], *, slot: datetime, now: datetime, open_trades: Sequence[Any],
+                  prefer: Mapping[str, int]) -> list[Any]:
+        """The Scout's RSS selection: the shared fetch's market feeds + the per-ticker feed (fetched
+        once per slot here), ranked and capped (`council.data.rss_news.rank_rss`)."""
+        from council.data import rss_news
+
+        try:
+            cfg = rss_news.rss_config(self.policy)
+        except ValueError as exc:
+            self.flags.append(_err("rss", exc))
+            return []
+        if cfg is None:
+            return []
+        names = self.rss_priority(open_trades, prefer)
+        items = list(market)
+        if self.rss_tickers is not None and names:
+            key = (slot, tuple(names[:cfg.yahoo_max_tickers]))
+            if key not in self._rss_memo:            # one request per ticker per slot
+                self._rss_memo.clear()
+                try:
+                    got = self.rss_tickers(list(key[1]), now, slot)
+                    self._rss_memo[key] = (list(got.items), list(got.flags))
+                except Exception as exc:  # noqa: BLE001 - a per-ticker failure costs those items only
+                    self._rss_memo[key] = ([], [f"news_source_error:rss:{type(exc).__name__}"])
+            got_items, got_flags = self._rss_memo[key]
+            items += got_items
+            self.flags += got_flags
+        return rss_news.rank_rss(items, cfg, slot=slot, priority=names)
 
     def recent(self, slot: datetime) -> tuple[list[str], dict[str, datetime]]:
         """Code-written lines of the last RECENT_DAYS of paper-tracked ideas, and each ticker's
@@ -660,6 +713,7 @@ def _shares_outstanding(companyfacts: Mapping[str, Any] | None) -> float | None:
 # ------------------------------------------------------------------------------------ offline
 FIXTURE_TICKER = "ACME"
 FIXTURE_NEWS_ID = "P:0a1b2c3d"
+FIXTURE_RSS_ID = "N:0f1e2d3c"
 FIXTURE_PRICE = 100.0
 
 
@@ -693,7 +747,12 @@ def fixture_swing_sources(*, skeptic_gateway: Any = None) -> SwingSources:
         item = NewsItem(id=FIXTURE_NEWS_ID, title="8-K: Results of Operations and Financial Condition",
                         symbols=[FIXTURE_TICKER], published_at=t, available_at=t, source="sec", form="8-K",
                         items=["2.02"])
-        return SwingInputs(slot=slot, reading=[item], open_trades=tuple(open_trades), code_exits=tuple(code_exits),
+        r = slot - timedelta(hours=3)            # a synthetic RSS headline (licensed path, N: id)
+        rss = NewsItem(id=FIXTURE_RSS_ID, title=f"Acme Corp. (NASDAQ: {FIXTURE_TICKER}) schedules an investor day",
+                       summary="Fixture press release standing in for a third-party RSS headline.",
+                       symbols=[FIXTURE_TICKER], published_at=r, available_at=r, source="rss",
+                       licence="third_party_licensed", feed="prnewswire_all")
+        return SwingInputs(slot=slot, reading=[item, rss], open_trades=tuple(open_trades), code_exits=tuple(code_exits),
                            context=[ContextRow("F:SPX:ret_5d", "S&P 500 5-day return 0.8%")],
                            core_summary="core book near its reference levels")
 

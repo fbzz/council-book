@@ -81,3 +81,22 @@ are in code (`council.data.gov_news.SOURCES`), and a test checks that this table
   only in the request header, never in a log, a flag or an error. Without it, the SEC and BLS sources
   are skipped and the others still run.
 - **Hosts.** A request, or a redirect, to any host outside the list above is refused.
+
+## Licensed third-party RSS headlines (not public domain)
+
+Since 2026-09-29 (user decision) the agents also read eleven third-party RSS feeds, listed in
+`policy/council.yaml` `news.rss` (`council.data.rss_news`). Their text is licensed, not public
+domain: the models read it, the public record never shows it.
+
+- **Fetch.** Each market feed once per slot, in the same fetch as the public sources (the core news
+  role and the swing Scout share it); the Yahoo per-ticker feed once per name for at most 30 names
+  (open swing trades, carried ideas, movers-screen names). One attempt per request, 15 s timeout, a
+  browser-like user agent, requests only to the listed hosts. A failed feed is
+  `news_source_error:rss:<feed>`; nothing else is lost.
+- **Parsing, time and cleaning** follow the rules above (no DOCTYPE or entities, strictly before the
+  slot, at most 48 h old, money and levels removed); descriptions are capped at 300 characters and
+  links are not kept.
+- **Tickers** come from the Yahoo request, "(NASDAQ: XYZ)" / "(NYSE:XYZ)" tags, cashtags, Nasdaq's
+  ticker element and Seeking Alpha's category; an untagged item is market-wide.
+- **Ids** are `N:` plus a keyed hash of the link (else the title), so one story in two feeds is one
+  item. Publicly an item is its id and feed label only; its private copies are purged after 7 days.

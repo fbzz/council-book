@@ -1,0 +1,59 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Recorded 2026-09-29 with a browser user agent, trimmed to 6 items. Element structure, namespaces, dates, guids' shape and ticker tags are as served; every headline, description, link slug and byline is REPLACED by synthetic text: third-party feed text is licensed and is never committed (docs/data-rights.md). -->
+<rss xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0" xml:base="http://www.fda.gov/">
+  <channel>
+    <title>FDA Press Releases RSS Feed</title>
+    <link>http://www.fda.gov/</link>
+    <description />
+    <language>en</language>
+    
+    <item>
+  <title>Sample fda_press headline 1: company update</title>
+  <link>http://www.fda.gov/sample/fda_press-1</link>
+  <description>Synthetic description 1 standing in for the recorded text.</description>
+  <pubDate>Mon, 28 Sep 2026 17:43:18 EDT</pubDate>
+    <dc:creator>Sample Author</dc:creator>
+    <guid isPermaLink="true">http://www.fda.gov/sample/fda_press-1</guid>
+    </item>
+<item>
+  <title>Sample fda_press headline 2: company update</title>
+  <link>http://www.fda.gov/sample/fda_press-2</link>
+  <description>Synthetic description 2 standing in for the recorded text.</description>
+  <pubDate>Mon, 28 Sep 2026 17:00:01 EDT</pubDate>
+    <dc:creator>Sample Author</dc:creator>
+    <guid isPermaLink="true">http://www.fda.gov/sample/fda_press-2</guid>
+    </item>
+<item>
+  <title>Sample fda_press headline 3: company update</title>
+  <link>http://www.fda.gov/sample/fda_press-3</link>
+  <description>Synthetic description 3 standing in for the recorded text.</description>
+  <pubDate>Wed, 23 Sep 2026 15:50:17 EDT</pubDate>
+    <dc:creator>Sample Author</dc:creator>
+    <guid isPermaLink="true">http://www.fda.gov/sample/fda_press-3</guid>
+    </item>
+<item>
+  <title>Sample fda_press headline 4: company update</title>
+  <link>http://www.fda.gov/sample/fda_press-4</link>
+  <description>Synthetic description 4 standing in for the recorded text.</description>
+  <pubDate>Mon, 21 Sep 2026 08:58:34 EDT</pubDate>
+    <dc:creator>Sample Author</dc:creator>
+    <guid isPermaLink="true">http://www.fda.gov/sample/fda_press-4</guid>
+    </item>
+<item>
+  <title>Sample fda_press headline 5: company update</title>
+  <link>http://www.fda.gov/sample/fda_press-5</link>
+  <description>Synthetic description 5 standing in for the recorded text.</description>
+  <pubDate>Thu, 17 Sep 2026 14:26:43 EDT</pubDate>
+    <dc:creator>Sample Author</dc:creator>
+    <guid isPermaLink="true">http://www.fda.gov/sample/fda_press-5</guid>
+    </item>
+<item>
+  <title>Sample fda_press headline 6: company update</title>
+  <link>http://www.fda.gov/sample/fda_press-6</link>
+  <description>Synthetic description 6 standing in for the recorded text.</description>
+  <pubDate>Tue, 15 Sep 2026 09:53:31 EDT</pubDate>
+    <dc:creator>Sample Author</dc:creator>
+    <guid isPermaLink="true">http://www.fda.gov/sample/fda_press-6</guid>
+    </item>
+</channel>
+</rss>

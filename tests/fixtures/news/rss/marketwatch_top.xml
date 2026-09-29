@@ -1,0 +1,72 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Recorded 2026-09-29 with a browser user agent, trimmed to 6 items. Element structure, namespaces, dates, guids' shape and ticker tags are as served; every headline, description, link slug and byline is REPLACED by synthetic text: third-party feed text is licensed and is never committed (docs/data-rights.md). -->
+<rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss/" version="2.0">
+<channel>
+<title>MarketWatch.com - Top Stories</title>
+<description>MarketWatch, a leading publisher of business and financial news, offers users up-to-the minute news, investment tools, and subscription products.</description>
+<link>http://www.marketwatch.com/</link>
+<language>en-us</language>
+<copyright>Copyright © Dow Jones &amp; Company, Inc. All rights reserved.</copyright>
+<lastBuildDate>Tue, 29 Sep 2026 20:32:22 GMT</lastBuildDate>
+<ttl>60</ttl>
+<image>
+<title>MarketWatch.com - Top Stories</title>
+<url>https://www.marketwatch.com/rss/marketwatch.gif</url>
+<link>http://www.marketwatch.com/</link>
+</image>
+<item>
+<guid isPermaLink="false">WP-MKTW-0005258122</guid>
+<title>Sample marketwatch_top headline 1: company update</title>
+<description>Synthetic description 1 standing in for the recorded text.</description>
+<link>https://www.marketwatch.com/sample/marketwatch_top-1</link>
+<pubDate>Tue, 29 Sep 2026 20:30:00 GMT</pubDate>
+<dc:creator>Sample Author</dc:creator>
+<media:content url="https://images.mktw.net/im-02929527" medium="image" type="image/jpeg" />
+</item>
+<item>
+<guid isPermaLink="false">WP-MKTW-0005259889</guid>
+<title>Sample marketwatch_top headline 2: company update</title>
+<description>Synthetic description 2 standing in for the recorded text.</description>
+<link>https://www.marketwatch.com/sample/marketwatch_top-2</link>
+<pubDate>Tue, 29 Sep 2026 20:13:00 GMT</pubDate>
+<dc:creator>Sample Author</dc:creator>
+<media:content url="https://images.mktw.net/im-30542988" medium="image" type="image/jpeg" />
+</item>
+<item>
+<guid isPermaLink="false">WP-MKTW-0005256120</guid>
+<title>Sample marketwatch_top headline 3: company update</title>
+<description>Synthetic description 3 standing in for the recorded text.</description>
+<link>https://www.marketwatch.com/sample/marketwatch_top-3</link>
+<pubDate>Tue, 29 Sep 2026 20:00:00 GMT</pubDate>
+<dc:creator>Sample Author</dc:creator>
+<media:content url="https://images.mktw.net/im-88944109" medium="image" type="image/jpeg" />
+</item>
+<item>
+<guid isPermaLink="false">WP-MKTW-0005258446</guid>
+<title>Sample marketwatch_top headline 4: company update</title>
+<description>Synthetic description 4 standing in for the recorded text.</description>
+<link>https://www.marketwatch.com/sample/marketwatch_top-4</link>
+<pubDate>Tue, 29 Sep 2026 19:34:00 GMT</pubDate>
+<dc:creator>Sample Author</dc:creator>
+<media:content url="https://images.mktw.net/im-36158312" medium="image" type="image/jpeg" />
+</item>
+<item>
+<guid isPermaLink="false">WP-MKTW-0005257167</guid>
+<title>Sample marketwatch_top headline 5: company update</title>
+<description>Synthetic description 5 standing in for the recorded text.</description>
+<link>https://www.marketwatch.com/sample/marketwatch_top-5</link>
+<pubDate>Tue, 29 Sep 2026 19:02:00 GMT</pubDate>
+<dc:creator>Sample Author</dc:creator>
+<media:content url="https://images.mktw.net/im-65196276" medium="image" type="image/jpeg" />
+</item>
+<item>
+<guid isPermaLink="false">WP-MKTW-0005238250</guid>
+<title>Sample marketwatch_top headline 6: company update</title>
+<description>Synthetic description 6 standing in for the recorded text.</description>
+<link>https://www.marketwatch.com/sample/marketwatch_top-6</link>
+<pubDate>Tue, 29 Sep 2026 18:55:00 GMT</pubDate>
+<dc:creator>Sample Author</dc:creator>
+<media:content url="https://images.mktw.net/im-68469739" medium="image" type="image/jpeg" />
+</item>
+</channel>
+</rss>

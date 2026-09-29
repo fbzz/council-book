@@ -447,11 +447,12 @@ def scout_input(inputs: SwingInputs, catalysts: Mapping[str, CatalystMeta]) -> t
         tagged += f"] [not screened: {', '.join(unscreened)}" if unscreened else ""
         form = f" {meta.form}" if meta.form else ""
         form += f" items {', '.join(meta.items)}" if meta.form and meta.items else ""
-        # public-domain items carry their cleaned summary (an SEC item: company + filing text);
-        # a broker-feed item stays title only here, as before
-        summary = str(getattr(item, "summary", "") or "") if item.id.startswith("P:") else ""
+        # public-domain items carry their cleaned summary (an SEC item: company + filing text), an
+        # RSS headline its cleaned description (<= 300); a broker-feed item stays title only
+        summary = meta.summary if item.id.startswith("P:") or meta.feed else ""
         body = f"{item.title} | {summary[:READING_SUMMARY_MAX]}" if summary else item.title
-        reading.append((item.id, f"[{tagged}]{form} {hours}h ago: {body}"))
+        via = f" via {meta.feed}" if meta.feed else ""
+        reading.append((item.id, f"[{tagged}]{form} {hours}h ago{via}: {body}"))
     screen = [(str(r["id"]), f"move {_num(r.get('move_sigma'))} sigma ({_num(r.get('move_pct'))}%), "
                f"volume x{_num(r.get('vol_ratio'))}, sector {r.get('sector') or 'n/a'}")
               for r in inputs.screen_rows if str(r["id"]) in catalysts]

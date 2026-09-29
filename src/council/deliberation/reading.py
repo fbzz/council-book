@@ -390,7 +390,9 @@ def swing_reads_from_inputs(
                     continue
                 rid, body = m.group(1), m.group(2)
                 if call.role == "scout" and block.startswith(_SWING_READING) and rid not in rows:
-                    source = "broker_feed" if rid.startswith("N:") else "movers_screen" if rid.startswith("M:") else "public"
+                    source = ("rss" if rid.startswith("N:") and " via " in body.split(":", 1)[0]
+                              else "broker_feed" if rid.startswith("N:")
+                              else "movers_screen" if rid.startswith("M:") else "public")
                     rows[rid] = NewsRead(id=rid, source=source,
                                          licence="broker_licensed" if rid.startswith("N:") else "public",
                                          title=body[:200], available=available)

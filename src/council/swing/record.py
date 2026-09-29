@@ -42,6 +42,9 @@ def _dump(model: Any) -> Any:
 def _catalyst(cid: str, meta: Any, links: Mapping[str, str]) -> dict[str, Any]:
     row: dict[str, Any] = {"id": cid}
     if cid.startswith("N:") or meta is None:
+        feed = getattr(meta, "feed", None) if cid.startswith("N:") else None
+        if feed:
+            row["source"] = str(feed)                # an RSS item: id + feed label, never its text
         return row                                   # licensed: id only, never its title
     if cid.startswith("P:"):
         row["title"] = str(getattr(meta, "title", "") or "")

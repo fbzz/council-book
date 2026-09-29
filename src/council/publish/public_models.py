@@ -16,6 +16,7 @@ Rules (each one is tested):
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, ClassVar, Literal, get_args
 
@@ -136,7 +137,7 @@ PublicNewsSource = Literal["sec", "fed_board", "bls", "bea", "treasury", "eia"]
 PUBLIC_NEWS_SOURCES: frozenset[str] = frozenset(get_args(PublicNewsSource))
 FactSource = Literal[
     "tiingo", "binance", "broker", "fred", "clock", "policy", "calendar", "broker_feed", "filing",
-    "unknown", "sec", "fed_board", "bls", "bea", "treasury", "eia",
+    "unknown", "sec", "fed_board", "bls", "bea", "treasury", "eia", "rss",
 ]
 # Why a fact's value is not shown (docs/data-rights.md): a licensed FRED-hosted series, a value
 # derived from broker data beyond the coarse states the record may show, or an unknown source.
@@ -363,8 +364,8 @@ class PublicFact(PublicModel):
             raise ValueError("a withheld fact may not carry a value")
         if self.kind in ("news", "filing") and self.value is not None:
             raise ValueError("news and filing items are ids only")
-        if self.id.startswith("N:") and self.source not in (None, "broker_feed"):
-            raise ValueError("a broker feed item is labelled broker_feed")
+        if self.id.startswith("N:") and self.source not in (None, "broker_feed", "rss"):
+            raise ValueError("a licensed news item is labelled broker_feed or rss")
         if self.id.startswith("P:") and self.source not in (None, "unknown", *PUBLIC_NEWS_SOURCES):
             raise ValueError("a public news item is labelled with its public publisher")
         if isinstance(self.value, float) and abs(self.value) > 1_000_000:
@@ -480,14 +481,15 @@ SwingFactValue = bool | FiniteFloat | Annotated[str, Field(max_length=40)]
 
 
 class PublicSwingCatalyst(PublicModel):
-    """One catalyst chip. `N:` (a broker feed item): the id only, never its title. `P:` (public
+    """One catalyst chip. `N:` (a broker feed item): the id only, never its title; an `N:` RSS
+    headline (`licensed_news`): the id and its feed label, never its text. `P:` (public
     domain): the title and its publisher's link. `S:`: the filing's form and item codes (SEC
     metadata). `M:`: a movers-screen row, id only."""
 
     OMIT_WHEN_DEFAULT = frozenset({"title", "link", "source", "form", "items"})
 
     id: SwingEvidenceId
-    kind: Literal["broker_feed", "public_news", "filing", "screen"]
+    kind: Literal["broker_feed", "licensed_news", "public_news", "filing", "screen"]
     title: str | None = Field(default=None, max_length=160)
     link: str | None = Field(default=None, max_length=300, pattern=r"^https://[A-Za-z0-9.-]+\.gov/\S*$")
     source: str | None = Field(default=None, max_length=24)
@@ -500,6 +502,12 @@ class PublicSwingCatalyst(PublicModel):
             raise ValueError("a broker feed catalyst is published by id only")
         if self.kind == "broker_feed" and not self.id.startswith("N:"):
             raise ValueError("a broker feed catalyst has an N: id")
+        if self.kind == "licensed_news" and (self.title or self.link or self.form or self.items
+                                             or not self.id.startswith("N:")
+                                             or not re.fullmatch(r"[a-z][a-z0-9_]{0,23}", self.source or "")):
+            raise ValueError("a licensed RSS catalyst is an N: id and its feed label only")
+        if self.kind != "licensed_news" and self.id.startswith("N:") and self.source:
+            raise ValueError("a broker feed catalyst carries no source")
         return self
 
 

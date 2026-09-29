@@ -665,12 +665,15 @@ def event_source(source: str | None) -> str:
     return "unknown"
 
 
+_RSS_FEED = re.compile(r"[a-z][a-z0-9_]{0,23}")
+
+
 def news_source(item: Any) -> str:
-    """A news item's public source label: `broker_feed` for an `N:` id, its publisher for a `P:`
-    item that passes the public test, else `unknown`."""
+    """A news item's public source label: `rss` for an `N:` RSS headline, `broker_feed` for any
+    other `N:` id, its publisher for a `P:` item that passes the public test, else `unknown`."""
     eid = str(getattr(item, "id", "") or "")
     if _NEWS_OK.match(eid):
-        return "broker_feed"
+        return "rss" if getattr(item, "source", None) == "rss" else "broker_feed"
     return str(item.source) if public_news_ok(item) else "unknown"
 
 
@@ -1552,6 +1555,9 @@ def _swing_catalyst(row: Mapping[str, Any], text: _SwingText) -> Any:
     if not _SWING_ID.match(cid) or cid[:2] not in ("N:", "P:", "S:", "M:"):
         return None
     if cid.startswith("N:"):
+        feed = str(row.get("source") or "")
+        if _RSS_FEED.fullmatch(feed):               # a licensed RSS headline: id + feed label only
+            return PublicSwingCatalyst(id=cid, kind="licensed_news", source=feed)
         return PublicSwingCatalyst(id=cid, kind="broker_feed")
     if cid.startswith("M:"):
         return PublicSwingCatalyst(id=cid, kind="screen")

@@ -1,0 +1,44 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Recorded 2026-09-29 with a browser user agent, trimmed to 6 items. Element structure, namespaces, dates, guids' shape and ticker tags are as served; every headline, description, link slug and byline is REPLACED by synthetic text: third-party feed text is licensed and is never committed (docs/data-rights.md). -->
+<rss version="2.0">
+  <channel>
+    <title>Stock Market News</title>
+    <link>https://www.investing.com</link>
+    <item>
+      <title>Sample investing_stocks headline 1: company update</title>
+      <pubDate>2026-09-29 20:13:00</pubDate>
+      <author>Sample Author</author>
+      <link>https://www.investing.com/sample/investing_stocks-1</link>
+    </item>
+    <item>
+      <title>Sample investing_stocks headline 2: company update</title>
+      <pubDate>2026-09-29 20:06:29</pubDate>
+      <author>Sample Author</author>
+      <link>https://www.investing.com/sample/investing_stocks-2</link>
+    </item>
+    <item>
+      <title>Sample investing_stocks headline 3: company update</title>
+      <pubDate>2026-09-29 20:00:03</pubDate>
+      <author>Sample Author</author>
+      <link>https://www.investing.com/sample/investing_stocks-3</link>
+    </item>
+    <item>
+      <title>Sample investing_stocks headline 4: company update</title>
+      <pubDate>2026-09-29 19:47:36</pubDate>
+      <author>Sample Author</author>
+      <link>https://www.investing.com/sample/investing_stocks-4</link>
+    </item>
+    <item>
+      <title>Sample investing_stocks headline 5: company update</title>
+      <pubDate>2026-09-29 19:38:50</pubDate>
+      <author>Sample Author</author>
+      <link>https://www.investing.com/sample/investing_stocks-5</link>
+    </item>
+    <item>
+      <title>Sample investing_stocks headline 6: company update</title>
+      <pubDate>2026-09-29 19:35:10</pubDate>
+      <author>Sample Author</author>
+      <link>https://www.investing.com/sample/investing_stocks-6</link>
+    </item>
+    </channel>
+</rss>

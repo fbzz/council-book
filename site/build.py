@@ -1125,7 +1125,7 @@ WITHHELD_WORDS = {
 SOURCE_WORDS = {
     "tiingo": "Tiingo history", "binance": "Binance history", "broker": "broker", "fred": "FRED",
     "clock": "market clock", "policy": "cost policy", "calendar": "public calendar",
-    "broker_feed": "broker feed", "filing": "filing", "unknown": "unknown",
+    "broker_feed": "broker feed", "rss": "licensed RSS headline", "filing": "filing", "unknown": "unknown",
 }
 
 
@@ -4316,6 +4316,8 @@ def swing_idea_view(i: Any) -> dict[str, Any]:
     for c in i.catalysts:
         if c.kind == "broker_feed":
             cats.append({"label": c.id, "note": "broker news item, id only", "href": "", "css": "feed"})
+        elif c.kind == "licensed_news":
+            cats.append({"label": c.id, "note": f"{c.source} headline (licensed), id only", "href": "", "css": "feed"})
         elif c.kind == "public_news":
             cats.append({"label": c.title or c.id, "note": c.id, "href": c.link or "", "css": "event"})
         elif c.kind == "filing":

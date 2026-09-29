@@ -22,8 +22,26 @@ roles:
 news:                          # what the news role reads (transparency v2, T3b; policy change 2026-09-26)
   max_items: 40                # the whole reading list, newest first
   lookback_h: 48               # an item is read only if it became available in [slot - 48 h, slot)
-  quotas: {broker_feed: 25, sec: 8, fed_board: 5, bls: 2, bea: 2, treasury: 2, eia: 2}   # per source, newest first; unused quota is not reassigned
+  quotas: {broker_feed: 25, sec: 8, fed_board: 5, bls: 2, bea: 2, treasury: 2, eia: 2, rss: 6}   # per source, newest first; unused quota is not reassigned
   broker_feed: true            # read the eToro feed when an Agent Portfolio is connected (never published; private copies purged within 7 days); false turns it off
+  rss:                         # third-party RSS headlines (policy change 2026-09-29): LICENSED text, models only, never published (id + feed label), purged after 7 days
+    enabled: true
+    timeout_s: 15              # per request; one attempt, a failure flags news_source_error:rss:<feed>
+    scout_max: 40              # RSS items in the swing Scout's reading list per slot
+    scout_per_feed: 8          # at most this many from one feed (Yahoo counts once across tickers)
+    yahoo_max_tickers: 30      # per-ticker Yahoo requests per slot: open trades, carried ideas, movers-screen names
+    feeds:                     # kind: press | earnings | market | ticker (ranking tier); naive_tz: zone of a pubDate without one
+      - {label: prnewswire_all, kind: press, url: "https://www.prnewswire.com/rss/news-releases-list.rss"}
+      - {label: nasdaq_earnings, kind: earnings, url: "https://www.nasdaq.com/feed/rssoutbound?category=Earnings"}
+      - {label: nasdaq_markets, kind: market, url: "https://www.nasdaq.com/feed/rssoutbound?category=Markets"}
+      - {label: yahoo_ticker, kind: ticker, url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s={TICKER}&region=US&lang=en-US"}
+      - {label: fda_press, kind: press, url: "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml"}
+      - {label: cnbc_top, kind: market, url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"}
+      - {label: cnbc_earnings, kind: earnings, url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839135"}
+      - {label: marketwatch_top, kind: market, url: "https://feeds.content.dowjones.io/public/rss/mw_topstories"}
+      - {label: seekingalpha_currents, kind: earnings, url: "https://seekingalpha.com/market_currents.xml", category_ticker: true}
+      - {label: investing_stocks, kind: market, url: "https://www.investing.com/rss/news_25.rss", naive_tz: UTC}
+      - {label: benzinga, kind: market, url: "https://www.benzinga.com/feed"}
 outage_guard: {stage_retry_wait_s: 120, stage_retries: 3}
 slots_utc_hours: [2, 6, 10, 14, 18, 22]
 slot_minute: 40

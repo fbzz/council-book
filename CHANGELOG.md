@@ -1,5 +1,21 @@
 # Changelog
 
+## Third-party RSS headlines for the swing Scout and the news role — policy change (2026-09-29)
+- **Policy change**: `policy/council.yaml` `news.rss` lists eleven feeds (user decision 2026-09-29):
+  PR Newswire (all releases), Nasdaq earnings and markets, Yahoo Finance per ticker, FDA press
+  releases, CNBC top news and earnings, MarketWatch top stories, Seeking Alpha market currents,
+  Investing.com stock news, Benzinga; `news.quotas` gains `rss: 6` for the core news role.
+- `council.data.rss_news`: fetch (15 s, one attempt, browser user agent, host allow-list), safe
+  RSS / Atom parsing (the gov_news XML guard), ticker tagging, dedupe by link and title, lookahead
+  cutoff strictly before the slot, 48 h lookback; ranking for the Scout (priority names, then press
+  releases / earnings, then market headlines; 40 per slot, 8 per feed). A failed feed is
+  `news_source_error:rss:<feed>`.
+- Data rights: the text is licensed: `N:` ids (HMAC under the install key), held apart by the capture,
+  purged after 7 days, guarded by the leak scan; publicly an item is its id and feed label only
+  (`licensed_news` catalyst chip, evidence source `rss`). docs/data-rights.md gains the rows.
+- Test fixtures record the feeds' structure, dates and tags with synthetic text (the Yahoo fixture
+  is built to its format: the live feed answered HTTP 429 when recording).
+
 ## Skeptic moves to the Scout's model — policy change (2026-09-29)
 - **Policy change**: `policy/swing.yaml` `llm.skeptic_model` `glm-5.3-flash:cloud` → `deepseek-v4.1-flash:cloud`,
   `skeptic_model_family` `other` → `same` (user decision). On the third real paper run GLM returned

@@ -38,6 +38,7 @@ CARD_ROLES: dict[str, str] = {
 BROKER_NEWS_LABEL = "broker news item"
 NEWS_LABEL = BROKER_NEWS_LABEL          # older name: an N: item is always a broker feed item
 PUBLIC_NEWS_LABEL = "public-source news item"
+RSS_NEWS_LABEL = "licensed RSS headline"            # third-party text: id and feed label only
 # A P: item's label by publisher (the item's own `source`); never "broker": these are U.S. federal
 # public-domain releases (docs/data-rights.md).
 PUBLIC_NEWS_LABELS: dict[str, str] = {
@@ -69,6 +70,8 @@ def news_label(evidence_id: str, source: str | None = None) -> str:
     eid = (evidence_id or "").strip()
     if eid.startswith("P:"):
         return PUBLIC_NEWS_LABELS.get(source or "", PUBLIC_NEWS_LABEL)
+    if source == "rss":
+        return RSS_NEWS_LABEL
     return BROKER_NEWS_LABEL
 
 

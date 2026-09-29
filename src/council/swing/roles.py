@@ -87,7 +87,8 @@ class CatalystMeta:
     title: str = ""
     form: str | None = None
     items: tuple[str, ...] = ()
-    summary: str = ""        # a public-domain (P:) item's cleaned summary; "" for feed / screen ids
+    summary: str = ""        # a public-domain (P:) or RSS item's cleaned summary; "" for broker feed / screen ids
+    feed: str | None = None  # an RSS item's feed label (licensed: the id and this label are all that is published)
 
     @property
     def market_wide(self) -> bool:
@@ -106,7 +107,9 @@ def catalyst_index(reading: Iterable[Any], screen_rows: Iterable[Mapping[str, An
         out[item.id] = CatalystMeta(id=item.id, available_at=item.available_at, symbols=syms,
                                     title=item.title, form=getattr(item, "form", None),
                                     items=tuple(getattr(item, "items", ()) or ()),
-                                    summary=str(getattr(item, "summary", "") or "") if item.id.startswith("P:") else "")
+                                    summary=str(getattr(item, "summary", "") or "")
+                                    if item.id.startswith("P:") or getattr(item, "source", "") == "rss" else "",
+                                    feed=getattr(item, "feed", None) if getattr(item, "source", "") == "rss" else None)
     if screen_available_at is not None and screen_available_at < slot:
         for row in screen_rows:
             out[str(row["id"])] = CatalystMeta(id=str(row["id"]), available_at=screen_available_at,

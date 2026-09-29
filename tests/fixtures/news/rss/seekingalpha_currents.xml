@@ -1,0 +1,51 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Recorded 2026-09-29 with a browser user agent, trimmed to 6 items. Element structure, namespaces, dates, guids' shape and ticker tags are as served; every headline, description, link slug and byline is REPLACED by synthetic text: third-party feed text is licensed and is never committed (docs/data-rights.md). -->
+<rss version="2.0">
+  <channel>
+    <title>Breaking News on Seeking Alpha</title>
+    <link>https://seekingalpha.com/news/all</link>
+    <description>© seekingalpha.com. Use of this feed is limited to personal, non-commercial use and is governed by Seeking Alpha's Terms of Use (https://about.seekingalpha.com/terms). Publishing this feed for public or commercial use and/or misrepresentation by a third party is prohibited.</description>
+    <item>
+      <title>Sample seekingalpha_currents headline 1: company update</title>
+      <link>https://seekingalpha.com/sample/seekingalpha_currents-1</link>
+      <category domain="https://seekingalpha.com/symbol/POM">pom</category>
+      <pubDate>Tue, 29 Sep 2026 16:27:12 -0400</pubDate>
+      <guid>https://seekingalpha.com/sample/seekingalpha_currents-1</guid>
+    </item>
+    <item>
+      <title>Sample seekingalpha_currents headline 2: company update</title>
+      <link>https://seekingalpha.com/sample/seekingalpha_currents-2</link>
+      <category domain="https://seekingalpha.com/symbol/TMGN">tmgn</category>
+      <pubDate>Tue, 29 Sep 2026 16:27:05 -0400</pubDate>
+      <guid>https://seekingalpha.com/sample/seekingalpha_currents-2</guid>
+    </item>
+    <item>
+      <title>Sample seekingalpha_currents headline 3: company update</title>
+      <link>https://seekingalpha.com/sample/seekingalpha_currents-3</link>
+      <category domain="https://seekingalpha.com/symbol/TUSI">tusi</category>
+      <pubDate>Tue, 29 Sep 2026 16:25:15 -0400</pubDate>
+      <guid>https://seekingalpha.com/sample/seekingalpha_currents-3</guid>
+    </item>
+    <item>
+      <title>Sample seekingalpha_currents headline 4: company update</title>
+      <link>https://seekingalpha.com/sample/seekingalpha_currents-4</link>
+      <category domain="https://seekingalpha.com/symbol/AMP">amp</category>
+      <pubDate>Tue, 29 Sep 2026 16:24:54 -0400</pubDate>
+      <guid>https://seekingalpha.com/sample/seekingalpha_currents-4</guid>
+    </item>
+    <item>
+      <title>Sample seekingalpha_currents headline 5: company update</title>
+      <link>https://seekingalpha.com/sample/seekingalpha_currents-5</link>
+      <category domain="https://seekingalpha.com/symbol/PWRZ">pwrz</category>
+      <pubDate>Tue, 29 Sep 2026 16:24:00 -0400</pubDate>
+      <guid>https://seekingalpha.com/sample/seekingalpha_currents-5</guid>
+    </item>
+    <item>
+      <title>Sample seekingalpha_currents headline 6: company update</title>
+      <link>https://seekingalpha.com/sample/seekingalpha_currents-6</link>
+      <category domain="https://seekingalpha.com/symbol/IDVZ">idvz</category>
+      <pubDate>Tue, 29 Sep 2026 16:23:39 -0400</pubDate>
+      <guid>https://seekingalpha.com/sample/seekingalpha_currents-6</guid>
+    </item>
+    </channel>
+</rss>

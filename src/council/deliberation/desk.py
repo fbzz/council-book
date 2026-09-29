@@ -214,6 +214,8 @@ def news_source(item: NewsItem) -> str:
     """The item's source label: an `N:` id is always the broker feed (as in `publish.redact`),
     whatever its `source` field says."""
     if str(getattr(item, "id", "")).startswith("N:"):
+        if str(getattr(item, "source", "")) == "rss":        # a licensed third-party RSS headline
+            return f"rss:{getattr(item, 'feed', None) or 'feed'}"
         return _NEWS_SOURCE_LABEL["etoro_feed"]
     source = str(getattr(item, "source", "etoro_feed"))
     return _NEWS_SOURCE_LABEL.get(source, source)

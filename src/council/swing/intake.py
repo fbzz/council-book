@@ -18,8 +18,10 @@ The Scout reads FREELY: the whole market-wide reading list, not only held names.
   bounds the requests per slot.
 - `feed_pass_through`: the broker feed's items (`N:`, private text, never published), newest first,
   quota FEED_QUOTA.
-- `reading_list`: SEC + feed + gov news (quota GOV_QUOTA), lookback 48 h, newest first, at most
-  READING_MAX items.
+- `reading_list`: SEC + feed + gov news (quota GOV_QUOTA) + third-party RSS headlines (`N:`, source
+  `rss`, already ranked and capped by `council.data.rss_news.rank_rss`: movers-screen / open / carried
+  names first, then press releases and earnings, then market headlines; licensed text, never
+  published), lookback 48 h, newest first, at most READING_MAX items.
 
 Admission (`available_at` before the slot, within the lookback), cleaning and the leak scan are
 exactly `council.data.gov_news`'s. One `SecClient` (the caller's, so SEC's <= 7 requests a second is
@@ -50,7 +52,8 @@ SOURCE = "sec"
 SEC_QUOTA = 25
 FEED_QUOTA = 25
 GOV_QUOTA = 8
-READING_MAX = 60
+RSS_QUOTA = 40                          # the policy's news.rss.scout_max caps it first
+READING_MAX = SEC_QUOTA + FEED_QUOTA + GOV_QUOTA + RSS_QUOTA
 PRIORITY_ITEMS = ("1.01", "2.02", "5.02", "7.01", "8.01")
 ROUTINE_SETS = (frozenset({"9.01"}), frozenset({"5.07", "9.01"}))
 TEXT_SUMMARY_MAX = 1200                 # company + item text + exhibit headline + excerpt
@@ -234,22 +237,24 @@ def _newest(items: Iterable[NewsItem]) -> list[NewsItem]:
 
 def feed_pass_through(items: Iterable[NewsItem], *, slot: datetime, quota: int = FEED_QUOTA,
                       lookback: timedelta = LOOKBACK) -> list[NewsItem]:
-    """Broker-feed items (`N:` only) available before `slot` within the lookback, newest first."""
-    ok = [i for i in items if i.id.startswith("N:") and slot - lookback <= i.available_at < slot]
+    """Broker-feed items (`N:`, not RSS) available before `slot` within the lookback, newest first."""
+    ok = [i for i in items if i.id.startswith("N:") and i.source != "rss" and slot - lookback <= i.available_at < slot]
     return _newest(ok)[:quota]
 
 
 def reading_list(sec: Sequence[NewsItem], feed: Sequence[NewsItem], gov: Sequence[NewsItem], *,
-                 slot: datetime, lookback: timedelta = LOOKBACK) -> list[NewsItem]:
+                 slot: datetime, lookback: timedelta = LOOKBACK, rss: Sequence[NewsItem] = ()) -> list[NewsItem]:
     """The Scout's reading list: each source within its quota, admitted at `slot` (only items
     available before it: no lookahead), newest first, at most READING_MAX, one item per id. SEC
-    items are cut in the caller's rank order (`sec_market_wide`), not by age."""
+    and RSS items are cut in the caller's rank order (`sec_market_wide`, `rss_news.rank_rss`), not
+    by age."""
     def admitted(items: Iterable[NewsItem]) -> list[NewsItem]:
         return _newest(i for i in items if slot - lookback <= i.available_at < slot)
 
     ranked_sec = [i for i in sec if slot - lookback <= i.available_at < slot]   # the caller's rank order
+    ranked_rss = [i for i in rss if i.source == "rss" and slot - lookback <= i.available_at < slot]
     chosen = ranked_sec[:SEC_QUOTA] + feed_pass_through(feed, slot=slot, lookback=lookback) \
-        + admitted(gov)[:GOV_QUOTA]
+        + admitted(gov)[:GOV_QUOTA] + ranked_rss[:RSS_QUOTA]
     seen: dict[str, NewsItem] = {}
     for item in chosen:
         seen.setdefault(item.id, item)

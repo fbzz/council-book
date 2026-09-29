@@ -66,9 +66,12 @@ class MarketState(Strict):
 # feed is eToro Licensed Content: agents may read it, but its text is never published. The other
 # six are U.S. federal sources; which of their fields may be published is decided at publication by
 # three facts together (the `P:` prefix, a public source, a public-domain licence), never by one.
-NewsSource = Literal["etoro_feed", "sec", "fed_board", "bls", "bea", "treasury", "eia"]
-NewsLicence = Literal["broker_licensed", "public_domain", "federal_work_unverified"]
+# `rss`: third-party publishers' RSS headlines (`council.data.rss_news`): licensed/restricted text,
+# `N:` ids like the broker feed, read by the models only, never published, purged after 7 days.
+NewsSource = Literal["etoro_feed", "sec", "fed_board", "bls", "bea", "treasury", "eia", "rss"]
+NewsLicence = Literal["broker_licensed", "public_domain", "federal_work_unverified", "third_party_licensed"]
 BROKER_NEWS_SOURCE = "etoro_feed"
+RSS_NEWS_SOURCE = "rss"
 PUBLIC_NEWS_SOURCES: frozenset[str] = frozenset({"sec", "fed_board", "bls", "bea", "treasury", "eia"})
 # The licence each source's items carry unless a caller states otherwise. Treasury is a federal work
 # (17 U.S.C. §105) but no explicit site statement was found, so it is recorded as unverified.
@@ -80,6 +83,7 @@ DEFAULT_LICENCE: Mapping[str, str] = MappingProxyType({
     "bea": "public_domain",
     "treasury": "federal_work_unverified",
     "eia": "public_domain",
+    "rss": "third_party_licensed",
 })
 FilingForm = Literal["8-K", "8-K/A", "6-K"]
 ItemCode = Annotated[str, Field(pattern=r"^\d\.\d{2}$")]
@@ -143,6 +147,21 @@ def broker_news_id(post_id: str, install_key: bytes) -> str:
     return "N:" + digest.hexdigest()[:8]
 
 
+def rss_news_id(stable_key: str, install_key: bytes | None) -> str:
+    """A third-party RSS item's id: "N:" + HMAC-SHA256(install key, "rss" NUL stable key)[:8] (the
+    stable key is the item's canonical link, else its normalised title: `council.data.rss_news`).
+    Keyed like a broker item, so a published id cannot be matched back to a headline; without an
+    install key (offline fixtures) an unkeyed sha256 of the same blob."""
+    if not stable_key:
+        raise ValueError("rss news id needs a non-empty key")
+    blob = f"rss\0{stable_key}".encode("utf-8", "surrogatepass")
+    if install_key is None:
+        return "N:" + hashlib.sha256(blob).hexdigest()[:8]
+    if not isinstance(install_key, bytes | bytearray) or len(install_key) < 16:
+        raise ValueError("rss news id needs an install key of at least 16 bytes")
+    return "N:" + hmac.new(bytes(install_key), blob, hashlib.sha256).hexdigest()[:8]
+
+
 class NewsItem(Strict):
     """A news item the news role may read.
 
@@ -150,11 +169,13 @@ class NewsItem(Strict):
       its text is NEVER published.
     - Public-domain (`P:` id, a U.S. federal source): title and summary were cleaned and leak-scanned
       at fetch time (`council.data.gov_news`); what may be published is decided at publication.
+    - Third-party RSS (`N:` id, source `rss`, licence `third_party_licensed`, `feed` its label): read
+      by the models like the broker feed; its text is NEVER published (id and feed label only).
     `licence` defaults from `source` when absent. The fields added for public-domain items are left
     out of a dump while they hold their default (`link`, `form`, `items`; `licence` on a broker item),
     so a broker item, and the pack hash over it, serialises exactly as it did before they existed."""
 
-    OMIT_WHEN_DEFAULT: ClassVar[frozenset[str]] = frozenset({"link", "form", "items"})
+    OMIT_WHEN_DEFAULT: ClassVar[frozenset[str]] = frozenset({"link", "form", "items", "feed"})
 
     id: str = Field(pattern=r"^(?:N|P):[0-9a-f]{8}$")
     title: str
@@ -169,6 +190,7 @@ class NewsItem(Strict):
     link: HttpsLink | None = None
     form: FilingForm | None = None                    # SEC items only
     items: list[ItemCode] = Field(default_factory=list)   # 8-K item codes ("2.02"), SEC items only
+    feed: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,23}$")   # RSS items only: the feed label
 
     @model_validator(mode="before")
     @classmethod
