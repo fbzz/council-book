@@ -27,7 +27,7 @@ Reason codes (public; the numbers behind them are not):
 | S12 fees | reported only while `fees.mode: report` (flag `s12_over_budget`); `fee_budget` under `enforce` |
 | S13 shorts | `short_new_listing`, `short_crowded`, `short_takeover_target`, `short_into_flush`, `short_squeeze_risk`, `short_si_unknown` (flag: half size) |
 | S14 cool-off | `cooloff` |
-| S15 brake | `swing_brake` |
+| S15 brake | `brake_on` (30-day net loss), `brake_engaged` (the Skeptic canary pause), `brake_unknown` (no S15 figure: fail closed); all lifted only by the operator (`swing.brake`) |
 | S16 entry guard | at approval: `swing_entry_ran`, `swing_entry_stopped`, `expired` (`entry_guard`) |
 | S17 drawdown | flag `drawdown_scaled`; WARN / HALTED / FLAT -> `kill_state`; an unknown drawdown -> `drawdown_unknown` (fail closed: no entry) |
 | other | `setup_paper_only`, `swing_blocker`, `vehicle_owned_by_core` |
@@ -71,7 +71,7 @@ RULE_OF: dict[str, str] = {
     "short_new_listing": "S13", "short_crowded": "S13", "short_takeover_target": "S13",
     "short_into_flush": "S13", "short_squeeze_risk": "S13",
     "cooloff": "S14",
-    "swing_brake": "S15",
+    "brake_on": "S15", "brake_engaged": "S15", "brake_unknown": "S15",
     "swing_entry_ran": "S16", "swing_entry_stopped": "S16", "expired": "S16",
     "kill_state": "S17", "drawdown_unknown": "S17",
     "setup_paper_only": "SB16", "swing_blocker": "R20", "vehicle_owned_by_core": "S0",
@@ -234,6 +234,8 @@ class BookState:
     entries_7d: int = 0                      # executed + approved in flight, rolling 7 days
     drawdown_from_peak: float | None = None  # real-adjusted, negative (D19)
     brake_on: bool = False                   # S15, lifted only by the operator
+    canary_pause: bool = False               # §1.5 canary pause (`brake_engaged`), operator lift
+    brake_unknown: bool = False              # the S15 figure could not be computed (fail closed)
     blockers: Sequence[str] = ()             # swing-scope ledger blockers
     recent_exits: Sequence[RecentExit] = ()
     core_overweight: frozenset[str] = frozenset()   # core lines held above their reference weight
@@ -335,7 +337,11 @@ def screen_entry(c: Candidate, book: BookState, sp: SwingPolicy, cost_fn: CostFn
     if book.blockers:
         return _drop(c, "swing_blocker")
     if book.brake_on:
-        return _drop(c, "swing_brake")
+        return _drop(c, "brake_on")
+    if book.canary_pause:
+        return _drop(c, "brake_engaged")
+    if book.brake_unknown:
+        return _drop(c, "brake_unknown")
     dd = book.drawdown_from_peak      # S17 cannot scale what it cannot see: no entry (fail closed)
     if dd is None or not math.isfinite(dd):
         return _drop(c, "drawdown_unknown")

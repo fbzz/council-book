@@ -132,6 +132,7 @@ def _run(ctx: CycleContext) -> WatchOutcome:
     out.ops_rows_published = _ops_rows(ctx, files, unpublished)
     smoke_rows = _smoke_rows(ctx, files, unpublished)
     out.smoke_rows_published = sorted(smoke_rows)
+    brake_rows = _swing_brake_rows(ctx, files, unpublished)
     out.urgent += [code.split(":")[0] for code in dict.fromkeys(unpublished)]
     for code in dict.fromkeys(unpublished):          # a bad record never stops the loop; retried
         what = "a public ops row" if code.startswith("ops_row") else "an execution report"
@@ -144,6 +145,8 @@ def _run(ctx: CycleContext) -> WatchOutcome:
             ledger.set_runtime("executions_published",
                                sorted(set(ledger.get_runtime("executions_published", []))
                                       | set(out.executions_published)))
+            if brake_rows:                          # cleared only after a successful publish
+                _swing_brake_published(ctx, brake_rows, now)
             if out.ops_rows_published:              # cleared only after a successful publish
                 done = set(out.ops_rows_published)
                 ledger.set_runtime(OPS_ROWS_PENDING, [c for c in ledger.get_runtime(OPS_ROWS_PENDING, [])
@@ -311,6 +314,50 @@ def _ops_rows(ctx: CycleContext, files: dict[str, bytes], unpublished: list[str]
                 unpublished.append(f"ops_row_unpublished:{type(exc).__name__}")
             return []
     return done
+
+
+# ---------------------------------------------------------------------------- swing pause rows
+SWING_BRAKE_ROWS_PENDING = "swing_brake_rows_pending"   # = council.swing.brake.ROWS_PENDING_KEY
+
+
+def _swing_brake_rows(ctx: CycleContext, files: dict[str, bytes], unpublished: list[str] | None = None) -> list[str]:
+    """SW-4b: the public row of each swing pause engaged by a cycle or lifted by the operator
+    (`council swing brake --lift`), queued under `swing_brake_rows_pending`, into
+    `journal/ops/swing_brake.jsonl`. Returns the ids added to `files`; a row that fails the public
+    model is flagged `ops_row_unpublished:<type>` and stays queued."""
+    from council.publish import swing_brake_row
+
+    try:
+        pending = list(ctx.ledger.get_runtime(SWING_BRAKE_ROWS_PENDING, []) or [])
+    except Exception:  # noqa: BLE001 - an old ledger
+        return []
+    rows, ids = [], []
+    for raw in pending:
+        try:
+            row = swing_brake_row.PublicSwingBrakeRow.model_validate(raw)
+        except Exception as exc:  # noqa: BLE001 - one bad row never stops the watch
+            if unpublished is not None:
+                unpublished.append(f"ops_row_unpublished:{type(exc).__name__}")
+            continue
+        rows.append(row)
+        ids.append(row.id)
+    if not rows:
+        return []
+    try:
+        existing = files.get(swing_brake_row.SWING_BRAKE_PATH) or _read_existing(ctx, swing_brake_row.SWING_BRAKE_PATH)
+        files.update(swing_brake_row.swing_brake_files(existing, rows))
+    except Exception as exc:  # noqa: BLE001
+        if unpublished is not None:
+            unpublished.append(f"ops_row_unpublished:{type(exc).__name__}")
+        return []
+    return ids
+
+
+def _swing_brake_published(ctx: CycleContext, ids: list[str], now: datetime) -> None:
+    done = set(ids)
+    pending = list(ctx.ledger.get_runtime(SWING_BRAKE_ROWS_PENDING, []) or [])
+    ctx.ledger.set_runtime(SWING_BRAKE_ROWS_PENDING,
+                           [r for r in pending if not (isinstance(r, dict) and r.get("id") in done)], now=now)
 
 
 # ---------------------------------------------------------------------------- smoke rows

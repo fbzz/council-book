@@ -130,6 +130,9 @@ def real_swing_sources(
                        benchmark_returns=state.benchmark_returns if keys is not None else None,
                        matched_legs=None, prepare=state.prepare, unavailable=tuple(unavailable))
     state.flags = src.flags
+    from council.swing.canary_set import provider as canary_provider
+
+    src.canary_event = canary_provider(state_dir, src.flags)     # SW-4b: the weekly Skeptic canary
     return src
 
 

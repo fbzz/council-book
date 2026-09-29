@@ -242,7 +242,10 @@ def test_s14_cooloff(sp):
 
 
 def test_s15_brake_blocker_setup(sp):
-    assert run(cand(), book(brake_on=True), sp).code == "swing_brake"
+    assert run(cand(), book(brake_on=True), sp).code == "brake_on"
+    assert R.public_code("brake_on") == "S15:brake_on"
+    assert run(cand(), book(canary_pause=True), sp).code == "brake_engaged"
+    assert run(cand(), book(brake_unknown=True), sp).code == "brake_unknown"
     assert run(cand(), book(blockers=["swing:trade:x"]), sp).code == "swing_blocker"
     assert run(cand(setup="gap_fade"), sp=sp).code == "setup_paper_only"
     assert run(cand(vehicle_owned_by_core=True), sp=sp).code == "vehicle_owned_by_core"

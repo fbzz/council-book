@@ -37,6 +37,7 @@ MATRIX: dict[str, list[str]] = {
     "smoke verify": ["smoke", "verify", "d1"],
     "smoke status": ["smoke", "status"],
     "swing status": ["swing", "status"],
+    "swing brake": ["swing", "brake"],
     "ops resolve": ["ops", "resolve", "d1", "--filled"],
     "ops review": ["ops", "review", "d1", "--reason", "checked the broker"],
     "ops record-dress": ["ops", "record-dress", "--sandbox", "/nonexistent-sandbox"],

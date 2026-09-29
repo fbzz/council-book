@@ -7,7 +7,7 @@
    `ops review`, `resume`, `keys init-write-keychain|store-read|store-write|verify|store`,
    `doctor --live-read|--record-fixtures`, `instruments resolve`, `account set-mirror [--from-broker]`,
    `smoke propose|verify|status`, `ops attest|capabilities|record-dress`, `purge-licensed`,
-   `stocks onboard|adopt|status|prune`, `stocks rank` with the broker gate, and the scripts
+   `stocks onboard|adopt|status|prune`, `swing status|brake`, `stocks rank` with the broker gate, and the scripts
    `ops/install.sh`, `ops/uninstall.sh`, `ops/rehearse-onboarding.sh`. A HALT ends when the
    operator approves the flatten proposal (`approve`), never by an agent. Never send a broker write
    or call a broker write API (including MCP/connector tools). Agents may run `doctor`,

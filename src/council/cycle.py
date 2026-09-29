@@ -1434,6 +1434,7 @@ class SwingEntry:
     target_pct: float
     time_stop_date: str
     detail: dict[str, Any] = field(default_factory=dict)
+    cost_rt_pct: float | None = field(default=None, repr=False)   # private (S15 figure only)
 
 
 @dataclass
@@ -1476,6 +1477,7 @@ async def run_swing(ctx: CycleContext, rec: CycleRecord, *, snapshot: Any, kill_
     stage = "settle"
     try:
         out.flags += settle_swing(ctx.ledger, now)
+        out.flags += swing_exit_urgent(ctx, now)
         stage = "daily"
         out.flags += swing_daily(ctx, slot, now)
         src = getattr(ctx.sources, "swing", None)
@@ -1484,6 +1486,8 @@ async def run_swing(ctx: CycleContext, rec: CycleRecord, *, snapshot: Any, kill_
             out.flags += src.prepare(slot, now)          # the after-close screen, once per session
         stage = "canary"
         await _swing_canary(ctx, out, slot=slot, now=now)
+        stage = "brake"
+        out.flags += [f for f in swing_brake_step(ctx, snapshot, now) if f not in out.flags]
         stage = "slot"
         from council.swing.slots import is_swing_slot
 
@@ -1537,6 +1541,9 @@ async def _swing_canary(ctx: CycleContext, out: SwingRun, *, slot: datetime, now
     out.private_calls += list(res.calls)
     out.flags += [f for f in res.flags if f not in out.flags]
     record_canary_grade(ctx.ledger, res.grade, now)
+    from council.swing import brake
+
+    brake.save(ctx.ledger, brake.note_canary(brake.load(ctx.ledger), res.grade), now)
 
 
 def settle_swing(ledger: Any, now: datetime) -> list[str]:
@@ -1591,7 +1598,102 @@ def _settle_exit(ledger: Any, t: Any, now: datetime, dead: tuple[str, ...]) -> l
     if d.state in dead or (d.state in ("completed", "completed_partial", "blocked") and not filled
                            and all(r.state in ("planned", "skipped", "rejected") for r in legs)):
         ledger.transition_swing_trade(t.trade_id, back, reason=f"exit_{d.state}"[:64], cycle_id=d.cycle_id, now=now)
+        if str(detail.get("exit_kind") or "") == "time":
+            note_unapproved_exit(ledger, t.trade_id, now)
     return []
+
+
+SWING_EXIT_MISSES_KEY = "swing_exit_misses"          # runtime: {trade id: unapproved time-stop exit slots}
+SWING_EXIT_URGENT_KEY = "swing_exit_urgent_sent"     # runtime: trade ids already alerted (once per trade)
+SWING_EXIT_URGENT_KEEP = 200
+
+
+def note_unapproved_exit(ledger: Any, trade_id: str, now: datetime) -> int:
+    """One more swing slot whose time-stop exit proposal was not approved (rejected / expired)."""
+    misses = dict(ledger.get_runtime(SWING_EXIT_MISSES_KEY, {}) or {})
+    misses[trade_id] = int(misses.get(trade_id, 0)) + 1
+    ledger.set_runtime(SWING_EXIT_MISSES_KEY, misses, now=now)
+    return misses[trade_id]
+
+
+def swing_exit_urgent(ctx: CycleContext, now: datetime) -> list[str]:
+    """S9(c): after `earnings.urgent_after_unapproved_slots` unapproved time-stop exit slots of a
+    still-open trade, ONE URGENT per trade (the private notifier; deduplicated across cycles). A
+    trade that has closed leaves the count. Never raises."""
+    try:
+        ledger = ctx.ledger
+        misses = dict(ledger.get_runtime(SWING_EXIT_MISSES_KEY, {}) or {})
+        if not misses:
+            return []
+        limit = int(ctx.policy.swing.earnings.urgent_after_unapproved_slots)
+        sent = list(ledger.get_runtime(SWING_EXIT_URGENT_KEY, []) or [])
+        open_ids = {t.trade_id: t for t in ledger.swing_trades(states=["open", "open_tp_missing", "partial",
+                                                                        "exit_pending"])}
+        flags: list[str] = []
+        for trade_id, n in sorted(misses.items()):
+            t = open_ids.get(trade_id)
+            if t is None or int(n) < limit or trade_id in sent:
+                continue
+            flags.append("swing_exit_unapproved")
+            notifier = getattr(ctx, "notifier", None)
+            if notifier is not None:
+                try:
+                    notifier.send("council swing", f"swing time-stop exit of {t.ticker} ({trade_id}) unapproved "
+                                      f"for {int(n)} swing slots: approve the newest exit proposal "
+                                      "(council-op inbox) or close it in the eToro UI", priority="urgent")
+                except Exception:  # noqa: BLE001 - an alert failure never stops the cycle
+                    flags.append("swing_exit_urgent_failed")
+                    continue
+            sent.append(trade_id)
+        closed = [k for k in misses if k not in open_ids]
+        if closed:
+            ledger.set_runtime(SWING_EXIT_MISSES_KEY, {k: v for k, v in misses.items() if k in open_ids}, now=now)
+        if sent != list(ledger.get_runtime(SWING_EXIT_URGENT_KEY, []) or []):
+            ledger.set_runtime(SWING_EXIT_URGENT_KEY, sent[-SWING_EXIT_URGENT_KEEP:], now=now)
+        return list(dict.fromkeys(flags))
+    except Exception as exc:  # noqa: BLE001
+        return [f"swing_exit_urgent_error:{type(exc).__name__}"]
+
+
+def _swing_marks(ledger: Any, snapshot: Any) -> dict[str, float]:
+    """{trade id: current rate} of the open swing trades (private; from the snapshot's positions)."""
+    marks = {p.position_id: p.close_rate for p in (snapshot.positions if snapshot is not None else [])}
+    out: dict[str, float] = {}
+    for t in ledger.swing_trades(states=["open", "open_tp_missing", "partial", "exit_pending"]):
+        px = next((marks[pid] for pid in t.position_ids if marks.get(pid)), None)
+        if px:
+            out[t.trade_id] = float(px)
+    return out
+
+
+def swing_brake_step(ctx: CycleContext, snapshot: Any, now: datetime) -> list[str]:
+    """S15 and the canary pause (`swing.brake`): compute the private S15 figure, latch either pause,
+    queue its public row and send ONE URGENT when a pause engages. Never raises (a failure leaves
+    the latched state as it was and flags `swing_brake_error:<type>`)."""
+    from council.swing import brake
+
+    try:
+        ledger, sp = ctx.ledger, ctx.policy.swing
+        state = brake.load(ledger)
+        since = brake._dt(state["s15"].get("lifted_at"))
+        pnl = brake.s15_pnl_nav(ledger.swing_trades(), _swing_marks(ledger, snapshot), now=now,
+                                window_days=int(sp.brake.window_days),
+                                declared_cost_pct_per_leg=float(sp.public_record.declared_cost_pct_per_leg),
+                                costs=brake.trade_costs(ledger), since=since)
+        verdicts = _health_state(ledger)["verdicts"]
+        new, events, flags = brake.step(state, pnl_nav=pnl, threshold=float(sp.brake.pnl_nav),
+                                        verdicts=verdicts, now=now)
+        if new != state:
+            brake.save(ledger, new, now)
+        brake.queue_rows(ledger, events, now)
+        for e in events if getattr(ctx, "notifier", None) is not None else ():
+            what = "S15 swing brake (30-day net loss)" if e.brake == "s15" else f"Skeptic canary pause ({e.cause})"
+            _urgent(ctx, "swing", f"{what} engaged: new swing entries paused, exits continue. Review, then "
+                                  f"council-op swing brake --lift{' --canary' if e.brake == 'canary' else ''} "
+                                  "--reason \"...\"")
+        return flags
+    except Exception as exc:  # noqa: BLE001 - the brake never stops the cycle; the latch stays
+        return [f"swing_brake_error:{type(exc).__name__}"]
 
 
 def swing_code_exits(ledger: Any, policy: Any, slot: datetime) -> dict[str, str]:
@@ -1670,9 +1772,14 @@ def _book_state(ledger: Any, policy: Any, *, kill_state: str, nav: Any, slot: da
         if t.created_at >= week_ago and t.state != "proposed":
             entries_7d += 1
     dd = getattr(nav, "drawdown", None) if nav is not None else None
+    from council.swing import brake
+
+    pause = brake.load(ledger)
     return R.BookState(today=slot.astimezone(NEW_YORK).date(), now=now, kill_state=kill_state, trades=trades,
                        entries_7d=entries_7d, drawdown_from_peak=dd if isinstance(dd, int | float) else None,
-                       blockers=list(ledger.swing_blockers()))
+                       blockers=list(ledger.swing_blockers()), brake_on=brake.is_on(pause, "s15"),
+                       canary_pause=brake.is_on(pause, "canary"),
+                       brake_unknown=bool(pause["s15"].get("unknown")))
 
 
 def _swing_cost_fn(ctx: CycleContext, snapshot: Any, slot: datetime) -> Any:
@@ -1844,7 +1951,8 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
                         "priced_in": verdict.priced_in if verdict is not None else None,
                         "regime": verdict.regime if verdict is not None else None,
                         "votes_for": agg.votes_for, "replicates": agg.replicates,
-                        "live": out.live})
+                        "live": out.live},
+                cost_rt_pct=v.cost_rt_pct)
             out.entries.append(entry)
         _paper_track(ctx, out, result, ref, idea, idea_id, v, slot=slot, now=now, cycle_id=cycle_id,
                      skeptic=verdict.verdict if verdict is not None else None)
@@ -2040,6 +2148,9 @@ def record_swing_decision(ledger: Any, out: SwingRun, plan: Plan, decision_id: s
                                           instrument_id=leg.instrument_id, sl_rate=leg.sl_rate,
                                           tp_rate=leg.tp_rate, time_stop_date=e.time_stop_date,
                                           detail=detail, now=now)
+                from council.swing.brake import record_trade_cost
+
+                record_trade_cost(ledger, e.trade_id, e.cost_rt_pct, now)
                 ledger.update_swing_idea(e.idea_id, status="proposed", carry_cycle=cycle_id, now=now)
             elif leg.kind in ("close", "partial_close"):
                 t = ledger.swing_trade(leg.swing_trade_id)

@@ -1013,6 +1013,38 @@ def swing_status_cmd(
     today = date.fromisoformat(asof) if asof else now.date()
     for text in swing_status(ledger, today=today, now=now).lines():
         typer.echo(text)
+    from council.swing import brake
+
+    for text in brake.status_lines(brake.load(ledger)):
+        typer.echo(text)
+
+
+@swing.command("brake")
+@operator_command("swing brake", pinned=True)
+def swing_brake_cmd(
+    lift: bool = typer.Option(False, "--lift", help="Lift the pause (after review). Without it: show the state."),
+    canary: bool = typer.Option(False, "--canary", help="The Skeptic canary pause instead of the S15 brake."),
+    reason: str = typer.Option("", "--reason", help="Why it is lifted (published: no amounts, ids or links)."),
+) -> None:
+    """The swing book's pauses (S15 brake and the Skeptic canary pause): show them, or lift one after
+    review (ledger only; the reason is published on a public ops row, never a number)."""
+    from council.clock import utcnow
+    from council.swing import brake
+
+    _root, ledger = _ledger_only()          # ledger only: no policy load, no broker, nothing sent
+    if not lift:
+        if reason or canary:
+            _refuse("--reason and --canary go with --lift")
+        for text in brake.status_lines(brake.load(ledger)):
+            typer.echo(text)
+        return
+    which = "canary" if canary else "s15"
+    try:
+        brake.lift_in_ledger(ledger, which, reason, utcnow())
+    except brake.BrakeError as exc:
+        _refuse(str(exc))
+    typer.echo(f"lifted the {'canary pause' if canary else 'S15 brake'}; the watch publishes the reason. "
+               "New swing entries resume at the next swing slot unless the pause engages again.")
 
 
 @stocks.command("onboard")

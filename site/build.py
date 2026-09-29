@@ -4230,6 +4230,9 @@ DROP_WORDS = {
     "catalyst_not_admitted": "the cited item was not in the slot's reading list",
     "catalyst_not_about_ticker": "the cited item is not about this company",
     "reproposal_limit": "proposed again too often after a missed entry: expired",
+    "brake_on": "the swing brake is on (30-day net loss limit): no new entries until the operator lifts it",
+    "brake_engaged": "new entries are paused after the Skeptic canary check failed, until the operator lifts it",
+    "brake_unknown": "the swing brake could not be checked, so no new entry",
 }
 # Swing-book cycle flags (`trace_rules.SWING_FLAG_CODES`; a test checks every key has words).
 SWING_FLAG_WORDS = {
@@ -4241,6 +4244,12 @@ SWING_FLAG_WORDS = {
     "swing_screen_missing": "no after-close movers screen for this session",
     "swing_drop:reproposal_limit": "an idea proposed again too often after a missed entry was expired",
     "swing_book_not_live": "the swing book is paper-only for now: no swing order was sent",
+    "swing_paused:s15": "the swing brake is on (30-day net loss limit): new entries paused, exits continue",
+    "swing_paused:canary": "new swing entries paused after the Skeptic canary check failed; exits continue",
+    "swing_brake_unknown": "the swing brake could not be checked this cycle, so no new swing entry",
+    "swing_brake_twice_60d": "the swing brake engaged twice in 60 days: a stop-at-once condition for review",
+    "swing_exit_unapproved": "a time-stop exit went unapproved for several swing slots; the operator was alerted",
+    "swing_canary_set_invalid": "the private canary event list was unreadable; the built-in past events were used",
 }
 
 
