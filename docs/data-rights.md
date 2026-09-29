@@ -88,7 +88,7 @@ Swing fact card fields (completed-bar layer; in the public swing idea's `facts` 
 | `dist_52w_high_pct`, `dist_52w_low_pct`, `trend`, `atr14_pct`, `sigma_daily`, `beta_60d`, `ret_5d`, `ret_20d`, `ret_60d` | Yes, rounded | `unknown_source` until Q-S10 |
 | `adv_usd_20d` | Bucket only: `<50M / 50–200M / >200M` | — |
 | `earnings_next`, `earnings_confirmed`, `earnings_last_sessions_ago` | Date and confirmed / estimated | — |
-| `rev_yoy`, `rev_accel`, `gm_chg`, `om_chg`, `filing_age_d` (SEC) | Yes, rounded | — |
+| `rev_yoy`, `rev_accel`, `gm_chg`, `om_chg`, `fundamentals_age_d`, `filing_age_d` (SEC; the cited catalyst filing) | Yes, rounded | — |
 | `catalyst_items` | SEC: form, item codes and official titles; broker feed: the `N:` id only | — |
 | `move_since_news_live_*`, `move_today_live_*` | Never | `broker_data` |
 | `short_interest_pct_float` | Never | `not_publishable` |

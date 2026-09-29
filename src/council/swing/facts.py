@@ -24,7 +24,9 @@ completed session:
 Context: 52-week distance, SMA50/200 trend, sigma_daily (20d), ATR14 %, beta_60d vs SPY, 5/20/60-day
 returns, earnings (next date, confirmed only from the broker feed; sessions since the last 2.02),
 FINRA short interest (% of shares outstanding: a lower bound of % of float, basis labelled; absent ->
-`crowding: unknown`, never `low`), SEC fundamentals, the max 60-day return correlation with open
+`crowding: unknown`, never `low`), SEC fundamentals (`fundamentals_age_d`: the latest periodic
+filing's age), `filing_age_d` (the earliest cited SEC catalyst filing's accepted time to the slot,
+days; None without a cited SEC filing), the max 60-day return correlation with open
 swing trades and core lines, and the code-attached catalyst metadata.
 
 Public vs private (`public_view`): the live layer, dollar volume (public only as a bucket), short
@@ -318,9 +320,14 @@ def build_card(
     f["short_interest_settlement"] = (short_interest.settlement_date.isoformat()
                                       if short_interest is not None else None)
     f["crowding"] = crowding(si_pct)
-    for key in ("rev_yoy", "rev_accel", "gm_chg", "om_chg", "filing_age_d"):
+    for key in ("rev_yoy", "rev_accel", "gm_chg", "om_chg", "fundamentals_age_d"):
         value = (fundamentals or {}).get(key)
         f[key] = _r(float(value)) if value is not None else None
+    # The CITED catalyst filing's age (the earliest cited SEC filing's accepted time to the slot, in
+    # days), never the company's latest periodic filing (that is `fundamentals_age_d`).
+    filings = [c.published_at for c in admitted if c.id.startswith("P:") and c.source == "sec"]
+    f["filing_age_d"] = (_r(max(0.0, (slot - min(filings)).total_seconds()) / 86400.0)
+                         if filings else None)
 
     # Correlation with open swing trades and the core lines.
     best: tuple[float, str] | None = None
@@ -349,7 +356,8 @@ def build_card(
 
 
 def sec_fundamentals(cik: int, companyfacts: Mapping[str, Any] | None, *, slot: datetime) -> dict[str, float | None]:
-    """rev_yoy, rev_accel, gm_chg, om_chg (percent / percentage points) and filing_age_d from SEC
+    """rev_yoy, rev_accel, gm_chg, om_chg (percent / percentage points) and fundamentals_age_d (the
+    latest visible periodic filing's age, days; not the catalyst's `filing_age_d`) from SEC
     companyfacts through the live rank's own computation (filings dated before the slot's UTC
     date), or {} without companyfacts."""
     if not companyfacts:
@@ -369,6 +377,6 @@ def sec_fundamentals(cik: int, companyfacts: Mapping[str, Any] | None, *, slot: 
         v = feats.get(col)
         out[key] = float(v) * 100.0 if v is not None and pd.notna(v) and math.isfinite(float(v)) else None
     latest = feats.get("latest_available_at")
-    out["filing_age_d"] = (float((day - pd.Timestamp(latest)).days)
+    out["fundamentals_age_d"] = (float((day - pd.Timestamp(latest)).days)
                            if latest is not None and pd.notna(latest) else None)
     return out

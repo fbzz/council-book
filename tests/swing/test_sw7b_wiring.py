@@ -70,6 +70,10 @@ def test_the_cycle_keeps_the_private_swing_record(swing_run):
     assert idea["stage"] == "risk" and idea["drop_code"] == "swing_book_paper_only"     # accepted, paper-only
     assert idea["carried_from"] == []
     assert not [f for f in rec["flags"] if f.startswith(("swing_error", "swing_record_error"))], rec["flags"]
+    # the drop code is persisted on the idea row and on its paper row (codes only)
+    assert ctx.ledger.swing_idea(idea["idea_id"])["record"]["drop_code"] == "swing_book_paper_only"
+    papers = [p for p in ctx.ledger.paper_trades() if p["origin_cycle"] == out.cycle_id]
+    assert papers and all(p["record"]["drop_code"] == "swing_book_paper_only" for p in papers)
 
 
 def test_the_swing_roles_calls_join_the_cycle_calls_once(swing_run):

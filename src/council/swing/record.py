@@ -23,6 +23,7 @@ Pure except `origin_texts` (reads the private capture). No broker, no network.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,27 @@ def stage_of(outcome: Any, verdict: Any, *, paper_only: bool, entered: bool, acc
     if stage == "pm":
         return "pm", code
     return "pm", code
+
+
+_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9_:.\-]{0,63}$")
+
+
+def safe_code(code: Any) -> str | None:
+    """A drop code as stored on ledger rows: a code token only (never free text or a value)."""
+    if code is None:
+        return None
+    return str(code) if _CODE.match(str(code)) else "unknown"
+
+
+def drop_code_of(result: Any, ref: str, *, accepted: bool, rule_code: str | None, live: bool) -> str | None:
+    """The idea's seal-time drop code (`stage_of`) for the ledger rows (swing_ideas / paper_trades)."""
+    entered = ({a.ref for a in result.entries()} if getattr(result, "aggregate", None) is not None else set())
+    outcome = next((o for o in getattr(result, "outcomes", []) if o.ref == ref), None)
+    paper_only = any(i.ref == ref for i in getattr(result, "paper_only", []))
+    idea = result.ideas.get(ref)
+    _, drop = stage_of(outcome, getattr(idea, "verdict", None), paper_only=paper_only, entered=ref in entered,
+                       accepted=accepted, rule_code=rule_code, live=live)
+    return safe_code(drop)
 
 
 def swing_record(
@@ -194,4 +216,4 @@ def origin_texts(state_dir: Path, cycles: Iterable[str]) -> dict[str, list[str] 
     return out
 
 
-__all__ = ["SCHEMA", "origin_texts", "stage_of", "swing_record"]
+__all__ = ["SCHEMA", "drop_code_of", "origin_texts", "safe_code", "stage_of", "swing_record"]

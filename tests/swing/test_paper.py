@@ -101,3 +101,11 @@ def test_track_and_settle_through_the_ledger(tmp_path):
     assert all(r["r_declared"] == pytest.approx((-0.05 - 0.025) / 0.05) for r in rows)
     assert {r["skeptic_verdict"] for r in rows} == {"reject", "pass"}
     assert ledger.paper_trades(status="open") == []
+
+
+def test_drop_codes_on_ledger_rows_are_code_tokens_only():
+    from council.swing.record import safe_code
+
+    assert safe_code(None) is None
+    assert safe_code("not_best_3") == "not_best_3" and safe_code("S6:max_new_7d") == "S6:max_new_7d"
+    assert safe_code("chased 4.2% since news") == "unknown" and safe_code("") == "unknown"

@@ -1810,11 +1810,24 @@ def _swing_cost_fn(ctx: CycleContext, snapshot: Any, slot: datetime) -> Any:
     return cost
 
 
-def _swing_ledger_idea(ledger: Any, cycle_id: str, idea: Any, status: str, now: datetime) -> str:
+def _swing_drop_code(result: Any, ref: str, *, accepted: bool, rule_code: str | None, live: bool) -> str | None:
+    """The idea's seal-time drop code (a code only), or None when it cannot be derived."""
+    from council.swing.record import drop_code_of
+
+    try:
+        return drop_code_of(result, ref, accepted=accepted, rule_code=rule_code, live=live)
+    except Exception:  # noqa: BLE001 - a missing drop code never stops the cycle
+        return None
+
+
+def _swing_ledger_idea(ledger: Any, cycle_id: str, idea: Any, status: str, now: datetime, *,
+                       drop_code: str | None = None) -> str:
     """The ledger id of one Scout idea: a pending idea on the same ticker and side is carried
-    forward (its record rewritten, `carry_cycle` = this cycle), else a new id."""
+    forward (its record rewritten, `carry_cycle` = this cycle), else a new id. `drop_code`: the
+    seal-time drop code (codes only, never a number or text)."""
     rec = {"ref": idea.ref, "setup": idea.idea.setup, "stop_pct": idea.idea.stop_pct,
-           "target_pct": idea.idea.target_pct, "time_stop_days": idea.idea.time_stop_days}
+           "target_pct": idea.idea.target_pct, "time_stop_days": idea.idea.time_stop_days,
+           "drop_code": drop_code}
     for row in ledger.swing_ideas(status="pending"):
         if row["ticker"] == idea.ticker and row["side"] == idea.idea.side:
             ledger.update_swing_idea(row["idea_id"], status=status, record=rec, carry_cycle=cycle_id, now=now)
@@ -1939,7 +1952,8 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
             out.flags.append(REPROPOSAL_FLAG)
             rule_codes[ref] = REPROPOSAL_CODE
         status = "accepted" if v is not None else "dropped"
-        idea_id = _swing_ledger_idea(ledger, cycle_id, idea, status, now)
+        drop = _swing_drop_code(result, ref, accepted=v is not None, rule_code=rule_codes.get(ref), live=out.live)
+        idea_id = _swing_ledger_idea(ledger, cycle_id, idea, status, now, drop_code=drop)
         idea_ids[ref] = idea_id
         verdict = idea.verdict.verdict if idea.verdict is not None else None
         if v is not None:
@@ -1965,7 +1979,7 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
                 cost_rt_pct=v.cost_rt_pct)
             out.entries.append(entry)
         _paper_track(ctx, out, result, ref, idea, idea_id, v, slot=slot, now=now, cycle_id=cycle_id,
-                     skeptic=verdict.verdict if verdict is not None else None)
+                     skeptic=verdict.verdict if verdict is not None else None, drop_code=drop)
     try:                                # PRIVATE (ledger): the slot's full chain (`swing.record`)
         rec.extras["swing"] = _swing_slot_record(ctx, out, result, inputs, accepted=[r for r in ok if r not in rule_codes],
                                                  rule_codes=rule_codes, idea_ids=idea_ids, cycle_id=cycle_id)
@@ -2065,7 +2079,8 @@ def _paper_group(result: Any, ref: str, idea: Any, accepted: bool, live: bool) -
 
 
 def _paper_track(ctx: CycleContext, out: SwingRun, result: Any, ref: str, idea: Any, idea_id: str, v: Any, *,
-                 slot: datetime, now: datetime, cycle_id: str, skeptic: str | None) -> None:
+                 slot: datetime, now: datetime, cycle_id: str, skeptic: str | None,
+                 drop_code: str | None = None) -> None:
     """SB12: every idea group is paper-tracked with the Skeptic's verdict (none without a reference
     price: flag `paper_no_reference`)."""
     from council.clock import NEW_YORK
@@ -2090,7 +2105,7 @@ def _paper_track(ctx: CycleContext, out: SwingRun, result: Any, ref: str, idea: 
                         time_stop_day=add_sessions(day, days))
     try:
         out.paper.append(paper.track(ctx.ledger, p, origin_cycle=cycle_id, opened_at=now,
-                                     skeptic_verdict=skeptic))
+                                     skeptic_verdict=skeptic, drop_code=drop_code))
     except Exception as exc:  # noqa: BLE001 - a duplicate paper row (re-run slot) is not an error
         out.flags.append(f"paper_track_error:{type(exc).__name__}")
 

@@ -57,7 +57,8 @@ REACTION_FIELDS = frozenset({
 # calendar, positioning): the only card facts a pass under the sigma prior may lean on. Anything
 # price-derived (trend, 52-week distances, momentum, vol, beta, correlation) is already in the move.
 NON_PRICE_FIELDS = frozenset({
-    "rev_yoy", "rev_accel", "gm_chg", "om_chg", "filing_age_d", "earnings_next", "earnings_confirmed",
+    "rev_yoy", "rev_accel", "gm_chg", "om_chg", "filing_age_d", "fundamentals_age_d", "earnings_next",
+    "earnings_confirmed",
     "earnings_last_sessions_ago", "short_interest_pct_float", "days_to_cover",
 })
 # Close-layer fields whose bucket change makes a parked `wait` idea material again.

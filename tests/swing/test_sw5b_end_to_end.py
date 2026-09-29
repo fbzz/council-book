@@ -201,6 +201,9 @@ def test_an_unknown_drawdown_blocks_every_entry(world, fake, fclock, ledger, pol
     out = asyncio.run(run_swing(swing_ctx(ledger, policy, read_client, world, slot), SimpleNamespace(cycle_id=CYCLE),
                                 snapshot=snap, kill_state="NORMAL", nav=None, slot=slot, now=now))
     assert out.entries == [] and "swing_drop:S17:drawdown_unknown" in out.flags
+    (idea,) = ledger.swing_ideas()
+    assert idea["record"]["drop_code"] == "S17:drawdown_unknown"
+    assert [p["record"]["drop_code"] for p in ledger.paper_trades()] == ["S17:drawdown_unknown"]
 
 
 def test_off_a_swing_slot_nothing_runs(world, fake, fclock, ledger, policy, read_client):

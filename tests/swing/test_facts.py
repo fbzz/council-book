@@ -161,5 +161,19 @@ def test_sec_fundamentals_from_the_trimmed_fixture():
     doc = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "sec" / "companyfacts_trimmed.json")
                      .read_text())["companies"]["MSFT"]
     out = facts.sec_fundamentals(int(doc["cik"]), doc["companyfacts"], slot=SLOT)
-    assert set(out) == {"rev_yoy", "rev_accel", "gm_chg", "om_chg", "filing_age_d"}
-    assert out["rev_yoy"] == pytest.approx(18.53, abs=0.01) and out["filing_age_d"] > 365
+    assert set(out) == {"rev_yoy", "rev_accel", "gm_chg", "om_chg", "fundamentals_age_d"}
+    assert out["rev_yoy"] == pytest.approx(18.53, abs=0.01) and out["fundamentals_age_d"] > 365
+
+
+def test_filing_age_is_the_cited_catalyst_filings_age_not_the_latest_periodic_filing():
+    """Regression (paper cycle 2026-09-29T1840Z): an 8-K accepted on the slot day showed
+    `filing_age_d` 41-95, the company's latest 10-Q age from companyfacts."""
+    same_day = SLOT - timedelta(hours=3)
+    today_8k = NewsItem(**{**SEC_ITEM.model_dump(), "published_at": same_day, "available_at": same_day})
+    card = _card(catalysts=[today_8k, FEED_ITEM], fundamentals={"fundamentals_age_d": 41.0})
+    assert card.fields["filing_age_d"] == 0.12 and card.fields["fundamentals_age_d"] == 41.0
+    # the earliest cited SEC filing, by its accepted time (never the feed item)
+    older = NewsItem(**{**SEC_ITEM.model_dump(), "id": public_news_id("sec", "0000000000-26-000002"),
+                        "published_at": SLOT - timedelta(days=2), "available_at": SLOT - timedelta(days=2)})
+    assert _card(catalysts=[today_8k, older]).fields["filing_age_d"] == 2.0
+    assert _card(catalysts=[FEED_ITEM]).fields["filing_age_d"] is None
