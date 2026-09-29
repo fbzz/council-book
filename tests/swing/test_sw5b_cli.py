@@ -65,5 +65,7 @@ def test_swing_commands_are_denied_to_agents_identically():
 
 
 def test_approve_takes_skip_refs():
-    res = CliRunner().invoke(cli.app, ["approve", "--help"])
-    assert "--skip" in res.output
+    import typer.main
+
+    approve = typer.main.get_command(cli.app).commands["approve"]   # not --help text: CI colours it
+    assert any("--skip" in p.opts for p in approve.params)
