@@ -5289,6 +5289,167 @@ def core_line(c: PublicCycleV1, lines: Lines) -> dict[str, Any]:
             "more": max(0, len(weights) - 6), "moved": len(moved)}
 
 
+# ------------------------------------------------------------------------------ the Runs page
+# One merged list of every council meeting (paper, rehearsal, live), newest first, as compact cards.
+# Plain words only: "unreadable reply" (never "parse fail"), "2/3", "yes / no", whole percents.
+PLAIN_FAIL = {   # failed call status -> (one, many)
+    "parse_fail": ("unreadable reply", "unreadable replies"), "timeout": ("timeout", "timeouts"),
+    "transport": ("service error", "service errors"), "skipped": ("skipped call", "skipped calls"),
+}
+PLAIN_STATUS = {"parse_fail": "unreadable reply", "timeout": "timed out", "transport": "service error"}
+SWING_ROLE_SLUG = {"scout": "scout", "skeptic": "skeptic", "swing_bull": "bull", "swing_bear": "bear", "swing_pm": "pm"}
+_LIVE_STAGE_STEP = {"dropped_by_code": 1, "skeptic": 2, "waiting": 2, "debate": 3, "pm": 4, "risk": 5, "missed": 5,
+                    "expired": 5}
+
+
+def council_health(calls: list[PublicCall], run_href: str = "") -> dict[str, Any]:
+    """One line on the meeting's model agents ("7 agents · 1 unreadable reply") and one row per agent
+    for the <details>. An agent is a CALL_AGENT name (the bull's opening and rebuttal are two)."""
+    groups: dict[str, list[tuple[PublicCall, dict[str, Any]]]] = {}
+    for x in calls:
+        groups.setdefault(CALL_AGENT.get(x.role, (x.role.replace("_", " ").capitalize(),))[0], []).append(
+            (x, call_view(x)))
+    agents, fails = [], {}
+    for name, rows in groups.items():
+        role = rows[0][0].role
+        views = [v for _, v in rows]
+        st = status_of(views)
+        bad = [v for v in views if v["failed"]]
+        for v in bad:
+            fails[v["status"]] = fails.get(v["status"], 0) + 1
+        word = PLAIN_STATUS.get(st["key"], st["word"])
+        if st["key"] == "partial":
+            kinds = {v["status"] for v in bad}
+            what = PLAIN_FAIL.get(kinds.pop(), ("failed call", "failed calls")) if len(kinds) == 1 else (
+                "failed call", "failed calls")
+            word = f"{len(bad)} {what[0] if len(bad) == 1 else what[1]} of {len(views)}, the rest ok"
+        slug = ROLE_AGENT.get(role) or SWING_ROLE_SLUG.get(role, "")
+        anchor = CALL_AGENT.get(role, ("", "", ""))[2]
+        href = (f"{run_href}#{anchor}" if run_href and anchor else f"agents/{slug}.html" if slug else "")
+        agents.append({"name": name, "accent": CALL_AGENT.get(role, ("", "neutral"))[1], "word": word,
+                       "css": st["css"], "calls": len(views), "href": href})
+    issues = [f"{n} {PLAIN_FAIL.get(k, (k.replace('_', ' '), k.replace('_', ' ')))[0 if n == 1 else 1]}"
+              for k, n in sorted(fails.items(), key=lambda t: -t[1])]
+    if not agents:
+        summary = "no model call recorded"
+    else:
+        summary = " · ".join([plural(len(agents), "agent")] + (issues or ["every reply usable"]))
+    return {"summary": summary, "ok": not issues, "agents": agents, "calls": len(calls)}
+
+
+def _agree_words(c: PublicCycleV1) -> dict[str, Any] | None:
+    """The manager attempts agreeing on the line where they agreed least: {"n": 2, "of": 3}."""
+    values = list(c.pm.agreement_pct.values())
+    valid = c.pm.valid_replicates
+    if not values or not valid:
+        return None
+    low = min(values)
+    for of in dict.fromkeys((valid, len(c.pm.replicates))):    # the share's denominator, as a count
+        n = low * of / 100.0
+        if of and abs(n - round(n)) < 0.02:
+            return {"text": f"{round(n)}/{of}", "full": round(n) == of}
+    return {"text": f"{low:.0f}%", "full": False}
+
+
+def _solo_agrees(c: PublicCycleV1) -> bool | None:
+    control = c.single_agent
+    if control is None or not control.levels or not c.pm.levels:
+        return None
+    common = set(control.levels) & set(c.pm.levels)
+    return all(abs(control.levels[k] - c.pm.levels[k]) < 1e-9 for k in common)
+
+
+def _core_words(cl: dict[str, Any]) -> str:
+    verb = cl["verb"]
+    if cl["moved"]:                     # building from cash re-weights every line it buys
+        return f"core: {plural(cl['moved'], 'line')} re-weighted"
+    return "core: no decision" if verb == "no risk decision" else f"core: {verb}"
+
+
+def _late_words(c: PublicCycleV1) -> str:
+    if c.status == "missed":
+        return f"ran after its slot had passed ({fmt_late(c.late_by_min)} late, a catch-up)" if c.late_by_min else (
+            "ran after its slot had passed (a catch-up)")
+    return f"ran {fmt_late(c.late_by_min)} late" if c.late_by_min else ""
+
+
+def _paper_moves(c: PublicCycleV1, lines: Lines) -> list[str]:
+    r = c.risk
+    if r is None:
+        return []
+    moved = [(k, r.base_x.get(k, 0.0), r.final_x.get(k, 0.0)) for k in lines.sort(set(r.final_x) | set(r.base_x))
+             if abs(r.final_x.get(k, 0.0) - r.base_x.get(k, 0.0)) > EPS]
+    parts = [f"{ticker(k)} {fmt_pct1(b * 100.0)} → {fmt_pct1(a * 100.0)}" for k, b, a in moved[:4]]
+    if len(moved) > 4:
+        parts.append(f"{len(moved) - 4} more")
+    return parts
+
+
+def meeting_cards(view: JournalView, lines: Lines, runs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """`meetings()` with what a Runs card shows: the verdict sentence, the idea closest to trading and
+    where it stopped, what changed in the core, manager agreement, the solo agent, the council's
+    health, lateness and the seal."""
+    live = {cv.doc.cycle_id: cv for cv in view.cycles}
+    out = []
+    for m in meetings(view, lines):
+        card = dict(m)
+        closest, entered = None, m["chosen"] != "no trade"
+        if m["kind"] == "paper":
+            doc = view.paper_cycles.get(m["decision_no"])
+            c = doc.core if doc is not None else None
+            has_swing = doc is not None and doc.swing is not None
+            if doc is not None:
+                dv = decision_view(doc, m["verified"], lines)
+                bc = dv["banner"]["closest"]
+                if bc is not None:
+                    closest = {"ticker": bc["i"].ticker, "side": bc["i"].side, "where": bc["stop_label"],
+                               "why": bc["reason"],
+                               "votes": f"{bc['votes'][0]}/{bc['votes'][1]}" if bc["votes"] and bc["stop"] >= 4 else "",
+                               "href": f"{m['decision_href']}#{bc['anchor']}"}
+            changed = _paper_moves(c, lines) if c is not None else []
+            card["seal"] = "verified" if m["verified"] else "sealed"
+            card["decision"] = None
+        else:
+            cv = live[m["cycle_id"]]
+            c = cv.doc
+            has_swing = c.swing is not None
+            ideas = list(c.swing.ideas) if c.swing else []
+            if ideas and not entered:
+                best = max(ideas, key=lambda i: _LIVE_STAGE_STEP.get(i.stage_reached, 1))
+                step = _LIVE_STAGE_STEP.get(best.stage_reached, 1)
+                closest = {"ticker": best.ticker, "side": best.side, "where": JOURNEY_STEPS[step][1],
+                           "why": SWING_STAGE.get(best.stage_reached, (best.stage_reached.replace("_", " "),))[0],
+                           "votes": "", "href": f"{m['run_href']}#swing-ideas"}
+            changed = [runs[c.cycle_id]["change_words"]] if c.cycle_id in runs else []
+            card["seal"] = "verified" if cv.verified else "sealed" if cv.commitment else "none"
+            outcome = cv.human_outcome
+            card["decision"] = {"chip": cv.chip, "href": f"{m['run_href']}#a-decision",
+                                "words": "" if cv.rehearsal or outcome in ("none", "pending", "no_action")
+                                else outcome.replace("_", " ")}
+            card["mode_chip"] = cv.mode_chip
+        swing = (f"Entered {m['chosen']}" if entered else "No swing trade") if has_swing or entered else ""
+        core = _core_words(core_line(c, lines)) if c is not None else ""
+        card["verdict"] = " · ".join(x for x in (swing, core) if x) if swing else (core[:1].upper() + core[1:])
+        card["has_swing"] = has_swing
+        card["closest"] = closest
+        card["changed"] = changed
+        card["agree"] = _agree_words(c) if c is not None else None
+        card["solo"] = _solo_agrees(c) if c is not None else None
+        card["late"] = _late_words(c) if c is not None else ""
+        card["health"] = council_health(list(c.calls) if c is not None else [], m["run_href"])
+        card["anchor"] = f"m-{m['kind']}-{m['cycle_id']}"
+        out.append(card)
+    return out
+
+
+def missed_slots(view: JournalView) -> list[dict[str, str]]:
+    """Slots on the operations log that produced no published meeting (skipped, aborted, halted)."""
+    shown = {cv.doc.cycle_id for cv in view.cycles} | {d.cycle_id for d in view.paper_cycles.values()}
+    rows = [r for r in view.ops if r.cycle_id not in shown and r.status not in ("on_time", "late", "missed")]
+    rows.sort(key=lambda r: r.slot, reverse=True)
+    return [{"slot": r.slot, "words": STATUS_WORDS.get(r.status, r.status.replace("_", " "))} for r in rows]
+
+
 def paper_home(view: JournalView, lines: Lines, geo: Geometry | None = None) -> dict[str, Any] | None:
     if view.paper_latest is None and not view.paper_rows:
         return None
@@ -6043,8 +6204,8 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
            cycles_count=len(view.cycles), ops_count=len(view.ops), ops_on_time=ops_on_time,
            chart=chart, chart_narrow=chart_narrow, points=view.performance[-10:][::-1],
            controls=[sr for sr in CONTROL_SERIES if any(x["key"] == sr[0] for x in (chart or {}).get("series", []))])
-    render("cycles.html.j2", "cycles.html", "", "runs",
-           cycles=[(cv, runs[cv.doc.cycle_id], transcripts[cv.doc.cycle_id]) for cv in view.cycles])
+    render("cycles.html.j2", "cycles.html", "", "runs", meetings=meeting_cards(view, lines, runs),
+           gaps=missed_slots(view))
     for cv in view.cycles:
         render("cycle.html.j2", f"cycles/{cv.doc.cycle_id}.html", "../", "runs", cv=cv, c=cv.doc,
                run=runs[cv.doc.cycle_id], tr=transcripts[cv.doc.cycle_id],

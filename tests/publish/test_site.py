@@ -114,7 +114,7 @@ def test_builds_with_zero_cycles(site, tmp_path):
     assert set(pages) == (PAGES | set(REDIRECTS) | {f"agents/{slug}.html" for slug in AGENT_SLUGS}
                           | {f"assets/{k}.html" for k in LINE_IDS})        # a page per line of the policy
     assert "AWAITING ACCOUNT" in pages["index.html"]
-    assert "No runs yet" in pages["cycles.html"] and "No runs yet" in pages["index.html"]
+    assert "No meetings yet" in pages["cycles.html"] and "No runs yet" in pages["index.html"]
     assert "Nothing held yet" in pages["index.html"] and "No performance data yet" in pages["index.html"]
     for title in ("What is it?", "Who&#39;s on the council?", "What can code stop?", "Who presses the button?",
                   "How do we know it isn&#39;t hindsight?", "What can this never prove?"):
@@ -376,7 +376,8 @@ def test_cycle_page_renders_agreement_control_and_fingerprint(site, tmp_path, re
     assert "Material facts" in page and doc.material_fingerprint[:12] in page
     assert "10-year Treasury yield · 20-day change, 30 Sep: −12.5 bps" in page
     assert 'title="M:DGS10.chg20@2026-09-30"' in page
-    assert "66.67%" in pages["cycles.html"] and "differs" in pages["cycles.html"]
+    assert "Manager attempts agreeing <strong class=\"n\">2/3</strong>" in pages["cycles.html"]
+    assert "Solo agent agreed? <strong>no</strong>" in pages["cycles.html"]
 
 
 def test_status_names_a_sealed_but_unrevealed_last_cycle(site, tmp_path, record):
@@ -389,7 +390,7 @@ def test_status_names_a_sealed_but_unrevealed_last_cycle(site, tmp_path, record)
     index = _pages(out)["index.html"]
     assert "PROPOSED" in index and "The run of 1 Oct 2026, 14:40 UTC is sealed" in index
     assert "1 proposal awaiting the operator" in index and "revealed after the decision" in index
-    assert "No runs yet" in _pages(out)["cycles.html"]
+    assert "No meetings yet" in _pages(out)["cycles.html"]
 
 
 # ------------------------------------------------------------------------------ a rehearsal cycle
@@ -411,7 +412,8 @@ def test_home_with_a_rehearsal_cycle_says_so(rehearsal_site):
     assert "Last run 1 Oct 2026, 14:52 UTC (12 min after its 14:40 UTC slot) · page built 17:45 UTC" in home
     assert " h ago" not in home and "data-last-cycle" not in home
     assert "tracked from go-live" in home                                # no drawdown in rehearsal
-    assert "REHEARSAL" in pages["cycles.html"]
+    assert "REHEARSAL" in pages["cycles.html"] and "One meeting so far" in pages["cycles.html"]
+    assert "Open transcript" in pages["cycles.html"] and "Open decision" not in pages["cycles.html"]
     run = pages[f"cycles/{CYCLE_ID}.html"]
     assert "REHEARSAL" in run and "Rehearsal — no broker account is connected yet" in run
     assert leakscan.scan_paths([out], canaries=CANARIES) == []
@@ -673,7 +675,7 @@ def test_holdings_are_filtered_by_asset_class_without_script(rehearsal_site):
 def test_phone_tables_stack_and_scroll_regions_are_focusable(rehearsal_site):
     _, pages = rehearsal_site
     run = pages[f"cycles/{CYCLE_ID}.html"]
-    for name, marker in (("index.html", 'class="runlist"'), ("cycles.html", 'class="wide stack runs"'),
+    for name, marker in (("index.html", 'class="runlist"'), ("cycles.html", 'class="mtg-list"'),
                          (f"cycles/{CYCLE_ID}.html", 'class="wide stack changes"'), ("rules.html", 'class="rule-grid"')):
         assert marker in pages[name], name
     assert 'data-label="After risk"' in run and 'data-label="What changed"' in pages["index.html"]

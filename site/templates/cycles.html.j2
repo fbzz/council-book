@@ -1,54 +1,95 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
+{% import "paper_macros.html.j2" as pm %}
 {% block title %}Runs{% endblock %}
 {% block toc %}
-{{ m.toc_item("list", "All runs", "proposed") }}
-{{ m.toc_item("read", "How to read a run", "code") }}
+{{ m.toc_item("list", "Every meeting", "pm") }}
+{{ m.toc_item("read", "How to read a run", "neutral") }}
 {% endblock %}
 {% block hero %}
 <header class="hero">
   <p class="eyebrow">Runs</p>
-  <h1>Every council run, newest first</h1>
-  <p class="lede">The council meets every four hours. A run is revealed here once its decision is final; its seal was published before any order could be approved.</p>
+  <h1>Every council meeting, newest first</h1>
+  <p class="lede">The council meets on a fixed schedule. Paper meetings use real data and the real agents but trade nothing; rehearsals ran the live pipeline before a broker account was connected; live meetings will follow. Every meeting is sealed before anyone sees its outcome.</p>
 </header>
 {% endblock %}
-{% block main %}
 
-{% call m.section("list", 1, "All runs", "proposed") %}
-{% if cycles %}
-{{ m.wrap_open("All runs") }}
-<table class="wide stack runs">
-  <thead><tr><th>When</th><th>What changed</th><th>Agents</th><th>Decision</th><th class="n">Agreement</th><th>Control</th><th>Seal</th></tr></thead>
-  <tbody>
-  {% for cv, r, tr in cycles %}
-  {% set c = cv.doc %}
-  <tr>
-    <td class="when"><a href="cycles/{{ c.cycle_id }}.html">{{ c.slot | when }}</a><br>{{ m.chip(cv.mode_chip) }}{% if c.late_by_min %} <span class="muted small">ran {{ c.late_by_min | late }} late</span>{% endif %}</td>
-    <td class="text push" data-label="What changed">{{ r.change_words }}</td>
-    <td data-label="Agents">{{ m.agent_strip(tr, "cycles/" ~ c.cycle_id ~ ".html") }}</td>
-    <td data-label="Decision">{{ m.chip(cv.chip) }}{% if cv.human_outcome not in ("none", "pending", "no_action") %}<br><span class="muted small">{{ cv.human_outcome | replace("_", " ") }}</span>{% endif %}</td>
-    <td class="n" data-label="Agreement">{% if cv.min_agreement_pct is not none %}<span title="{{ cv.min_agreement_pct | pct }} of valid attempts">{{ agreement_words(cv.min_agreement_pct, c.pm.valid_replicates) }}</span>{% else %}—{% endif %}</td>
-    <td data-label="Control">{% if cv.control_agrees is none %}—{% elif cv.control_agrees %}same{% else %}<strong>differs</strong>{% endif %}</td>
-    <td data-label="Seal">{% if cv.verified %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span>{% elif cv.commitment %}<span class="chip state-sealed">SEALED</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>NO SEAL</span>{% endif %}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
-<p class="small muted">Agents: each language-model agent of the run with its status (✓ ok, ✗ unreadable reply or error, ◷ timeout, ! partly failed, – not run); each opens that agent's part of the run. Agreement: of the valid portfolio-manager attempts, how many made the same call as the one used, on the line where they agreed least. Control: whether one agent without analysts or debate landed on the same book.</p>
+{% macro card(x) %}
+<li class="mtg" id="{{ x.anchor }}">
+  <p class="mtg-head">
+    {% if x.kind == "paper" %}{{ pm.badge() }}{% else %}{{ m.chip(x.mode_chip) }}{% endif %}
+    <span class="mtg-when">{{ x.slot | when }}</span>
+    {% if x.decision_no %}<span class="mtg-no">Decision #{{ x.decision_no }}</span>{% endif %}
+    {% if x.seal == "verified" %}<span class="chip state-executed" title="The published file re-hashes to the commitment sealed before the outcome"><span aria-hidden="true">✓ </span>VERIFIED</span>{% elif x.seal == "sealed" %}<span class="chip state-sealed" title="Sealed before the outcome; not yet re-checked">SEALED</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>NO SEAL</span>{% endif %}
+  </p>
+  {% if x.late %}<p class="mtg-late small"><span aria-hidden="true">◷ </span>{{ x.late | cap }}.</p>{% endif %}
+  <h3 class="mtg-verdict">{{ x.verdict }}</h3>
+  {% if x.has_swing %}
+  <p class="mtg-closest">{{ plural(x.ideas, "idea") | cap }} reviewed.{% if x.closest %}{% set c = x.closest %} Closest to trading: <a class="tkr" href="{{ c.href }}">{{ c.ticker | ticker }}</a> {{ pm.side(c.side) }} — stopped at <strong>{{ c.where }}</strong>{% if c.why %} ({{ c.why }}){% endif %}{% if c.votes %}, after the manager voted {{ c.votes }} to enter{% endif %}.{% elif not x.ideas %} The Scout pitched no swing idea.{% endif %}</p>
+  {% endif %}
+  {% if x.changed %}<p class="mtg-changed"><span class="mtg-k">{{ "What changed" if x.kind == "paper" else "Against the mechanical reference" }}</span> {% for part in x.changed %}<span{% if x.kind == "paper" %} class="nowrap"{% endif %}>{{ part }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+  <ul class="mtg-facts">
+    {% if x.agree %}<li>Manager attempts agreeing <strong class="n">{{ x.agree.text }}</strong></li>{% endif %}
+    {% if x.solo is not none %}<li>Solo agent agreed? <strong>{{ "yes" if x.solo else "no" }}</strong></li>{% endif %}
+    {% if x.decision %}<li>Decision <a class="mtg-dec" href="{{ x.decision.href }}" title="Open the decision part of this run">{{ m.chip(x.decision.chip) }}</a>{% if x.decision.words %} <span class="muted">{{ x.decision.words }}</span>{% endif %}</li>{% endif %}
+  </ul>
+  <details class="jd mtg-health accent-pm">
+    <summary>{{ m.mark({"css": "ok" if x.health.ok else "fallback", "word": x.health.summary}) }}</summary>
+    <div class="jd-body">
+    {% if x.health.agents %}
+    <ul class="mtg-agents">
+      {% for a in x.health.agents %}<li><span class="dot accent-{{ a.accent }}" aria-hidden="true"></span>{% if a.href %}<a href="{{ a.href }}">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %} <span class="mtg-aw mtg-{{ a.css }}">{{ a.word }}</span> <span class="muted small">{{ plural(a.calls, "call") }}</span></li>{% endfor %}
+    </ul>
+    {% else %}<p class="small muted">No model call was recorded for this meeting.</p>{% endif %}
+    </div>
+  </details>
+  <p class="mtg-links">
+    {% if x.decision_href %}<a class="mtg-btn" href="{{ x.decision_href }}">Open decision #{{ x.decision_no }} <span aria-hidden="true">→</span></a>{% endif %}
+    {% if x.run_href %}<a class="mtg-btn" href="{{ x.run_href }}">Open transcript <span aria-hidden="true">→</span></a>{% endif %}
+  </p>
+</li>
+{% endmacro %}
+
+{% block main %}
+{% call m.section("list", 1, "Every meeting", "pm") %}
+{% if meetings %}
+{% set n_paper = meetings | selectattr("kind", "equalto", "paper") | list | length %}
+{% set n_reh = meetings | selectattr("kind", "equalto", "rehearsal") | list | length %}
+{% set n_live = meetings | selectattr("kind", "equalto", "live") | list | length %}
+<p class="mtg-count">{% if meetings | length == 1 %}One meeting so far; the next one appears here once it is sealed and published.{% else %}{{ meetings | length }} meetings so far: {% set parts = [] %}{% if n_paper %}{% set _ = parts.append(n_paper ~ " paper") %}{% endif %}{% if n_reh %}{% set _ = parts.append(plural(n_reh, "rehearsal")) %}{% endif %}{% if n_live %}{% set _ = parts.append(n_live ~ " live") %}{% endif %}{{ parts | join(", ") }}.{% endif %}</p>
+<ol class="mtg-list" aria-label="Every meeting, newest first">
+{% for x in meetings %}{{ card(x) }}{% endfor %}
+</ol>
+{% if gaps %}
+<p class="mtg-gaps small"><span aria-hidden="true">◷ </span><strong>Slots without a meeting:</strong> {% for g in gaps %}{{ g.slot | when }} ({{ g.words }}){% if not loop.last %} · {% endif %}{% endfor %}.</p>
+{% endif %}
+<p class="small muted">Manager attempts agreeing: of the valid core-manager attempts, how many made the same call, on the line where they agreed least. Solo agent: one agent without analysts or debate, run beside the council as a control; "yes" means it landed on the same core weights. Sizes and moves are shares of the portfolio.</p>
 {% else %}
-{{ m.empty("No runs yet", "No run has been published. The first one will appear here.") }}
+{{ m.empty("No meetings yet", "No meeting has been published. The first one will appear here once it is sealed.") }}
 {% endif %}
 {% endcall %}
 
-{% call m.section("read", 2, "How to read a run", "code") %}
-<ol class="steps">
-  <li><strong>At a glance</strong> — three sentences on what happened, and a diagram of the nine steps; each step opens its agent.</li>
-  <li><strong>What changed</strong> — only the lines where the council or the risk engine moved away from the mechanical reference, and why.</li>
-  <li><strong>The agents, in the order they ran</strong> — the code officers (data, reference, volatility, events), the news and macro analysts, the bull's opening, the bear's answer, the bull's rebuttal, the manager's three attempts, the single-agent control, the auditor, the risk engine and the cost desk. Each shows its status, time and tokens, its prompt, what it saw, what it said (the full argument, every claim with its evidence), and what happened to it.</li>
-  <li><strong>Decision</strong> — approved, rejected or expired, and what was filled. The run is sealed before the decision, so the outcome is published separately.</li>
-  <li><strong>Facts the council saw</strong> — every fact of the pack with its value where the data rights allow it; each evidence chip links here.</li>
-  <li><strong>Seal and call log</strong> — the commitment and every model call in order, with what each failure means.</li>
-</ol>
+{% call m.section("read", 2, "How to read a run", "neutral") %}
+<p>A meeting opens on one of two pages, depending on its kind.</p>
+<div class="mtg-flows">
+  <div class="mtg-flow">
+    <h3>{{ pm.badge() }} Decision page</h3>
+    <ol class="steps">
+      <li><strong>The verdict</strong>: what was entered (or "No trade"), the idea that got closest and where it stopped, the core weights and the swing budget.</li>
+      <li><strong>Every idea's journey</strong>: each idea the Scout pitched, through the code gate, the Skeptic, the bull and the bear, the manager and the swing rules; the step where it stopped says why.</li>
+      <li><strong>Core council</strong>: the core weights before and after, what the risk engine held and each manager attempt.</li>
+      <li><strong>Inputs</strong> and <strong>the book after this decision</strong>.</li>
+    </ol>
+  </div>
+  <div class="mtg-flow">
+    <h3>{{ m.chip({"label": "REHEARSAL", "css": "rehearsal", "title": ""}) }} / {{ m.chip({"label": "LIVE", "css": "executed", "title": ""}) }} Transcript</h3>
+    <ol class="steps">
+      <li><strong>At a glance</strong>: what happened in three sentences and the run step by step; each step opens its agent.</li>
+      <li><strong>What changed</strong>: only the lines that moved away from the mechanical reference, and why.</li>
+      <li><strong>The agents, in the order they ran</strong>: each one's prompt, what it saw, what it said and what happened to it.</li>
+      <li><strong>Decision</strong>, <strong>facts the council saw</strong> and <strong>the seal and every model call</strong>.</li>
+    </ol>
+  </div>
+</div>
 {% endcall %}
 {% endblock %}
