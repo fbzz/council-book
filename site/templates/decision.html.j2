@@ -18,6 +18,10 @@
   <p class="eyebrow">{{ pm.badge() }} Decision #{{ doc.decision_no }} · {{ doc.slot | when }}</p>
   <h1>Decision #{{ doc.decision_no }}: {{ "entered " ~ (d.chosen | length) ~ " paper trade(s)" if d.chosen else "no swing trade" }}</h1>
   <p class="lede">A paper run: real data and the real agents, nothing traded, no approval. Published at once through the same public pipeline as a live run (allow-listed fields, licensed news by id only, percent-only).{% if d.verified %} <span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span> the file re-hashes to its commitment.{% endif %}</p>
+  <aside class="disclaimer" role="note" aria-label="About this record">
+    <p><strong>Paper record, not advice.</strong> No money was traded; this is a public log of what an experimental council of language-model agents decided, for transparency. Sizes are percentages of a paper portfolio only.</p>
+    <p><span class="redacted">redacted</span> marks a figure or quote the public record may not carry: market data we license for the agents' own use (prices, moves, volume, short interest) and licensed news text. The agents saw the full values; the code-derived buckets next to them (for example "reaction: strongly against") summarise them.</p>
+  </aside>
 </header>
 {% endblock %}
 {% block main %}
@@ -36,7 +40,7 @@
 
 {% if sw %}
 {% call m.section("d-ideas", 1, "Every idea's journey", "scout") %}
-<p class="small">Each idea the Scout pitched, furthest first, through the six steps: <span class="nowrap"><span class="dot accent-scout" aria-hidden="true"></span>Scout</span> → <span class="nowrap"><span class="dot accent-risk" aria-hidden="true"></span>code gate</span> → <span class="nowrap"><span class="dot accent-skeptic" aria-hidden="true"></span>Skeptic</span> (blind to the pitch{% if sw.skeptic_model_family %}, {{ sw.skeptic_model_family }} model family{% endif %}) → <span class="nowrap"><span class="dot accent-bull" aria-hidden="true"></span>bull and <span class="dot accent-bear" aria-hidden="true"></span>bear</span> → <span class="nowrap"><span class="dot accent-pm" aria-hidden="true"></span>manager</span> (two of three attempts must enter) → <span class="nowrap"><span class="dot accent-risk" aria-hidden="true"></span>swing rules</span>. ✓ passed · ✗ stopped here · — not reached. Open a step for what that agent said; "[figure withheld]" marks a licensed market figure an agent quoted.</p>
+<p class="small">Each idea the Scout pitched, furthest first, through the six steps: <span class="nowrap"><span class="dot accent-scout" aria-hidden="true"></span>Scout</span> → <span class="nowrap"><span class="dot accent-risk" aria-hidden="true"></span>code gate</span> → <span class="nowrap"><span class="dot accent-skeptic" aria-hidden="true"></span>Skeptic</span> (blind to the pitch{% if sw.skeptic_model_family %}, {{ sw.skeptic_model_family }} model family{% endif %}) → <span class="nowrap"><span class="dot accent-bull" aria-hidden="true"></span>bull and <span class="dot accent-bear" aria-hidden="true"></span>bear</span> → <span class="nowrap"><span class="dot accent-pm" aria-hidden="true"></span>manager</span> (two of three attempts must enter) → <span class="nowrap"><span class="dot accent-risk" aria-hidden="true"></span>swing rules</span>. ✓ passed · ✗ stopped here · — not reached. Open a step for what that agent said.</p>
 {% if d.journeys %}
 {% for j in d.journeys %}{{ pm.journey(j, "../../") }}{% endfor %}
 {% else %}{{ m.empty("The Scout pitched no idea", "Nothing on the reading list or the screen made a swing idea this slot.") }}{% endif %}

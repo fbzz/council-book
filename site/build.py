@@ -1855,6 +1855,19 @@ def outcome_chain(cv: CycleView, lines: Lines, bull: PublicAdvocate | None, bear
     return steps
 
 
+
+# Redaction markers written by publish/redact.py ("[value removed]", "[figure withheld]", …) read as
+# one styled "redacted" chip on every page (text nodes only, never inside a tag or attribute).
+_REDACTION_MARKER = re.compile(r"\[(?:value removed|figure withheld|level removed|amount removed|money removed|"
+                               r"withheld: overlaps licensed feed text)\]")
+_REDACTED_CHIP = ('<span class="redacted" title="Redacted: a licensed market-data figure or quoted licensed '
+                  'text the public record may not carry">redacted</span>')
+
+
+def redacted_chips(html: str) -> str:
+    parts = re.split(r"(<[^>]+>)", html)
+    return "".join(p if p.startswith("<") else _REDACTION_MARKER.sub(_REDACTED_CHIP, p) for p in parts)
+
 def build_run_view(cv: CycleView, lines: Lines) -> dict[str, Any]:
     """Everything the diagram, the summary and the run page need, computed from the JSON."""
     c = cv.doc
@@ -5232,7 +5245,7 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     written: list[Path] = []
 
     def render(template: str, target: str, root: str, page: str, **ctx: Any) -> None:
-        html = env.get_template(template).render(**common, root=root, page=page, **ctx)
+        html = redacted_chips(env.get_template(template).render(**common, root=root, page=page, **ctx))
         path = out_dir / target
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(html, encoding="utf-8")

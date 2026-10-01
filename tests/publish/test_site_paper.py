@@ -276,3 +276,12 @@ def test_site_wide_chip_says_paper_while_paper_runs_lead():
     assert s["label"] == "REHEARSAL · NO ACCOUNT" and not s["paper"]
     live = NS(state="LIVE", last_cycle_at=old, last_cycle_id="2026-09-25T1440Z", note="", kill_state="NORMAL")
     assert site._status_context(NS(status=live, cycles=[cyc], ops=[], paper_rows=paper), NOW)["label"] != "PAPER · NO BROKER"
+
+
+def test_redaction_markers_render_as_one_chip_outside_tags_only():
+    mod = _load_site()
+    html = '<p title="[value removed]">News is [value removed] old; SI [figure withheld]-beta; [withheld: overlaps licensed feed text]</p>'
+    out = mod.redacted_chips(html)
+    assert 'title="[value removed]"' in out                     # attributes untouched
+    assert out.count('class="redacted"') == 3
+    assert "[figure withheld]" not in out.split(">", 1)[1]

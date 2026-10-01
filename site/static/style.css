@@ -1503,3 +1503,9 @@ body.moved p { max-width: 40rem; margin: 48px auto; padding: 0 16px; }
 .jb-warn { color: var(--warn); }
 .jb-flat { color: var(--ink); }
 .tkr { font-family: var(--font-mono); font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ink-strong); }
+
+/* Redaction chip and the decision-page disclaimer */
+.redacted { display: inline-block; font: 500 var(--fs-label)/1.2 var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--line-strong) 40%, var(--card)) 0 4px, var(--card) 4px 8px); border: 1px dashed var(--line-strong); border-radius: 3px; padding: 0 5px; vertical-align: 0.05em; white-space: nowrap; }
+.disclaimer { margin-top: 16px; padding: 12px 16px; border: 1px solid var(--line); border-left: 3px solid var(--awaiting); border-radius: 6px; background: color-mix(in srgb, var(--awaiting) 6%, var(--card)); font-size: var(--fs-small, 0.875rem); color: var(--ink); max-width: 72ch; }
+.disclaimer p { margin: 0; }
+.disclaimer p + p { margin-top: 6px; }
