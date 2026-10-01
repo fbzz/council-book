@@ -33,6 +33,34 @@
   3 PM + 1 spare). The paper-only wide mode is unchanged.
 - NOT changed: position size and capital (`size.*`, the funded account) — the user's decision is pending.
 
+## Core news / macro JSON fix, wider movers screen, overnight news first, RSS pacing, paper job — policy change (2026-10-01)
+- **Policy change** (user decision 2026-10-01, "do everything"):
+  - Core `news` / `macro` were `parse_fail` on most real runs: the replies were valid JSON cut off at
+    `max_num_predict` (1200 / 700 tokens), and the decoder then validated an inner card. Budgets
+    `policy/council.yaml` `roles.news` 1200 -> 3000, `roles.macro` 700 -> 2000; prompts
+    `council-news/v2` and `council-macro/v2` (manifest regenerated; golden input digests change for
+    these two system prompts only) gain a HOW TO REPLY block (the JSON object only, keep it short,
+    never a lone card); the gateway always sends both roles' schema as `format` (structured
+    output), reports a cut-off reply as `reply truncated ...` and gives the correction turn 2x the
+    budget with a "fewer, shorter items" ask. Replayed on the 2026-09-30 and 2026-10-01 captured
+    inputs (4 real calls, deepseek-v4.1-flash): all 4 parsed on the first turn.
+  - `news.rss.yahoo_max_tickers` 30 -> 10; per-ticker requests one at a time, one per 1.5 s; a 429
+    stops them for the New York day (`news_source_backoff:rss:<feed>`, flagged once). Market feeds get
+    one retry on a transient 404 / 5xx / transport error (PR Newswire's edge answered 404 on
+    2026-09-30; 25 probes today all 200).
+- Movers screen universe ~604 -> ~1,520 names: + S&P MidCap 400 and S&P SmallCap 600 through the
+  existing Wikipedia membership fetcher (`stocks.universe.SWING_INDEXES`; the stock sleeve keeps its
+  two indexes). Screen budget: 16 requests per screen, `symbols_per_month` 2,500, 40 / h, 80 / day,
+  `MAX_REQUESTS` 24, deadline 300 s; a universe cached before the change is rebuilt.
+- Scout reading list: at the first swing slot of a session, items available since the previous US
+  close (after-hours + pre-market) come first, in the RSS selection and in the final list order.
+- Ollama HTTP 401 / 402 / 403 (e.g. "payment past due"): error `http <code> llm_billing_error`, not
+  retried, flag `llm_billing_error` on the cycle (the council skips the 3 x 120 s outage waits), and
+  one URGENT ntfy per 4 hours when a topic is configured.
+- `ops/paper-cycle.sh` + `ops/launchd/com.fbzz.council-paper.cycle.plist.tmpl` (weekday 14:52 /
+  18:52 UTC; winter 18:52 only): operator-installed (runbook §7a), denied to agents. Runbook: FRED
+  key in `.env` (`COUNCIL_FRED_TOKEN`), ntfy topic for outage alerts.
+
 ## Skeptic relaxed: prompt v3, no `mostly` override, heard waits, chase 4 sigma — policy change (2026-10-01)
 - **Policy change** (user decision 2026-10-01, "lets relax a little bit more"): across 6 real paper
   runs and 27 ideas the Skeptic passed 0 (no move -> wait; move against -> reject; move with ->
