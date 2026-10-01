@@ -91,19 +91,68 @@ def test_paper_only_setup_spends_no_call(reg, policy):
     assert gate.seen == []                                  # not even the code gate
 
 
-def test_a_wait_never_reaches_the_pm(reg, policy):
+def test_a_mostly_wait_never_reaches_the_pm(reg, policy):
     gw, skg = gws({"scout": s.scout(s.idea()), "swing_pm": s.pm(("idea:1", "enter"))},
-                  {"skeptic": s.verdict(priced_in="mostly")})
+                  {"skeptic": s.verdict(verdict="wait", priced_in="mostly")})
     res = run(sc.run_swing_stage(gw, reg, policy, s.inputs(), gate=s.gate_with({}), skeptic_gw=skg))
     assert res.entries() == [] and "swing_pm" not in roles_called(gw)
-    assert any(o.code == "skeptic_wait" and "skeptic_mostly_wait" in o.flags for o in res.outcomes)
+    assert any(o.stage == "skeptic" and o.code == "skeptic_wait" for o in res.outcomes)
+    assert all(sc.WAIT_DEBATED not in o.flags for o in res.outcomes)
+
+
+def _wait_heard(priced_in, pm_votes):
+    def pm(user, rep):
+        return s.pm(("idea:1", pm_votes[rep]))
+    return gws({"scout": s.scout(s.idea()), "swing_bull": s.case(), "swing_bear": s.case(bear=True),
+                "swing_pm": pm}, {"skeptic": s.verdict(verdict="wait", priced_in=priced_in)})
+
+
+def test_a_supported_wait_is_heard_and_can_enter_on_2_of_3(reg, policy):   # user decision 2026-10-01
+    gw, skg = _wait_heard("partly", ("enter", "pass", "enter"))
+    res = run(sc.run_swing_stage(gw, reg, policy, s.inputs(), gate=s.gate_with({}), skeptic_gw=skg))
+    called = roles_called(gw)
+    assert "swing_bull" in called and "swing_bear" in called and called.count("swing_pm") == 3
+    assert [a.ref for a in res.entries()] == ["idea:1"] and res.entries()[0].votes_for == 2
+    o = next(o for o in res.outcomes if o.ref == "idea:1")
+    assert (o.stage, o.code) == ("pm", None) and sc.WAIT_DEBATED in o.flags
+    assert res.ideas["idea:1"].verdict.status == "wait" and sc.WAIT_DEBATED in res.ideas["idea:1"].verdict.flags
+
+
+def test_a_heard_wait_needs_the_pm_majority(reg, policy):
+    gw, skg = _wait_heard("no", ("enter", "pass", "pass"))
+    res = run(sc.run_swing_stage(gw, reg, policy, s.inputs(), gate=s.gate_with({}), skeptic_gw=skg))
+    assert res.entries() == []
+    o = next(o for o in res.outcomes if o.ref == "idea:1")
+    assert (o.stage, o.code) == ("pm", "pm_pass") and sc.WAIT_DEBATED in o.flags
+
+
+def test_a_mostly_pass_now_reaches_the_pm(reg, policy):
+    gw, skg = gws({"scout": s.scout(s.idea()), "swing_bull": s.case(), "swing_bear": s.case(bear=True),
+                   "swing_pm": s.pm(("idea:1", "enter"))}, {"skeptic": s.verdict(priced_in="mostly")})
+    res = run(sc.run_swing_stage(gw, reg, policy, s.inputs(), gate=s.gate_with({}), skeptic_gw=skg))
+    assert [a.ref for a in res.entries()] == ["idea:1"]
+
+
+def test_fully_priced_in_is_rejected_before_the_pm(reg, policy):
+    gw, skg = gws({"scout": s.scout(s.idea()), "swing_pm": s.pm(("idea:1", "enter"))},
+                  {"skeptic": s.verdict(priced_in="fully")})
+    res = run(sc.run_swing_stage(gw, reg, policy, s.inputs(), gate=s.gate_with({}), skeptic_gw=skg))
+    assert res.entries() == [] and "swing_pm" not in roles_called(gw)
+    assert any(o.code == "skeptic_reject" and "skeptic_incoherent" in o.flags for o in res.outcomes)
 
 
 def test_chase_beyond_hard_sigma_is_dropped_before_the_skeptic(reg, policy):
     gw, skg = gws({"scout": s.scout(s.idea())}, {"skeptic": s.verdict()})
-    cards = {"ACME": s.card("ACME", sigma=3.4)}
+    cards = {"ACME": s.card("ACME", sigma=4.1)}
     res = run(sc.run_swing_stage(gw, reg, policy, s.inputs(), gate=s.gate_with(cards), skeptic_gw=skg))
     assert roles_called(skg) == [] and any(o.code == "chased" for o in res.outcomes)
+
+
+def test_chase_at_3_5_sigma_passes_the_gate(reg, policy):         # hard chase 4 sigma (2026-10-01)
+    gw, skg = gws({"scout": s.scout(s.idea())}, {"skeptic": s.verdict(verdict="reject")})
+    cards = {"ACME": s.card("ACME", sigma=3.5)}
+    res = run(sc.run_swing_stage(gw, reg, policy, s.inputs(), gate=s.gate_with(cards), skeptic_gw=skg))
+    assert roles_called(skg) == ["skeptic"] and not any(o.code == "chased" for o in res.outcomes)
 
 
 def test_gate_failure_drops_with_its_reason(reg, policy):
@@ -269,3 +318,13 @@ def test_core_desk_line_is_one_line(reg, policy):
     line = sc.core_desk_line([s.trade(), s.trade("trade:t2")], gross_nav_pct=16, last=res)
     assert "\n" not in line and "2 open" in line and "1 new entry" in line and "16% of the book" in line
     assert "$" not in line
+
+
+def test_a_heard_wait_the_pm_passed_is_its_own_paper_group(reg, policy):
+    from council.cycle import _paper_group
+
+    gw, skg = _wait_heard("partly", ("pass", "pass", "pass"))
+    res = run(sc.run_swing_stage(gw, reg, policy, s.inputs(), gate=s.gate_with({}), skeptic_gw=skg))
+    idea = res.ideas["idea:1"]
+    assert _paper_group(res, "idea:1", idea, False, False) == "skeptic_wait_debated"
+    assert _paper_group(res, "idea:1", idea, True, False) == "missed"

@@ -31,6 +31,13 @@ happened next. It is judged only on trades opened after go-live.
 - The Skeptic runs on `deepseek-v4.1-flash:cloud`, the Scout's model (user decision 2026-09-29, after
   `glm-5.3-flash:cloud` returned parseable JSON on 1 of 3 real calls). It stays blind by input: it never
   sees the Scout's thesis, only the claim, the catalyst and the fact card.
+- Skeptic relaxed (user decision 2026-10-01, after 0 passes in 27 ideas over 6 paper runs):
+  prompt `council-skeptic/v3` passes a hard new catalyst that supports the side unless the
+  stock-specific reaction is clearly against it (worse than about −0.75 sigma vs its sector) or
+  chased; only `priced_in: fully` forces a reject in code (`mostly` + pass no longer becomes wait;
+  stale or restated + pass still does); a supported `wait` (priced_in no or partly) is still heard
+  by the bull / bear debate and the PM (group `skeptic_wait_debated`), and the PM's 2-of-3 vote and
+  every S-rule still apply. The S11 hard chase drop is 4 sigma (was 3); the prior-wait sigma stays 2.
 - The SQ-8 mechanical stock rule is a public PAPER benchmark only; it never trades.
 
 ## 3. Primary metric
@@ -42,7 +49,7 @@ are kept private.
 
 ## 4. One paper convention for every group
 
-Every idea — executed, manager-passed, Skeptic-rejected, Skeptic-wait, code-dropped (eligible names
+Every idea — executed, manager-passed, Skeptic-rejected, Skeptic-wait, Skeptic-wait-debated, code-dropped (eligible names
 only), paper-only setups, missed entries — is tracked the same way: entry at the slot-time reference
 price (Alpaca SIP minute close at the decision's seal time), exits on completed daily bars at the
 idea's stop, target or time stop; a bar touching both books the stop; a gap through the stop books at

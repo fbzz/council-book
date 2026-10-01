@@ -194,7 +194,7 @@ def test_shorts_disabled_in_code_refuse_a_short_capacity(monkeypatch):
     (("capacity", "max_short"), 9),                  # above max_open
     (("stops", "min_pct"), 0.2),                     # above the stop maxima
     (("time_stop", "max_total_sessions"), 18),       # 15 + 5 extension does not fit
-    (("chase", "prior_wait_sigma"), 3.5),            # above the hard chase drop
+    (("chase", "prior_wait_sigma"), 4.5),            # above the hard chase drop (4 sigma)
     (("liquidity", "short_min_adv_usd"), 1_000_000),
     (("earnings", "exit_mode"), "automated"),        # Q-S5: no automated pre-earnings write
     (("fees", "mode"), "off"),

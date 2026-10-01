@@ -2,7 +2,7 @@
 
 `slot_record()` runs `run_swing_stage` with stub gateways (no LLM, no broker) on four Scout ideas:
   idea:1 ACME   post-earnings drift  -> Skeptic pass -> PM 3 of 3 enter -> planned (live)
-  idea:2 WIDG   news continuation    -> Skeptic wait (priced in mostly); a reason cites the live layer
+  idea:2 WIDG   news continuation    -> Skeptic wait (restated, priced in mostly); a reason cites the live layer
   idea:3 GLOBEX news continuation    -> an `N:` (broker feed) catalyst; Skeptic reject
   idea:4 HOOLI breakout            -> a paper-only setup (no call)
 WIDG is a carried-forward idea (it waited in `ORIGIN`); its thesis quotes the origin cycle's feed
@@ -52,7 +52,7 @@ def _skeptic(user: str, rep: int) -> dict[str, Any]:
     if "IDEA TO REVIEW: idea:1\n" in user:
         return s.verdict("idea:1", line="ACME")
     if "IDEA TO REVIEW: idea:2\n" in user:
-        v = s.verdict("idea:2", line="WIDG", priced_in="mostly",
+        v = s.verdict("idea:2", line="WIDG", priced_in="mostly", news_status="restated",
                       ids=["X:WIDG:move_since_news_live_sigma", "X:WIDG:rev_yoy"])
         v["reasons"][0]["text"] = f"The stock is already up {LIVE_VALUE} sigma today on the news."
         return v

@@ -458,7 +458,7 @@ class _RealState:
                     continue
                 group = str((r.get("record") or {}).get("group") or "")
                 lines.append(f"{r['ticker']} {r['side']}: {group or 'tracked'}")
-                if group in ("skeptic_rejected", "pm_passed"):
+                if group in ("skeptic_rejected", "pm_passed", "skeptic_wait_debated"):
                     key = str(r["ticker"]).replace(".", "_")
                     rejected[key] = max(rejected.get(key, opened), opened)
         except Exception as exc:  # noqa: BLE001

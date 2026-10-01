@@ -126,7 +126,7 @@ def _closed_trades(rows: Sequence[Any]) -> list[metrics.ClosedTrade]:
     return out
 
 
-_VERDICT_OF_GROUP = {"skeptic_rejected": "reject", "skeptic_wait": "wait"}
+_VERDICT_OF_GROUP = {"skeptic_rejected": "reject", "skeptic_wait": "wait", "skeptic_wait_debated": "wait"}
 
 
 def swing_status(ledger: Any, *, today: date, now: datetime | None = None,

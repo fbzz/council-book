@@ -2101,6 +2101,8 @@ def _paper_group(result: Any, ref: str, idea: Any, accepted: bool, live: bool) -
         status = idea.verdict.status if idea.verdict is not None else None
         return "skeptic_wait" if status == "wait" else "skeptic_rejected"
     if outcome is not None and outcome.stage == "pm" and outcome.code is not None:
+        if "skeptic_wait_debated" in (outcome.flags or ()):
+            return "skeptic_wait_debated"   # a Skeptic wait the debate + PM heard, not entered
         return "pm_passed"              # the PM passed; a PM entry the S-rules dropped is code_dropped
     return "code_dropped"
 

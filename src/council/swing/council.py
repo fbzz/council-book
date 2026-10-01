@@ -639,13 +639,19 @@ async def run_swing_council(
             return idea, accept_verdict(v, idea=idea, admissible=admissible,
                                         prior_wait_sigma=sw.chase.prior_wait_sigma)
 
+        heard_waits: list[SwingIdea] = []
         for idea, out in await asyncio.gather(*(one(i) for i in survivors)):
+            if wait_gets_hearing(out):                   # user decision 2026-10-01: a supported wait
+                out = _replace(out, flags=(*out.flags, WAIT_DEBATED))   # is heard by the debate + PM
+                heard_waits.append(idea)
             idea.verdict = out
             if out.status == "pass":
                 passed.append(idea)
-            else:
+            elif WAIT_DEBATED not in out.flags:
                 _outcome(result, idea, "skeptic", out.code, out.flags)
         passed.sort(key=lambda i: int(i.ref.split(":")[1]))
+        heard_waits.sort(key=lambda i: int(i.ref.split(":")[1]))
+        passed += heard_waits                            # passes first, then heard waits
 
     if not passed and not review:
         return result                                    # 0 more calls
@@ -673,7 +679,7 @@ async def run_swing_council(
     stage[0] = "pm"
     if plan.pm_replicates < 1:
         for i in passed:
-            _outcome(result, i, "pm", "budget_no_pm")
+            _outcome(result, i, "pm", "budget_no_pm", _heard_flags(i))
         return result
     secs, admissible = full_input(passed, review, catalysts=catalysts, inputs=inputs,
                                   bull=result.bull, bear=result.bear)
@@ -690,8 +696,24 @@ async def run_swing_council(
     result.flags.extend(result.aggregate.flags)
     entered = {a.ref for a in result.aggregate.entries()}
     for i in passed:
-        _outcome(result, i, "pm", None if i.ref in entered else "pm_pass")
+        _outcome(result, i, "pm", None if i.ref in entered else "pm_pass", _heard_flags(i))
     return result
+
+
+WAIT_DEBATED = "skeptic_wait_debated"
+
+
+def wait_gets_hearing(out: VerdictOutcome) -> bool:
+    """A Skeptic `wait` the debate and the PM still hear (user decision 2026-10-01): priced_in
+    `no` or `partly`, the catalyst supports the claim and the claim supports the side. The PM's
+    2-of-3 vote and every S-rule still apply."""
+    v = out.verdict
+    return (out.status == "wait" and v is not None and v.priced_in in ("no", "partly")
+            and bool(v.catalyst_supports_claim) and bool(v.claim_supports_side))
+
+
+def _heard_flags(idea: SwingIdea) -> tuple[str, ...]:
+    return (WAIT_DEBATED,) if idea.verdict is not None and WAIT_DEBATED in idea.verdict.flags else ()
 
 
 async def run_swing_stage(

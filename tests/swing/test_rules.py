@@ -206,11 +206,15 @@ def test_s10_swing_net_beta(sp):
 
 # ------------------------------------------------------------------------------ S11 / S13
 def test_s11_chase(sp):
-    assert run(cand(move_since_news_sigma=3.01), sp=sp).code == "chased"
+    assert run(cand(move_since_news_sigma=4.01), sp=sp).code == "chased"          # hard 4 sigma (2026-10-01)
+    assert run(cand(move_since_news_sigma=4.1), sp=sp).code == "chased"
+    v = run(cand(move_since_news_sigma=3.5), sp=sp)
+    assert v.ok and "chase_prior_wait" in v.flags
     v = run(cand(move_since_news_sigma=2.5), sp=sp)
     assert v.ok and "chase_prior_wait" in v.flags
-    assert run(cand(move_since_news_sigma=-3.5), sp=sp).ok                       # against a long
-    assert run(cand(side="short", adv_usd=5e8, move_since_news_sigma=-3.5), sp=sp).code == "chased"
+    assert run(cand(move_since_news_sigma=-4.5), sp=sp).ok                       # against a long
+    assert run(cand(side="short", adv_usd=5e8, move_since_news_sigma=-3.5), sp=sp).ok
+    assert run(cand(side="short", adv_usd=5e8, move_since_news_sigma=-4.1), sp=sp).code == "chased"
 
 
 def test_s13_short_rules(sp):

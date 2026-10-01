@@ -1,5 +1,29 @@
 # Changelog
 
+## Skeptic relaxed: prompt v3, no `mostly` override, heard waits, chase 4 sigma — policy change (2026-10-01)
+- **Policy change** (user decision 2026-10-01, "lets relax a little bit more"): across 6 real paper
+  runs and 27 ideas the Skeptic passed 0 (no move -> wait; move against -> reject; move with ->
+  "mostly priced in" / wait, or chased). The bull / bear debate, the PM's 2-of-3 vote and every
+  S-rule are unchanged.
+- Prompt `council-skeptic/v3` (manifest regenerated): "Most ideas should not pass" removed; a
+  calibration block: PASS on a real new / hard catalyst (earnings beat or raise, contract, deal,
+  approval, guidance change) that supports the side when the reaction is not clearly against it
+  (stock-specific move since the news better than about -0.75 sigma vs its sector) and below the
+  chase limit; "no reaction yet" on a hard catalyst is a pass candidate; WAIT only for soft,
+  restated or follow-up catalysts or genuinely mixed evidence; REJECT when the claim is unsupported,
+  the catalyst routine / restated with no edge, or the reaction clearly and stock-specifically
+  against the side. The prior-wait rule applies only when the move in the trade's direction is
+  >= `prior_wait_sigma`, >= 1 session has passed and there is no new fact.
+- Code (`swing/roles.accept_verdict`): only `priced_in: fully` forces reject; `mostly` + pass no
+  longer becomes wait (the `skeptic_mostly_wait` override is kept only for old records); stale or
+  restated + pass still becomes wait.
+- Heard waits (`swing/council.py`): a Skeptic `wait` with priced_in `no` / `partly` and both support
+  checks true goes to the debate and the PM like a pass (passes first, then such waits, within the
+  existing call budget: debate and PM calls do not grow with the idea count); flag
+  `skeptic_wait_debated` on the verdict and the outcome; not entered -> paper group
+  `skeptic_wait_debated` (counted with `pm_passed` for the H10 recent-rejection rule).
+- `policy/swing.yaml` `chase.max_move_since_news_sigma` 3.0 -> 4.0 (`prior_wait_sigma` 2.0 stays below it).
+
 ## Third-party RSS headlines for the swing Scout and the news role — policy change (2026-09-29)
 - **Policy change**: `policy/council.yaml` `news.rss` lists eleven feeds (user decision 2026-09-29):
   PR Newswire (all releases), Nasdaq earnings and markets, Yahoo Finance per ticker, FDA press

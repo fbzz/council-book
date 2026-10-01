@@ -11,7 +11,7 @@ A decoded model output is never used as is. These functions turn it into an ACCE
 - `accept_verdict` (Skeptic): H8 the ref is the one idea it was shown; H6 unknown ids are
   stripped and a reason left with no id is dropped; then the §1.5 rules, in order:
   misread -> drop `catalyst_misread`; `priced_in: fully` -> reject (`skeptic_incoherent` if it said
-  pass); `mostly` + pass -> wait; `stale|restated` + pass -> wait; the sigma prior (a pass after a
+  pass); `stale|restated` + pass -> wait (`mostly` + pass stays pass: user decision 2026-10-01); the sigma prior (a pass after a
   >= prior-sigma move in the trade's direction, >= 1 session after the news, must cite a fact the
   move does not contain: a non-price card field) -> wait; reject drops; wait parks; pass goes on.
   No verdict (two validation failures) -> drop `skeptic_failed`.
@@ -280,9 +280,6 @@ def accept_verdict(
         if verdict == "pass":
             flags.append("skeptic_incoherent")
         verdict = "reject"
-    if verdict == "pass" and v.priced_in == "mostly":
-        verdict = "wait"
-        flags.append("skeptic_mostly_wait")
     if verdict == "pass" and v.news_status in ("stale", "restated"):
         verdict = "wait"
         flags.append("skeptic_stale_wait")

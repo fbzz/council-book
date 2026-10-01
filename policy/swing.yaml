@@ -58,7 +58,7 @@ correlation:                   # S10
   max_swing_net_beta: 0.30
 
 chase:                         # S11 (code gate + the Skeptic's prior)
-  max_move_since_news_sigma: 3.0
+  max_move_since_news_sigma: 4.0
   prior_wait_sigma: 2.0
 
 fees:                          # S12: the user's decision: a REPORTED metric, never a brake stricter

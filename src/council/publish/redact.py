@@ -1899,7 +1899,7 @@ def public_swing_book(
     resamples: int | None = None,
 ) -> Any:
     """The swing page's document: open and closed trades, the §8.2 metrics over closed live trades,
-    every paper group of the funnel (all seven, empty ones included), the three benchmark curves
+    every paper group of the funnel (all eight, empty ones included), the three benchmark curves
     (SQ-8 PAPER, matched index, index hold; base 100) and the Skeptic-health line."""
     from datetime import date as _date
 

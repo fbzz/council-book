@@ -82,9 +82,15 @@ def test_pass_goes_on():
     assert out.status == "pass" and out.code is None
 
 
-def test_mostly_plus_pass_is_wait():
+def test_mostly_plus_pass_now_passes():          # user decision 2026-10-01: no `mostly` override
     out = judge(verdict(priced_in="mostly"))
-    assert (out.status, out.code) == ("wait", "skeptic_wait") and "skeptic_mostly_wait" in out.flags
+    assert (out.status, out.code) == ("pass", None) and "skeptic_mostly_wait" not in out.flags
+
+
+def test_stale_or_restated_plus_pass_is_still_wait():
+    for status in ("stale", "restated"):
+        out = judge(verdict(news_status=status))
+        assert (out.status, out.code) == ("wait", "skeptic_wait") and "skeptic_stale_wait" in out.flags
 
 
 def test_fully_is_reject_and_incoherent_when_it_said_pass():

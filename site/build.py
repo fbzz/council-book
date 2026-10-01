@@ -4265,7 +4265,8 @@ OVERRIDE_WORDS = {"skeptic_mostly_wait": "code: mostly priced in → wait", "ske
 EXIT_WORDS = {"stop": "stop", "target": "target", "time": "time stop", "exit": "decision", "halt": "kill switch",
               "external": "outside"}
 GROUP_WORDS = {"executed": "Executed", "pm_passed": "Manager passed", "skeptic_rejected": "Skeptic rejected",
-               "skeptic_wait": "Skeptic said wait", "code_dropped": "Dropped by code (eligible names)",
+               "skeptic_wait": "Skeptic said wait", "skeptic_wait_debated": "Skeptic wait, debated (Manager passed)",
+               "code_dropped": "Dropped by code (eligible names)",
                "paper_only": "Paper-only setups", "missed": "Missed entries"}
 SWING_SERIES = (
     ("sq8", "SQ-8 mechanical rule (PAPER)", "c3", "SQ-8", "the stock rule we did not adopt (it failed its test)"),

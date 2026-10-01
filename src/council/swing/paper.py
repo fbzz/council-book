@@ -14,7 +14,8 @@ like; real fills are measured separately as slippage against the same reference 
 - **Cost**: the declared cost on every leg (1.25% of the position per leg, `policy/swing.yaml
   public_record`), so `r_declared` = (net return) / (planned stop distance).
 
-Groups (§8.2 funnel value): executed, pm_passed, skeptic_rejected, skeptic_wait, code_dropped
+Groups (§8.2 funnel value): executed, pm_passed, skeptic_rejected, skeptic_wait,
+skeptic_wait_debated (a supported Skeptic wait the debate + PM heard and did not enter), code_dropped
 (eligible names only), paper_only (paper-only setups), missed. Percent-only outputs: the reference
 price is private (it stays in the ledger row, never in a public record).
 """
@@ -30,8 +31,10 @@ from typing import Any, Literal
 import pandas as pd
 
 DECLARED_COST_PCT_PER_LEG = 1.25
-GROUPS = ("executed", "pm_passed", "skeptic_rejected", "skeptic_wait", "code_dropped", "paper_only", "missed")
-Group = Literal["executed", "pm_passed", "skeptic_rejected", "skeptic_wait", "code_dropped", "paper_only",
+GROUPS = ("executed", "pm_passed", "skeptic_rejected", "skeptic_wait", "skeptic_wait_debated", "code_dropped",
+          "paper_only", "missed")
+Group = Literal["executed", "pm_passed", "skeptic_rejected", "skeptic_wait", "skeptic_wait_debated", "code_dropped",
+                "paper_only",
                 "missed"]
 ExitReason = Literal["stop", "stop_gap", "target", "target_gap", "time"]
 

@@ -473,7 +473,7 @@ SwingStage = Literal["dropped_by_code", "skeptic", "waiting", "debate", "pm", "r
                      "approved", "executed", "missed", "expired"]
 SwingTradeState = Literal["open", "open_tp_missing", "exit_pending", "closed_stop", "closed_target",
                           "closed_time", "closed_exit", "closed_halt", "closed_external"]
-PaperGroup = Literal["executed", "pm_passed", "skeptic_rejected", "skeptic_wait", "code_dropped",
+PaperGroup = Literal["executed", "pm_passed", "skeptic_rejected", "skeptic_wait", "skeptic_wait_debated", "code_dropped",
                      "paper_only", "missed"]
 SwingText = Annotated[str, Field(max_length=440)]      # thesis (400) + slack
 SwingClaimText = Annotated[str, Field(max_length=135)]  # catalyst claim (120) + slack
@@ -710,7 +710,7 @@ class PublicSwingBook(PublicModel):
     open_trades: list[PublicSwingTrade] = Field(default_factory=list, max_length=12)
     closed_trades: list[PublicSwingTrade] = Field(default_factory=list, max_length=2000)
     metrics: PublicSwingMetrics = Field(default_factory=PublicSwingMetrics)
-    funnel: list[PublicFunnelGroup] = Field(default_factory=list, max_length=7)
+    funnel: list[PublicFunnelGroup] = Field(default_factory=list, max_length=8)
     benchmarks: list[PublicBenchmarkPoint] = Field(default_factory=list, max_length=4000)
     health: PublicSkepticHealth = Field(default_factory=PublicSkepticHealth)
     flags: list[Code] = Field(default_factory=list)

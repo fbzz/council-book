@@ -66,7 +66,7 @@ def test_the_record_keeps_the_chain_but_no_feed_text(captured):
     assert F.FEED_TITLE not in repr(record)
     assert by["WIDG"]["facts"]["move_since_news_live_sigma"] == float(F.LIVE_VALUE)   # private: kept
     assert by["ACME"]["votes"]["enter"] == 3 and by["ACME"]["stage"] == "planned"
-    assert by["WIDG"]["verdict"]["override"] == "skeptic_mostly_wait"
+    assert by["WIDG"]["verdict"]["override"] == "skeptic_stale_wait"
     assert "adv_usd_20d" not in by["ACME"]["facts"]
 
 
@@ -165,7 +165,7 @@ def test_why_stops_the_chain_where_the_idea_stopped(captured):
     text = "\n".join(lines)
     assert "not reached (dropped at the Scout check: setup_paper_only)" in text and "skeptic" not in text
     widg = "\n".join(trail.ledger_lines({"extras": {"swing": record}}, "WIDG"))
-    assert "said pass; code: skeptic_mostly_wait" in widg and "stopped at the Skeptic" in widg
+    assert "said pass; code: skeptic_stale_wait" in widg and "stopped at the Skeptic" in widg
     assert "PM:" not in widg
     assert trail.ledger_lines({"extras": {"swing": record}}, "MSFT") is None
 

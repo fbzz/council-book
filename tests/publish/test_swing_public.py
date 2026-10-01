@@ -176,7 +176,7 @@ def test_every_idea_is_shown_with_its_stage(record):
         ("ACME", "planned", None, True), ("WIDG", "waiting", "skeptic_wait", True),
         ("GLOBEX", "skeptic", "skeptic_reject", True), ("HOOLI", "dropped_by_code", "setup_paper_only", False)]
     assert sec.ideas[0].votes.enter == 3 and sec.ideas[1].verdict.said == "pass"
-    assert sec.ideas[1].verdict.code_override == "skeptic_mostly_wait"
+    assert sec.ideas[1].verdict.code_override == "skeptic_stale_wait"
     assert sec.ideas[0].verdict.model_family == "glm" and not sec.ideas[0].verdict.same_family
 
 
@@ -190,7 +190,8 @@ def test_trades_are_percent_only_and_net_of_the_declared_cost(record):
     assert won.contribution_declared_bp == pytest.approx(0.08 * (gross - 2.5) * 100, abs=0.1)
     assert [t.state for t in book.open_trades] == ["open"] and book.open_trades[0].weight_x == 0.08
     assert [g.group for g in book.funnel] == ["executed", "pm_passed", "skeptic_rejected", "skeptic_wait",
-                                               "code_dropped", "paper_only", "missed"]
+                                               "skeptic_wait_debated", "code_dropped", "paper_only",
+                                               "missed"]
     wait = next(g for g in book.funnel if g.group == "skeptic_wait")
     assert wait.closed == 2 and wait.r_declared.n == 2
     assert book.metrics.n_closed == 2 and book.benchmarks[0].sq8 is not None
