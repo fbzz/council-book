@@ -147,6 +147,19 @@ class CostGateConfig(Frozen):
     reference_hold_days: dict[str, float] | None = None
 
 
+INITIAL_BUILD_EXEMPTABLE: frozenset[str] = frozenset({"R13", "R14", "R15"})
+
+
+class InitialBuildConfig(Frozen):
+    """The initial funding allowance: on the ONE build cycle of an empty book (a paper book's first
+    build, a live account's funding day) the listed churn/cost rules do not apply. Only R13 (churn),
+    R14 (cycle and 30-day cost; the carry budget still applies) and R15 (net-of-cost gate) may be
+    listed (`invariants.check_policy`); every other rule (gross, net, margin, R7 reserve, vol, R21 ...)
+    applies. Empty = no allowance."""
+
+    exempt: tuple[str, ...] = ()
+
+
 class EventBlockConfig(Frozen):
     """R16: hours before/after a scheduled macro event during which adds are blocked; for a stock's
     earnings, the hours before/after the report and the half-width, in US trading days, of the
@@ -208,6 +221,7 @@ class RiskLimits(BaseModel):
     freshness: FreshnessConfig
     material_change_required: bool = True
     proposal: ProposalConfig
+    initial_build: InitialBuildConfig = InitialBuildConfig()
 
 
 class OvernightConfig(Frozen):

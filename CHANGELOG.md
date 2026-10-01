@@ -1,5 +1,32 @@
 # Changelog
 
+## Paper book and the initial funding allowance — policy change (2026-10-01)
+- **Problem** (trace-all paper run 2026-10-01): a paper run has no broker snapshot, so every paper
+  cycle took the book as flat; building the proposed core from zero tripped R14, SPX / BTC / ETH were
+  held at 0 (50% invested), and the next cycle started flat again: the paper portfolio never built.
+- **Paper book** (`src/council/paperbook.py`, paper runs only; `is_paper_run` = the `--ideas` test):
+  a persisted paper broker (`<state>/paper/book.json` + `book_ledger.jsonl`, 0600) whose snapshot
+  (equity, signed weights per core line and `SW_<ticker>` swing line, flag `paper_book`) feeds the
+  cycle like a broker snapshot. After each paper cycle the decision executes on paper with no
+  approval: core lines to `final_w` at the slot's last closes with the declared policy leg cost (the
+  engine's R14 model), swing entries the engine kept at the paper reference with 1.25% per leg. Each
+  cycle start marks it to market (core closes; swing stop / target / time stop on completed daily
+  bars per `swing.paper`). Open paper swing trades count as swing exposure (S18 core re-size, the
+  swing budget, the S-rules' book) and run through the engine as pinned swing lines, so the paper run
+  exercises the whole book. Private start NAV = `funded_real_nav_usd`; public = % only.
+  `SWING_BOOK_LIVE` and live behaviour are unchanged (a broker-connected or live context never loads
+  a paper book).
+- **Policy change** `policy/risk.yaml initial_build: {exempt: [R13, R14, R15]}`: on the ONE build
+  cycle of an empty book (paper now; the same rule on the live funding day) R13 churn, R14 cycle and
+  30-day cost (the carry budget still applies) and R15 do not apply; gross, net, margin, R7 cash
+  reserve, vol, R21 and every other rule do. The cycle sets it (flag `initial_build`) only for a
+  known empty snapshot with no held order in a NORMAL kill state, and the engine ignores it on a
+  non-empty book. `invariants.check_policy` refuses any other exempt rule.
+- `council paper status`: the paper book in % (lines, swing trades with entry / stop / target /
+  days held / net return, split, paper return since start); no amounts, units or prices.
+- `council.paperbook.paper_book_public(state)`: the percent-only portfolio dict for the public
+  paper record and site (documented in docs/runbook.md §7).
+
 ## Paper publishing and the decisions pages (2026-10-01)
 - `council cycle --paper --publish [--publish-dir DIR]` (paper only; refused off paper like
   `--trace-all`): writes the paper run's PUBLIC record into the repo (default: the repo the code runs

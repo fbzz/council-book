@@ -232,6 +232,7 @@ class RiskEngine:
         cost_30d_fee_bps: float = 0.0,
         extra_lines: Sequence[Any] = (),
         core_rescale: bool = False,
+        initial_build: bool = False,
     ) -> RiskDecision:
         """Run the pipeline in the module docstring.
 
@@ -247,7 +248,11 @@ class RiskEngine:
         `_with_swing`. `core_rescale` (S18, `swing.budget`): the unit weights were re-sized this
         cycle because the swing exposure moved by >= its deadband; every core line is then ordered
         to its re-sized reference target (like a reference level step) instead of waiting for the
-        R11 drift threshold; the minimum trade size, R12 and R13-R15 still apply."""
+        R11 drift threshold; the minimum trade size, R12 and R13-R15 still apply.
+        `initial_build` (the initial funding allowance, `risk.initial_build`): the caller says this is
+        the one build cycle of an empty book; the policy's exempt rules (R13, R14 cycle/30-day cost,
+        R15) are then skipped, and only while the current book (snapshot + held orders) really is
+        empty - a non-empty book ignores the flag (`_Run.initial_exempt`)."""
         kw = dict(
             levels=levels, ref=ref, bands=bands, states=states, snapshot=snapshot,
             unit_weights=unit_weights, kill_state=kill_state, cost_quotes=cost_quotes,
@@ -261,6 +266,7 @@ class RiskEngine:
             copy_min_share=max(float(copy_min_share), 0.0),
             cost_30d_fee_bps=max(float(cost_30d_fee_bps or 0.0), 0.0),
             core_rescale=bool(core_rescale),
+            initial_build=bool(initial_build),
         )
         lines = list(extra_lines)
         if not lines:
@@ -402,6 +408,11 @@ class _Run:
             self.held_levels = migrated_levels(self.specs.values(), self.cur, self.unit)
         self.held_level = {s: float(self.held_levels.get(s, 0.0)) for s in self.managed}
         self.fee_legs_r15: set[str] = set()    # discretionary fee-bearing lines the gate priced
+        # the initial funding allowance: only on an EMPTY book (no snapshot weight, no held order)
+        empty = self.snapshot is not None and all(abs(w) <= EPS for w in self.cur.values())
+        self.initial_exempt: frozenset[str] = (
+            frozenset(self.lim.initial_build.exempt) if getattr(self, "initial_build", False) and empty
+            else frozenset())
         self.vol_detail = "covariance function" if self.vol_fn else "upper bound: rho = 1"
         if self.snapshot is None:
             self.hold_reasons.append("no broker snapshot: current book taken as flat")
@@ -1013,6 +1024,8 @@ class _Run:
             return "R12 minimum hold"
         if self.lim.material_change_required and not toward and not self.material(s):
             return "MC no new material evidence"
+        if "R15" in self.initial_exempt:
+            return None
         ok, value, why = self.gate(s, before, after, toward)
         if value is not None:
             self.srbe_seen[s] = value
@@ -1091,7 +1104,8 @@ class _Run:
             found = self.trim(up, sum(up.values()) - (net - ceiling), "R2 net ceiling", worst_first)
             if found:
                 return found
-        r13 = {s: not (toward[s] and "R13" in TOWARD_REFERENCE_EXEMPT) for s in changed}
+        r13 = {s: not (toward[s] and "R13" in TOWARD_REFERENCE_EXEMPT) and "R13" not in self.initial_exempt
+               for s in changed}
         inc = {s: line_increase(base[s], w[s]) for s in changed if r13[s]}
         found = self.trim(inc, lim.churn.cycle_increase_max, "R13 cycle increase budget", worst_first)
         if found:
@@ -1107,10 +1121,10 @@ class _Run:
         cost = {s: self.leg_cost(s, base[s], w[s]) for s in changed}
         variable = {s: self.leg_variable_cost(s, base[s], w[s]) for s in changed}
         reducing = {s: not ck.increased(base[s], w[s]) for s in changed}
-        capped = {s: c for s, c in cost.items() if not exempt[s]}
+        capped = {s: c for s, c in cost.items() if not exempt[s] and "R14" not in self.initial_exempt}
         found = self.trim_costs(capped, variable, reducing, lim.cost_budget.cycle_max_bps,
                                 "R14 cycle cost budget", trim_order)
-        if not found and self.cost_30d_bps is not None:
+        if not found and self.cost_30d_bps is not None and "R14" not in self.initial_exempt:
             month_cap = lim.cost_budget.discretionary_30d_max_bps
             disc = {s: c for s, c in cost.items() if not toward[s]}
             found = self.trim_costs(disc, variable, reducing, month_cap - self.cost_30d_bps,
@@ -1258,6 +1272,8 @@ class _Run:
             if not min_hold_ok(s, self.last_change.get(s), self.now, sign_flip=before * after < 0,
                                toward_reference=exempt, asset_class=self.cls[s], policy=self.p):
                 hold_bad.append(s)
+            if "R15" in self.initial_exempt:
+                continue
             ok, value, _ = self.gate(s, before, after, toward[s])
             worst = max(worst, value or 0.0)
             if not ok:
@@ -1277,7 +1293,8 @@ class _Run:
                       value=r15_value,
                       limit=f"reference {lim.net_of_cost_gate.reference_max_srbe}, "
                             f"council {lim.net_of_cost_gate.council_max_srbe}",
-                      detail=f"violations {sorted(gate_bad)}" if gate_bad else "max SR_be"),
+                      detail=f"violations {sorted(gate_bad)}" if gate_bad else
+                      ("initial build: exempt (empty book)" if "R15" in self.initial_exempt else "max SR_be")),
         ]
 
     def verify_budgets(self, final: Mapping[str, float], changed: list[str],
@@ -1337,6 +1354,12 @@ class _Run:
             f"watch {watch:g} bps/day" + (" exceeded" if carry_f > watch + EPS else ""),
             base=carry_b,
         ))
+        if self.initial_exempt:               # the initial funding allowance (empty book only)
+            exempt_names = {"cycle_increase", "turnover_7d", "turnover_30d"} if "R13" in self.initial_exempt else set()
+            if "R14" in self.initial_exempt:
+                exempt_names |= {"cycle_cost_bps", "cost_30d_bps"}
+            rows = [r.model_copy(update={"passed": True, "detail": "initial build: exempt (empty book)"})
+                    if r.name in exempt_names else r for r in rows]
         return rows
 
 

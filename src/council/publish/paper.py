@@ -271,6 +271,64 @@ class PaperPerformance(PublicModel):
     note: ShortText = "core: weights only (no paper fills); swing: closed paper legs, net of the declared cost"
 
 
+class PaperBookLine(PublicModel):
+    line: Line
+    weight_pct: Pct
+
+
+class PaperBookTrade(PublicModel):
+    ticker: Line
+    side: SwingSide
+    setup: Code | None = None
+    status: Literal["open", "closed"]
+    weight_pct: Pct = 0.0
+    stop_pct: Pct
+    target_pct: Pct
+    entry_day: date
+    days_held: int = Field(ge=0, le=400)
+    exit_reason: Code | None = None
+    return_net_pct: Pct                   # net of the declared 1.25% per leg (both legs)
+
+
+class PaperBookView(PublicModel):
+    """The paper BOOK (`council.paperbook.paper_book_public`): what the paper broker holds after the
+    paper fills, marked to market. Percent only; the paper NAV is never an input."""
+
+    paper_return_pct: Pct
+    started: date | None = None
+    core: list[PaperBookLine] = Field(default_factory=list, max_length=64)
+    swing_trades: list[PaperBookTrade] = Field(default_factory=list, max_length=200)
+    core_pct: Pct = 0.0
+    swing_pct: Pct = 0.0
+    cash_pct: Pct = 0.0
+
+
+def paper_book_view(pub: Mapping[str, Any] | None) -> PaperBookView | None:
+    """`paper_book_public(state)` as the public model, or None (no book / unusable)."""
+    from council.publish.redact import swing_line
+
+    if not pub:
+        return None
+    try:
+        trades = []
+        for t in pub.get("swing_trades") or []:
+            line = swing_line(str(t.get("ticker") or ""))
+            if line is None:
+                continue
+            trades.append(PaperBookTrade(ticker=line, side=t["side"], setup=t.get("setup"), status=t["status"],
+                                         weight_pct=t.get("weight_pct") or 0.0, stop_pct=t["stop_pct"],
+                                         target_pct=t["target_pct"], entry_day=date.fromisoformat(t["entry_day"]),
+                                         days_held=int(t.get("days_held") or 0), exit_reason=t.get("exit_reason"),
+                                         return_net_pct=t["return_net_pct"]))
+        split = pub.get("split_pct") or {}
+        return PaperBookView(paper_return_pct=pub["paper_return_pct"], started=_day(pub.get("started_at")),
+                             core=[PaperBookLine(line=k, weight_pct=v) for k, v in (pub.get("core_weights_pct") or {}).items()],
+                             swing_trades=trades[-200:], core_pct=split.get("core", 0.0),
+                             swing_pct=split.get("swing", 0.0), cash_pct=split.get("cash", 0.0))
+    except Exception:  # noqa: BLE001 - an unusable book view is left out, never published half-checked
+        return None
+
+
 class PublicPaperLatest(PublicModel):
     schema_id: Literal["council-book/paper-latest/v1"] = "council-book/paper-latest/v1"
     as_of: UtcDatetime
@@ -283,6 +341,7 @@ class PublicPaperLatest(PublicModel):
     core_pct: Share = 100.0
     swing_budget_pct: Share | None = None
     performance: PaperPerformance = Field(default_factory=PaperPerformance)
+    book: PaperBookView | None = None     # the paper book after its fills (`council.paperbook`)
 
 
 # ------------------------------------------------------------------------------------- helpers
@@ -627,7 +686,7 @@ def _day(v: Any) -> date | None:
 
 
 def paper_latest(doc: PublicPaperCycle, rows: Sequence[Mapping[str, Any]], paper_rows: Sequence[Mapping[str, Any]],
-                 *, today: date) -> PublicPaperLatest:
+                 *, today: date, book: Mapping[str, Any] | None = None) -> PublicPaperLatest:
     """The paper portfolio after `doc`: the core's final weights, the chosen paper legs still open
     (matched to the paper ledger rows by origin cycle + ticker + side; unmatched legs count as open
     until their time stop), and the paper P&L of the closed ones."""
@@ -667,7 +726,8 @@ def paper_latest(doc: PublicPaperCycle, rows: Sequence[Mapping[str, Any]], paper
         as_of=doc.slot, decision_no=doc.decision_no, cycle_id=doc.cycle_id, decisions=max(1, len(rows)),
         core=core[:64], swing_open=open_[:24], swing_pct=swing_pct, core_pct=round(100.0 - swing_pct, 3),
         swing_budget_pct=budget,
-        performance=PaperPerformance(since=since, swing_closed_legs=closed, swing_return_pct=round(ret, 4)))
+        performance=PaperPerformance(since=since, swing_closed_legs=closed, swing_return_pct=round(ret, 4)),
+        book=paper_book_view(book))
 
 
 # ------------------------------------------------------------------------------------- files
@@ -677,7 +737,8 @@ def dump(doc: PublicModel) -> bytes:
 
 def paper_files(doc_for: Any, root: Path, cycle_id: str, *, paper_rows: Sequence[Mapping[str, Any]] = (),
                 sealed_at: datetime | None = None, code_commit: str = "",
-                today: date | None = None) -> tuple[dict[str, bytes], PublicPaperCycle]:
+                today: date | None = None, book: Mapping[str, Any] | None = None,
+                ) -> tuple[dict[str, bytes], PublicPaperCycle]:
     """{relpath: bytes} of one paper publish. `doc_for(decision_no)` builds the document."""
     root = Path(root)
     rows = read_rows(root)
@@ -698,7 +759,7 @@ def paper_files(doc_for: Any, root: Path, cycle_id: str, *, paper_rows: Sequence
     existing = (root / DECISIONS_PATH).read_bytes() if (root / DECISIONS_PATH).exists() else None
     dec = decisions_bytes(existing, row)
     all_rows = [json.loads(x) for x in dec.decode().splitlines() if x.strip()]
-    latest = paper_latest(doc, all_rows, paper_rows, today=today or doc.slot.date())
+    latest = paper_latest(doc, all_rows, paper_rows, today=today or doc.slot.date(), book=book)
     files = {cycle_file(cycle_id): sealed, reveal_file(cycle_id): dump(reveal), DECISIONS_PATH: dec,
              LATEST_PATH: dump(latest)}
     return files, doc
@@ -754,9 +815,16 @@ def publish_paper(rec: Any, pack: Any, *, state_dir: Path, root: Path, lines: An
     if not isinstance(swing, Mapping):
         own = own or []
     code_commit = code_commit if re.fullmatch(r"[0-9a-f]{7,40}", code_commit or "") else ""
+    from council.paperbook import paper_book_public
+
+    try:
+        book = paper_book_public(Path(state_dir))
+    except Exception:  # noqa: BLE001 - no readable paper book: latest.json carries none
+        book = None
     files, doc = paper_files(
         lambda no: build_paper_cycle(rec, pack, lines=lines, decision_no=no, install_key=install_key, own_texts=own),
-        root, rec.cycle_id, paper_rows=paper_rows, sealed_at=now or datetime.now(UTC), code_commit=code_commit)
+        root, rec.cycle_id, paper_rows=paper_rows, sealed_at=now or datetime.now(UTC), code_commit=code_commit,
+        book=book)
     scan_files(files, licensed_texts=[*redact.licensed_texts(pack), *feed_lines(own or [])], canaries=canaries)
     return doc.decision_no, write(root, files)
 

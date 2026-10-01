@@ -80,6 +80,9 @@ def check_policy(policy: Policy) -> None:
         raise InvariantViolation("reference book may not lever")
     if STOCK_LONGS_REAL_1X:
         _check_stocks_real_long_1x(policy)
+    exempt = set((risk.get("initial_build") or {}).get("exempt") or ())
+    if exempt - {"R13", "R14", "R15"}:
+        raise InvariantViolation("risk.initial_build may exempt only R13, R14 and R15 (churn and cost)")
     if policy.swing is not None:
         check_swing_policy(policy.swing)
         # Q-S9: "other" promises the Skeptic a different model from the Scout (the council model);

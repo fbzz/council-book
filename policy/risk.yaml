@@ -39,6 +39,7 @@ event_block: {macro_before_h: 24, macro_after_h: 2, earnings_before_h: 24, earni
 anti_chase_sigma: 2.5                                                               # R17
 freshness: {daily_bar_max_h: 30, four_hour_bar_max_h: 5, quote_max_s: 60, frozen_reference_share_max: 0.30}  # R18
 material_change_required: true                                                      # executable changes need a new material fingerprint
+initial_build: {exempt: [R13, R14, R15]}                                         # empty book only (first build after funding): churn/cost gates off for that one cycle; R14 carry still applies
 proposal: {max_legs: 8, max_legs_total: 16}                                        # R21 (max_legs counts risk-increasing and discretionary legs)
 approval:
   window: {tz: Europe/Lisbon, start: "08:00", end: "23:00"}

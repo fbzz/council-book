@@ -306,6 +306,45 @@ def paper_report(
     typer.echo(str(path))
 
 
+@paper_app.command("status")
+def paper_status(
+    state_dir: Path = typer.Option(None, "--state-dir", help="The paper state dir (default <state>/paper); "
+                                                            "any other directory is refused."),
+) -> None:
+    """Print the paper book (`council.paperbook`): core lines with % weights, swing trades with
+    entry day / stop % / target % / return % net of the declared cost, the split and the paper return
+    since start. Percent only: no amount, unit or price. Reads the PAPER state only."""
+    from council import paths
+    from council.paperbook import paper_book_public
+
+    root = Path(state_dir) if state_dir is not None else paths.state_dir() / PAPER_STATE
+    if root.name != PAPER_STATE:
+        _refuse(f"--state-dir must be the paper state dir (a directory named {PAPER_STATE!r})")
+    pub = paper_book_public(root)
+    if not pub:
+        typer.echo("no paper book yet (run `council cycle --paper`)")
+        return
+    typer.echo(f"paper book since {str(pub['started_at'])[:16]}  marked {str(pub['marked_at'] or '-')[:16]}  "
+               f"last cycle {pub['last_cycle'] or '-'}")
+    typer.echo(f"paper return since start: {pub['paper_return_pct']:+.2f}%"
+               + ("  (assumed start NAV)" if pub.get("funding") == "assumed" else ""))
+    sp = pub["split_pct"]
+    typer.echo(f"split: core {sp['core']:.1f}%  swing {sp['swing']:.1f}%  cash {sp['cash']:.1f}%")
+    typer.echo("core lines:")
+    for line, w in pub["core_weights_pct"].items():
+        typer.echo(f"  {line:<10} {w:+7.2f}%")
+    if not pub["core_weights_pct"]:
+        typer.echo("  (none)")
+    typer.echo("swing trades:")
+    for t in pub["swing_trades"]:
+        tail = f"weight {t['weight_pct']:.2f}%" if t["status"] == "open" else f"exit {t['exit_reason']}"
+        typer.echo(f"  {t['ticker']:<6} {t['side']:<5} {t['setup'] or '-':<14} entry {t['entry_day']}  "
+                   f"stop {t['stop_pct']:.2f}%  target {t['target_pct']:.2f}%  held {t['days_held']}d  "
+                   f"net {t['return_net_pct']:+.2f}%  {t['status']}  {tail}")
+    if not pub["swing_trades"]:
+        typer.echo("  (none)")
+
+
 @app.command()
 def watch() -> None:
     """Read-only watch: expiries, reveals, execution records, kill switch, heartbeat."""

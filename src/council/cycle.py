@@ -231,6 +231,19 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     # ---- history → states → pack
     history, hist_flags = ctx.sources.history(slot)
     flags += hist_flags
+    # ---- paper book (`council.paperbook`): a paper run's persisted paper broker stands in for the
+    # broker snapshot (marked to market here), so the paper portfolio builds across cycles
+    paper_book = None
+    if snapshot is None:
+        paper_book, pb_flags = paper_book_start(ctx, history, slot, now)
+        flags += pb_flags
+        if paper_book is not None:
+            snapshot = paper_book.snapshot(now)
+            econ = cycle_trade_economics(policy, ctx.state_dir, snapshot.equity_usd)
+    ctx.paper_book = paper_book  # type: ignore[attr-defined]
+    initial_build = initial_build_of(policy, snapshot, kill_state, ledger)
+    if initial_build:
+        flags.append(INITIAL_BUILD_FLAG)
     raw_states = market_states(policy, history, now=slot, sources=history_sources(policy) or None)
     returns = returns_matrix(history, master=core_lines(policy))
     ev_start, ev_end = window(slot)
@@ -309,7 +322,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
         kill_state=kill_state if kill_state in ("NORMAL", "WARN", "HALTED", "FLAT") else "NORMAL",
         reference=ref, bands=bands, cards=list(code_cards), flags=runner_flags() + list(flags) + ref_flags + news_flags,
     )
-    if snapshot is not None:            # connected: say when the fee uses an assumed mirror ratio
+    if snapshot is not None:            # connected or paper book: say when the fee uses an assumed mirror ratio
         rec.flags += [f for f in econ.flags if f.startswith("mirror_ratio")]
     if caps is not None:                # codes only: capability_missing:<cap> / capability_unproven:<cap>
         rec.flags += [f for f in caps.flags() if f not in rec.flags]
@@ -351,6 +364,9 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     if swing.live and swing.slot_ok and ledger.get_runtime(SWING_LIVE_SINCE_KEY) is None:
         ledger.set_runtime(SWING_LIVE_SINCE_KEY, slot.astimezone(clock.NEW_YORK).date().isoformat(), now=now)
 
+    if paper_book is not None:         # paper: the paper book's holds + this slot's entries
+        swing.lines = paper_swing_lines(paper_book, swing, snapshot, rec.flags)
+
     # ---- S18: re-size the core when the swing exposure moved >= its deadband; publish the split
     unit, core_rescale = core_sizing_after_swing(ctx, rec, sizing, swing, ref0=ref0, unit0=unit0,
                                                  unit=unit, now=now)
@@ -367,8 +383,16 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
                          states=states, snapshot=snapshot, unit=unit, kill_state=kill_state,
                          quotes=quotes, pack=pack, material_changed=material_changed, basis=basis,
                          slot=slot, returns=returns, nav=nav, econ=econ, extra_blockers=corporate_blockers,
-                         extra_lines=swing.lines, broker_min_share=broker_min, core_rescale=core_rescale)
+                         extra_lines=swing.lines, broker_min_share=broker_min, core_rescale=core_rescale,
+                         initial_build=initial_build)
     rec.risk = decision
+    if paper_book is not None:          # paper: execute the decision at once (no approval: paper)
+        rec.flags += paper_execute(ctx, paper_book, decision, swing, history=history, quotes=quotes,
+                                   slot=slot, now=now, cycle_id=cycle_id)
+        try:
+            rec.extras["paper_book"] = paper_book.public()
+        except Exception as exc:  # noqa: BLE001 - a view failure never stops the cycle
+            rec.flags.append(f"paper_book_view_error:{type(exc).__name__}")
 
     # ---- plan (connected account only)
     plan = None
@@ -833,7 +857,7 @@ def _council_extras(code_cards, bands_fn, call_log: list | None = None, sink: An
 def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands, states, snapshot, unit,
               kill_state, quotes, pack, material_changed, basis, slot, returns, nav,
               econ=None, extra_blockers=(), extra_lines=(), broker_min_share=None,
-              core_rescale: bool = False) -> RiskDecision:
+              core_rescale: bool = False, initial_build: bool = False) -> RiskDecision:
     from council.risk.engine import RiskEngine
     from council.risk.held_levels import ledger_held_levels
 
@@ -865,6 +889,7 @@ def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands,
         cost_30d_fee_bps=float(fee_30d),
         extra_lines=extra_lines,          # swing-book §1.1: the pinned swing lines (none until run_swing)
         core_rescale=core_rescale,        # S18: the core re-size trades this cycle (`swing.budget`)
+        initial_build=initial_build,      # the initial funding allowance (empty book only)
     )
 
 
@@ -2084,7 +2109,7 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
         extra = [r for r in event_rows(list(events), slot) if r.id not in have]
         if extra:
             inputs = _replace(inputs, context=[*inputs.context, *extra])
-    inputs = with_book_map(inputs, ledger, policy)       # S18: the whole-book split for the swing PM
+    inputs = with_book_map(inputs, ledger, policy, extra_nav=paper_exposure(ctx))   # S18: the whole-book split for the swing PM
     result = await run_swing_stage(ctx.gateway, ctx.registry, policy, inputs, gate=src.gate,
                                    skeptic_gw=src.skeptic_gateway, sink=sink, wide=wide, trace_all=trace_all)
     out.flags += [f for f in result.flags if f not in out.flags]
@@ -2092,12 +2117,17 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
     for ref in result.exits():                   # PM exits of open trades (code exits already in)
         if ref.startswith("trade:") and ref not in out.exits:
             out.exits[ref] = "exit"
-    if snapshot is None and not out.live:
+    paper_book = getattr(ctx, "paper_book", None)
+    if paper_book is not None and not out.live:
+        # a paper run with its paper book: S17 sees the paper drawdown from the paper peak
+        nav = SimpleNamespace(drawdown=paper_book.drawdown())
+    elif snapshot is None and not out.live:
         # a paper run without a broker (SW-5c): the S-rules see a flat book at its peak and the
         # funded NAV of the account file (costs are NAV-invariant, D18); nothing here can trade
         nav = SimpleNamespace(drawdown=0.0)
         out.flags.append("swing_paper_assumed_book")
-    book = _book_state(ledger, policy, kill_state=kill_state, nav=nav, slot=slot, now=now)
+    book = with_paper_trades(_book_state(ledger, policy, kill_state=kill_state, nav=nav, slot=slot, now=now),
+                             paper_book)
     book = apply_swing_budget(ledger, policy, out, book, result.budget_votes, cycle_id=rec.cycle_id, now=now)
     cost_fn = _swing_cost_fn(ctx, snapshot, slot)
     imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
@@ -2541,7 +2571,7 @@ def core_sizing_after_swing(ctx: CycleContext, rec: CycleRecord, sizing: CoreSiz
         return unit, False
     try:
         entries = sum(abs(float(ln.pinned_w)) for ln in swing.lines if getattr(ln, "action", "") == "enter")
-        now_nav = swing_exposure_nav(ledger) + entries
+        now_nav = swing_exposure_nav(ledger) + entries + paper_exposure(ctx)
         rescale = False
         applied = sizing.applied or 0.0
         if sp.budget.idle == "core":
@@ -2591,7 +2621,7 @@ def apply_swing_budget(ledger: Any, policy: Any, out: SwingRun, book: Any, votes
     return _replace(book, budget_nav=bd.nav)
 
 
-def with_book_map(inputs: Any, ledger: Any, policy: Any) -> Any:
+def with_book_map(inputs: Any, ledger: Any, policy: Any, *, extra_nav: float = 0.0) -> Any:
     """The swing PM's BOOK MAP rows (`BK:` ids, percent of NAV, code-written): the open swing
     exposure, the core's share and the current budget with its range (S18)."""
     from dataclasses import replace as _replace
@@ -2600,7 +2630,7 @@ def with_book_map(inputs: Any, ledger: Any, policy: Any) -> Any:
     from council.swing.council import ContextRow
 
     b = policy.swing.budget
-    swing = swing_exposure_nav(ledger)
+    swing = swing_exposure_nav(ledger) + float(extra_nav)
     applied = _applied_swing(ledger) or 0.0
     last = ledger.get_runtime(BUDGET_KEY)
     v = last.get("pct") if isinstance(last, Mapping) else None
@@ -2615,3 +2645,199 @@ def with_book_map(inputs: Any, ledger: Any, policy: Any) -> Any:
                                       f"0 to {b.max_pct} in steps of {b.step_pct}; it never closes an open trade"),
     ]
     return _replace(inputs, book_map=rows)
+
+
+# ------------------------------------------------------------------------------- paper book
+INITIAL_BUILD_FLAG = "initial_build"
+
+
+def initial_build_of(policy: Any, snapshot: Any, kill_state: str, ledger: Any) -> bool:
+    """The initial funding allowance (`policy/risk.yaml initial_build`): True only for a known,
+    EMPTY book (a snapshot with no weight and no order held for a closed market) in a NORMAL kill
+    state, and only when the policy lists exempt rules. The engine re-checks the emptiness."""
+    from council.risk.config import risk_limits
+
+    if snapshot is None or kill_state != "NORMAL":
+        return False
+    if any(abs(float(w)) > 1e-9 for w in (snapshot.signed_w or {}).values()) or snapshot.positions:
+        return False
+    try:
+        if any(abs(float(w)) > 1e-9 for w in (ledger.pending_open_weights() or {}).values()):
+            return False
+    except Exception:  # noqa: BLE001 - an unreadable pending state is not an empty book
+        return False
+    return bool(risk_limits(policy).initial_build.exempt)
+
+
+def paper_exposure(ctx: Any) -> float:
+    """The open paper swing exposure (NAV fraction) on a paper run, else 0."""
+    book = getattr(ctx, "paper_book", None)
+    try:
+        return float(book.swing_exposure_nav()) if book is not None else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def with_paper_trades(book: Any, paper_book: Any) -> Any:
+    """The swing S-rules' book state plus the paper book's open swing trades (paper runs): the paper
+    exposure counts against S18 / the position caps like a live trade."""
+    if paper_book is None:
+        return book
+    from dataclasses import replace as _replace
+
+    from council.swing import rules as R
+
+    eq = paper_book.equity()
+    extra = [R.BookTrade(ref=t.trade_id, ticker=t.ticker, side=t.side, size_nav=abs(t.notional) / eq if eq > 0 else 0.0,
+                         stop_pct=float(t.stop_pct), sector=None, beta_60d=t.beta)
+             for t in paper_book.open_swing()]
+    return _replace(book, trades=[*book.trades, *extra]) if extra else book
+
+
+def paper_book_start(ctx: Any, history: Mapping[str, Any], slot: datetime, now: datetime) -> tuple[Any, list[str]]:
+    """Load (or start) the paper book on a paper run and mark it: core lines at the slot's last
+    completed closes, open swing trades through `swing.paper.evaluate` on the completed daily bars.
+    Not a paper run -> (None, []); a failure -> (None, ["paper_book_error:<type>"]) and the cycle
+    takes the book as flat, as before."""
+    from council.paperbook import PaperBook, is_paper_run, last_closes, start_nav
+
+    if not is_paper_run(ctx):
+        return None, []
+    try:
+        flags: list[str] = []
+        book = PaperBook.load(ctx.state_dir)
+        if book is None:
+            nav, funding = start_nav(ctx.state_dir, ctx.policy)
+            sp = getattr(ctx.policy, "swing", None)
+            declared = float(sp.public_record.declared_cost_pct_per_leg) if sp is not None else 1.25
+            book = PaperBook.start(ctx.state_dir, nav, at=now, funding=funding, declared_swing_pct_per_leg=declared)
+            if funding == "assumed":
+                flags.append("paper_book_assumed_nav")
+        flags += book.mark_core(last_closes(history, list(book.core)), now)
+        open_ = book.open_swing()
+        if open_:
+            src = getattr(ctx.sources, "swing", None)
+            day = (slot.astimezone(clock.NEW_YORK) - timedelta(days=1)).date()
+            bars = {}
+            if src is not None and getattr(src, "daily_bars", None) is not None:
+                bars = src.daily_bars(sorted({t.ticker for t in open_}), day) or {}
+            ref = src.reference_price if src is not None and getattr(src, "reference_price", None) else (lambda t: None)
+            flags += book.settle_swing(bars, ref, now)
+        book.save()
+        return book, ["paper_book", *flags]
+    except Exception as exc:  # noqa: BLE001 - the paper book never stops a cycle
+        return None, [f"paper_book_error:{type(exc).__name__}"]
+
+
+def paper_swing_lines(book: Any, swing: SwingRun, snapshot: Any, flags: list[str]) -> list[Any]:
+    """The engine's pinned swing lines on a paper run: a hold per open paper trade (at its current
+    weight) and an entry per swing entry accepted this slot, so whole-book limits bind on paper."""
+    from council.swing import book as B
+
+    signed = dict(snapshot.signed_w) if snapshot is not None else {}
+    lines: list[Any] = []
+    seen: set[str] = set()
+    for t in book.open_swing():
+        try:
+            lines.append(B.open_line(t.trade_id, t.ticker, t.side, signed.get(t.line, 0.0), stop_pct=t.stop_pct,
+                                     sigma_daily=t.sigma_daily, beta_60d=t.beta, vehicle=t.ticker))
+            seen.add(t.line)
+        except Exception as exc:  # noqa: BLE001
+            flags.append(f"paper_swing_line_error:{type(exc).__name__}")
+    for e in swing.entries:
+        try:
+            line = B.line_id(e.ticker)
+            if line in seen:
+                flags.append(f"swing_drop:{e.ticker}:paper_already_open")
+                continue
+            lines.append(B.entry_line(e.trade_id, e.ticker, e.side, e.size_nav, stop_pct=e.stop_pct,
+                                      sigma_daily=e.detail.get("sigma_daily"), beta_60d=e.detail.get("beta"),
+                                      vehicle=e.ticker))
+            seen.add(line)
+        except Exception as exc:  # noqa: BLE001
+            flags.append(f"paper_swing_line_error:{type(exc).__name__}")
+    return lines
+
+
+def _paper_leg_cost(quotes: Mapping[Any, Any]) -> Any:
+    """The declared core cost of one paper leg in bps of NAV: |dw| x the policy per-side cost (+ the
+    private fixed fee as bps of NAV; a flip pays both sides) - the engine's R14 leg cost."""
+    def quote(s: str, direction: str) -> Any:
+        for key in ((s, direction, 1), (s, direction), s):
+            q = quotes.get(key)
+            if q is not None and getattr(q, "direction", direction) == direction:
+                return q
+        return None
+
+    def cost(s: str, before: float, after: float) -> float:
+        direction = "long" if after > 1e-9 else "short" if after < -1e-9 else ("long" if before > 0 else "short")
+        q = quote(s, direction)
+        if q is None:
+            return 0.0
+        bps = abs(after - before) * float(q.per_side_bps) + float(getattr(q, "fixed_fee_nav_bps", 0.0) or 0.0)
+        if before * after < 0:
+            closing = quote(s, "long" if before > 0 else "short")
+            bps += float(getattr(closing, "fixed_fee_nav_bps", 0.0) or 0.0) if closing is not None else 0.0
+        return bps
+
+    return cost
+
+
+def paper_execute(ctx: Any, book: Any, decision: RiskDecision, swing: SwingRun, *, history: Mapping[str, Any],
+                  quotes: Mapping[Any, Any], slot: datetime, now: datetime, cycle_id: str) -> list[str]:
+    """Execute the decision on paper (no approval: paper): core lines to the decision's final
+    weights at the slot's reference prices with the declared policy cost, and the swing entries the
+    engine kept at the paper reference with the declared cost per leg. Never raises."""
+    from council.paperbook import last_closes
+    from council.swing.rules import add_sessions
+
+    flags: list[str] = []
+    try:
+        core = [s for s in ctx.policy.universe.by_symbol()]
+        targets = {s: float(decision.final_w.get(s, 0.0)) for s in core}
+        prices = last_closes(history, core)
+        legs, f = book.trade_core(targets, prices, _paper_leg_cost(quotes), at=now, cycle_id=cycle_id)
+        flags += f
+        dropped = set((getattr(decision, "swing_dropped", None) or {}).keys())
+        entered = 0
+        day = slot.astimezone(clock.NEW_YORK).date()
+        src = getattr(ctx.sources, "swing", None)
+        kept = {ln.line_id for ln in swing.lines if getattr(ln, "action", "") == "enter"}
+        for e in swing.entries:
+            from council.swing import book as B
+
+            try:
+                line = B.line_id(e.ticker)
+            except ValueError:
+                continue
+            if line in dropped or line not in kept:
+                continue
+            ref = _paper_entry_ref(ctx.ledger, e.idea_id)
+            if ref is None and src is not None and getattr(src, "reference_price", None):
+                ref = src.reference_price(e.ticker)
+            if not isinstance(ref, int | float) or not ref > 0:
+                flags.append("paper_book_no_reference")
+                continue
+            idea_row = ctx.ledger.swing_idea(e.idea_id) or {}
+            ts = e.time_stop_date or add_sessions(day, 10).isoformat()
+            if book.enter_swing(trade_id=e.trade_id, ticker=e.ticker, side=e.side, line=line, size_nav=e.size_nav,
+                                entry_ref=float(ref), stop_pct=e.stop_pct, target_pct=e.target_pct,
+                                entry_day=day.isoformat(), time_stop_day=ts, setup=idea_row.get("setup"),
+                                at=now, cycle_id=cycle_id, sigma_daily=e.detail.get("sigma_daily"),
+                                beta=e.detail.get("beta")):
+                entered += 1
+        book.last_cycle = cycle_id
+        book.save()
+        flags.append(f"paper_book_filled:{legs}+{entered}")
+    except Exception as exc:  # noqa: BLE001 - the paper book never stops a cycle
+        flags.append(f"paper_book_error:{type(exc).__name__}")
+    return flags
+
+
+def _paper_entry_ref(ledger: Any, idea_id: str) -> float | None:
+    """The paper reference already recorded for this idea's paper row (the slot price)."""
+    try:
+        rows = [r for r in ledger.paper_trades() if r.get("idea_id") == idea_id and r.get("entry_ref")]
+    except Exception:  # noqa: BLE001
+        return None
+    return float(rows[-1]["entry_ref"]) if rows else None

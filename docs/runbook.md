@@ -190,9 +190,26 @@ The swing pipeline on real data and real models, with no broker token and nothin
    COUNCIL_STATE_DIR="<state>/paper" council-op swing status
    COUNCIL_STATE_DIR="<state>/paper" council-op inputs show <cycle> --html
    ```
-   Expected flags on a paper run: `swing_eligibility_unverified`, `swing_paper_assumed_book` and
+   Expected flags on a paper run: `swing_eligibility_unverified`, `paper_book` (the S-rules see the
+   paper book and its drawdown; `swing_paper_assumed_book` only when the paper book failed) and
    sometimes `paper_reference_last_close` or `swing_screen_missing` (the after-close screen is
    built once per session after 20:30 New York).
+   **Paper book** (`council.paperbook`): a paper run keeps a persisted paper broker in
+   `<state>/paper/book.json` (+ `book_ledger.jsonl`, both 0600), started at the funded NAV above
+   (missing -> the policy's assumed NAV, flag `paper_book_assumed_nav`). Each paper cycle marks it to
+   market (core: the cycle's last closes; swing: stop / target / time stop on the completed daily
+   bars, `swing.paper` conventions), hands it to the engine as the snapshot (flag `paper_book`; no
+   more "current book taken as flat") and then executes the decision on paper at once (core legs at
+   the declared policy cost, kept swing entries at the paper reference with 1.25% per leg; flag
+   `paper_book_filled:<core legs>+<swing entries>`). The first build of an empty book carries
+   `initial_build` (R13 / R14 cycle and 30-day cost / R15 exempt for that one cycle; carry, gross,
+   net, margin, R7, vol and R21 still apply); every later cycle trades deltas within R14.
+   `council paper status` prints it (percent only). `council.paperbook.paper_book_public(state)` is
+   the percent-only dict the public paper record / site renders as "the portfolio":
+   `paper_return_pct` (since start), `core_weights_pct` {line: %}, `swing_trades` [{ticker, side,
+   setup, status, weight_pct, stop_pct, target_pct, entry_day, days_held, exit_reason,
+   return_net_pct (net of the declared cost)}], `split_pct` {core, swing, cash}, `started_at`,
+   `marked_at`, `last_cycle`, `funding`.
 
 4. **FRED key (free)**: without one every cycle carries `calendar:release_dates_skipped_no_fred_key`
    (CPI / NFP / PCE release dates are not loaded). Request a free key at fred.stlouisfed.org
