@@ -1,5 +1,19 @@
 # Changelog
 
+## Paper trace-all and the local paper report (2026-10-01)
+- `council cycle --paper --trace-all` (paper only; refused like `--ideas` / `--at`; combinable with
+  both): every swing idea with a fact card goes through every stage. The gate, the best-N cut, the
+  call-budget plan and the Skeptic are evaluated as the real slot would, but do not block: each idea
+  gets a Skeptic call, a place in a debate + PM batch (<= 5 ideas) and a vote; the S-rules run on
+  every traced PM entry against the same book (the would-be paper leg: size % NAV, stop, target,
+  time stop). Per idea `real_gate_outcome` vs `traced_outcome` in the private paper ledger record
+  (`extras.swing.trace`). The ledger and the paper rows keep the REAL pipeline's outcome. Flag
+  `swing_trace_all` (public code + site words). No policy change; the live caps are untouched.
+- `council paper report <cycle> [--state-dir DIR] [--out PATH]`: one self-contained local HTML file
+  (inline CSS, no script, no external request, 0600) of the whole flow: summary (what it chose, why,
+  real vs traced), inputs, Scout, code gate, Skeptic, debate, PM, S-rules / legs / budget split, core
+  council. Reads the paper state dir only; the file holds licensed text and is never published.
+
 ## Swing budget decided by the council; idle swing money goes to the core (S18) — policy change (2026-10-01)
 - **Policy change** (user decision 2026-10-01: "the council thinks what is better, an aggressive
   one"): the council decides the swing share of NAV each swing slot, 0-50% in steps of 5; unused swing

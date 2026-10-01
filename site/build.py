@@ -4273,6 +4273,7 @@ SWING_FLAG_WORDS = {
     "day2_catalyst_gone": "a waiting idea was dropped: the news it relied on is no longer available",
     "day2_superseded": "a waiting idea was replaced by a fresh pitch on the same stock",
     "swing_wide:*": "paper test run: the Scout was allowed more ideas than usual",
+    "swing_trace_all": "paper test run: every idea was sent through every stage to show the whole flow",
     "llm_billing_error": "the model provider refused a call (billing or access); the operator was alerted",
     "news_source_backoff:rss:*": "a news feed asked us to slow down, so it was skipped for the rest of the day",
     "swing_budget_fallback": "the manager gave no usable swing budget, so the last budget was kept",

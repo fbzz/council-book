@@ -1994,6 +1994,19 @@ def swing_wide_of(ctx: CycleContext, *, live: bool = False) -> int | None:
     return wide
 
 
+def swing_trace_of(ctx: CycleContext, *, live: bool = False) -> bool:
+    """The paper-only trace-all switch (`council cycle --paper --trace-all`). Raises
+    `SwingWideRefused` when it is set on anything but a paper run (the same test as `swing_wide_of`)."""
+    if getattr(ctx, "swing_trace_all", False) is not True:
+        return False
+    paper = (not live and getattr(ctx.settings, "mode", "live") != "live" and ctx.publisher is None
+             and getattr(ctx.sources, "broker", None) is None and ctx.notifier is None
+             and ctx.state_dir.name == PAPER_STATE_DIR)
+    if not paper:
+        raise SwingWideRefused("swing_trace_all is for `council cycle --paper` runs only")
+    return True
+
+
 async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, snapshot: Any, kill_state: str,
                          nav: Any, slot: datetime, now: datetime, econ: Any, sink: Any, events: Any = ()) -> None:
     from council.broker.instruments import InstrumentMap
@@ -2011,6 +2024,9 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
     wide = swing_wide_of(ctx, live=out.live)
     if wide is not None:
         out.flags.append(f"swing_wide:{wide}")
+    trace_all = swing_trace_of(ctx, live=out.live)
+    if trace_all:
+        out.flags.append("swing_trace_all")
     views = _open_trade_views(ledger, snapshot, slot, out.exits)
     inputs = src.inputs(slot, views, list(out.exits))
     carried = carried_waits(ledger, policy, slot, now)     # day-2 confirmation (user decision 2026-10-01)
@@ -2029,7 +2045,7 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
             inputs = _replace(inputs, context=[*inputs.context, *extra])
     inputs = with_book_map(inputs, ledger, policy)       # S18: the whole-book split for the swing PM
     result = await run_swing_stage(ctx.gateway, ctx.registry, policy, inputs, gate=src.gate,
-                                   skeptic_gw=src.skeptic_gateway, sink=sink, wide=wide)
+                                   skeptic_gw=src.skeptic_gateway, sink=sink, wide=wide, trace_all=trace_all)
     out.flags += [f for f in result.flags if f not in out.flags]
     out.calls = list(result.calls)
     for ref in result.exits():                   # PM exits of open trades (code exits already in)
@@ -2044,17 +2060,24 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
     book = apply_swing_budget(ledger, policy, out, book, result.budget_votes, cycle_id=rec.cycle_id, now=now)
     cost_fn = _swing_cost_fn(ctx, snapshot, slot)
     imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
-    cands, aggs = [], {}
-    for agg in result.entries():
-        idea = result.ideas.get(agg.ref)
-        if idea is None or idea.card is None:
-            continue
-        extras = dict(src.candidate_extras(idea) or {}) if src.candidate_extras else {}
-        cands.append(R.candidate_from_card(idea.card, ref=agg.ref, ticker=idea.ticker, setup=idea.idea.setup,
-                                           stop_pct=agg.stop_pct, target_pct=agg.target_pct,
-                                           time_stop_days=agg.time_stop_days, **extras))
-        aggs[agg.ref] = agg
+    def candidates(entries: Sequence[Any]) -> tuple[list[Any], dict[str, Any]]:
+        cands, aggs = [], {}
+        for agg in entries:
+            idea = result.ideas.get(agg.ref)
+            if idea is None or idea.card is None:
+                continue
+            extras = dict(src.candidate_extras(idea) or {}) if src.candidate_extras else {}
+            cands.append(R.candidate_from_card(idea.card, ref=agg.ref, ticker=idea.ticker, setup=idea.idea.setup,
+                                               stop_pct=agg.stop_pct, target_pct=agg.target_pct,
+                                               time_stop_days=agg.time_stop_days, **extras))
+            aggs[agg.ref] = agg
+        return cands, aggs
+
+    cands, aggs = candidates(result.entries())
     accepted, rule_dropped = R.final_pass(cands, book, policy.swing, cost_fn)
+    traced_rules: tuple[list[Any], list[Any]] | None = None
+    if trace_all and result.trace_aggregate is not None:      # every traced entry, same book and rules
+        traced_rules = R.final_pass(candidates(result.trace_aggregate.entries())[0], book, policy.swing, cost_fn)
     rule_codes: dict[str, str] = {}
     for v in rule_dropped:
         code = R.public_code(v.code or "unknown")
@@ -2070,7 +2093,9 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
             v = None                                    # §4.3: over the re-proposal limit -> expired
             out.flags.append(REPROPOSAL_FLAG)
             rule_codes[ref] = REPROPOSAL_CODE
-        status = "accepted" if v is not None else ("pending" if parks_as_wait(result, ref, idea) else "dropped")
+        heard = not trace_all or ref in ((result.trace or {}).get("real_verdict_refs") or ())
+        status = "accepted" if v is not None else (
+            "pending" if heard and parks_as_wait(result, ref, idea) else "dropped")
         drop = _swing_drop_code(result, ref, accepted=v is not None, rule_code=rule_codes.get(ref), live=out.live)
         idea_id = _swing_ledger_idea(ledger, cycle_id, idea, status, now, drop_code=drop,
                                      wait_day=slot.astimezone(clock.NEW_YORK).date().isoformat()
@@ -2106,6 +2131,15 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
                                                  rule_codes=rule_codes, idea_ids=idea_ids, cycle_id=cycle_id)
     except Exception as exc:  # noqa: BLE001 - a record failure never stops the cycle; nothing is published
         out.flags.append(f"swing_record_error:{type(exc).__name__}")
+    if trace_all:
+        try:
+            from council.swing.trace import trace_record
+
+            rec.extras.setdefault("swing", {})["trace"] = trace_record(
+                result, inputs, real_rules=(accepted, rule_dropped), traced_rules=traced_rules,
+                rule_codes=rule_codes, budget=out.budget, slot=slot, policy=policy)
+        except Exception as exc:  # noqa: BLE001 - the trace never stops the cycle
+            out.flags.append(f"swing_trace_error:{type(exc).__name__}")
     out.flags += record_skeptic_verdicts(ledger, result, now)
 
 

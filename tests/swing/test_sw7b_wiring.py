@@ -189,7 +189,7 @@ SWING_FLAGS = [
     "swing_source_unavailable:alpaca", "swing_source_error:alpaca:RuntimeError", "swing_eligibility_unverified",
     "swing_paper_assumed_book", "paper_reference_last_close", "swing_screen_missing",
     "swing_drop:reproposal_limit", "swing_book_not_live",
-    "day2_catalyst_gone", "day2_superseded", "swing_wide:3", "llm_billing_error", "news_source_backoff:rss:reuters_markets",
+    "day2_catalyst_gone", "day2_superseded", "swing_wide:3", "swing_trace_all", "llm_billing_error", "news_source_backoff:rss:reuters_markets",
 ]
 
 

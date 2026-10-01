@@ -13,7 +13,7 @@ cost quote, so the public record never copies a note: it maps each one through t
 | R15 | SR_be and its limit only when every input is public: the line's cost from the policy floors (`costs:floor`) and its volatility from Tiingo / Binance history (SR_be = (RT + carry x hold) / (sigma x hold / 365), so with sigma and hold public it gives the round trip back) | otherwise the bare `R15` |
 | R15_fee, R14_fee | never (D18: the fee in bps of NAV encodes the NAV) | the bare code |
 | Swing book (SW-4): `swing_book_limit:<rule>` (a whole swing entry removed by a book limit) and a swing S-rule drop `<rule>:<code>` (`swing.rules.public_code`) | never | as written (codes only) |
-| Swing-book cycle flags and plan skips (SW-7b, `SWING_FLAG_CODES`): `swing_source_unavailable:<source>`, `swing_source_error:<source>:<type>`, `swing_eligibility_unverified`, `swing_paper_assumed_book`, `paper_reference_last_close`, `swing_screen_missing`, `swing_drop:reproposal_limit`, the SW-4b pause flags `swing_paused:<s15|canary>`, `swing_brake_unknown`, `swing_brake_twice_60d`, `swing_exit_unapproved`, `swing_canary_set_invalid`, the day-2 flags `day2_catalyst_gone` / `day2_superseded`, `swing_wide:<n>` (paper only), `llm_billing_error`, `news_source_backoff:rss:<feed>`, the S18 flag `swing_budget_fallback`, the skip `swing_book_not_live` | never | as written (codes only; a source name outside `[a-z0-9_]` becomes `other`); the site's words: `site/build.py` `SWING_FLAG_WORDS` |
+| Swing-book cycle flags and plan skips (SW-7b, `SWING_FLAG_CODES`): `swing_source_unavailable:<source>`, `swing_source_error:<source>:<type>`, `swing_eligibility_unverified`, `swing_paper_assumed_book`, `paper_reference_last_close`, `swing_screen_missing`, `swing_drop:reproposal_limit`, the SW-4b pause flags `swing_paused:<s15|canary>`, `swing_brake_unknown`, `swing_brake_twice_60d`, `swing_exit_unapproved`, `swing_canary_set_invalid`, the day-2 flags `day2_catalyst_gone` / `day2_superseded`, `swing_wide:<n>` / `swing_trace_all` (paper only), `llm_billing_error`, `news_source_backoff:rss:<feed>`, the S18 flag `swing_budget_fallback`, the skip `swing_book_not_live` | never | as written (codes only; a source name outside `[a-z0-9_]` becomes `other`); the site's words: `site/build.py` `SWING_FLAG_WORDS` |
 | Anything else | never | its bare rule code, else `held` (fail closed) |
 
 The same table serves the structured trace (T5b) through `public_trace_code` / `value_allowed`:
@@ -108,7 +108,7 @@ SWING_FLAG_CODES: frozenset[str] = frozenset({
     "swing_paused:s15", "swing_paused:canary", "swing_brake_unknown", "swing_brake_twice_60d",
     "swing_exit_unapproved", "swing_canary_set_invalid",
     "day2_catalyst_gone", "day2_superseded", "swing_wide:*", "llm_billing_error", "news_source_backoff:rss:*",
-    "swing_budget_fallback",
+    "swing_budget_fallback", "swing_trace_all",
 })
 # Families whose tail is a number or a feed label (published as written): the key keeps the prefix.
 _SWING_FAMILY = re.compile(r"^(swing_wide|news_source_backoff:rss):[A-Za-z0-9_.-]{1,40}$")

@@ -50,6 +50,9 @@ app.add_typer(swing, name="swing")
 rehearse = typer.Typer(add_completion=False, no_args_is_help=True,
                        help="Onboarding rehearsal against the fake broker (dev role; marked sandbox only).")
 app.add_typer(rehearse, name="rehearse")
+paper_app = typer.Typer(add_completion=False, no_args_is_help=True,
+                        help="Paper runs (`council cycle --paper`): local, private views of the paper state.")
+app.add_typer(paper_app, name="paper")
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -186,6 +189,9 @@ def cycle(
                                              "(e.g. 2026-09-28T18:40Z), to replay a missed swing slot."),
     ideas: int = typer.Option(None, "--ideas", help="--paper only: a WIDE swing slot of N ideas (1..20), "
                                                    "each reviewed by the Skeptic; budget and deadline scale."),
+    trace_all: bool = typer.Option(False, "--trace-all", help="--paper only: every idea with a fact card goes "
+                                   "through every swing stage (Skeptic, debate, PM, S-rules); the verdicts "
+                                   "do not block, the real outcome is recorded beside the traced one."),
 ) -> None:
     """Run the council cycle for the current 4-hour slot."""
     from council.cycle import run_cycle
@@ -195,10 +201,13 @@ def cycle(
     sandbox = _dress_context()
     if ideas is not None and (not paper or sandbox is not None):
         _refuse("--ideas is for --paper runs only (a live, rehearsal or dry-run slot keeps the policy caps)")
+    if trace_all and (not paper or sandbox is not None):
+        _refuse("--trace-all is for --paper runs only (a live, rehearsal or dry-run slot never traces)")
     if sandbox is not None:
         ctx = sandbox                         # [REHEARSAL] shell: stub model, fake broker, sandbox remote
     elif paper:
         ctx = paper_context(settings, stub_llm=stub_llm, ideas=ideas)
+        ctx.swing_trace_all = bool(trace_all)
     elif rehearsal:
         from council import paths
         from council.context import build_context
@@ -258,6 +267,30 @@ def paper_context(settings, *, stub_llm: bool = False, ideas: int | None = None)
                         state_dir=paths.state_dir() / PAPER_STATE)
     ctx.swing_wide = ideas
     return ctx
+
+
+@paper_app.command("report")
+def paper_report(
+    cycle_id: str = typer.Argument(..., help="A paper cycle id (`council cycle --paper [--trace-all]`)."),
+    state_dir: Path = typer.Option(None, "--state-dir", help="The paper state dir (default <state>/paper); "
+                                                            "any other directory is refused."),
+    out: Path = typer.Option(None, "--out", help="The HTML file (default <state>/paper/reports/<cycle>.html)."),
+) -> None:
+    """Write ONE self-contained local HTML file of a paper cycle's whole flow (inputs, Scout, gate,
+    Skeptic, debate, PM, S-rules, legs, core council). Reads the PAPER state only. The file holds
+    licensed text: keep it local, never publish it."""
+    from council import paths
+    from council.swing.report import WARNING, write_report
+
+    root = Path(state_dir) if state_dir is not None else paths.state_dir() / PAPER_STATE
+    if root.name != PAPER_STATE:
+        _refuse(f"--state-dir must be the paper state dir (a directory named {PAPER_STATE!r})")
+    try:
+        path = write_report(root, cycle_id, out)
+    except (FileNotFoundError, ValueError) as exc:
+        _refuse(f"paper report: {exc}")
+    typer.echo(f"WARNING: {WARNING}", err=True)
+    typer.echo(str(path))
 
 
 @app.command()

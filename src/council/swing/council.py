@@ -102,6 +102,9 @@ SKEPTIC_FIRST_IDEAS = 2            # the drop order keeps the Skeptic for the fi
 MAX_SCOUT_IDEAS = 5
 WIDE_MAX_IDEAS = 20                 # `council cycle --paper --ideas N`: 1 <= N <= 20 (paper only)
 WIDE_DEADLINE_PER_IDEA_S = 45
+TRACE_BATCH = 5                     # `--trace-all`: debate + PM batches of <= 5 ideas
+TRACE_DEADLINE_PER_BATCH_S = 150
+TRACE_CARRIED_ROOM = 3              # carried day-2 waits a trace-all slot leaves room for
 READING_SUMMARY_MAX = 1200          # characters of a public item's summary shown to the Scout
 LIVE_FIELDS = ("move_since_news_live_pct", "move_since_news_live_sigma", "move_today_live_pct",
                "move_today_live_sigma")
@@ -217,6 +220,9 @@ class SwingCouncilResult:
     bear: SwingBearCase | None = None
     budget_votes: list[int | None] = field(default_factory=list)   # S18: one per PM replicate (None: no vote)
     budget_reasons: list[str] = field(default_factory=list)        # private: the voting replicates' reasons
+    scout_passed: list[str] = field(default_factory=list)  # the Scout's audit-only "passed" tickers
+    trace: dict[str, Any] | None = None                  # `--trace-all` (paper only): see `_trace_rest`
+    trace_aggregate: SwingAggregate | None = None        # `--trace-all`: every traced idea's vote
 
     @property
     def calls_used(self) -> int:
@@ -245,6 +251,7 @@ class SwingLimits:
     max_calls: int
     deadline_s: float
     wide: int | None = None
+    trace_all: bool = False
 
 
 def check_wide(wide: int | None) -> int | None:
@@ -256,15 +263,36 @@ def check_wide(wide: int | None) -> int | None:
     return wide
 
 
-def swing_limits(policy: Policy, wide: int | None = None) -> SwingLimits:
+def swing_limits(policy: Policy, wide: int | None = None, trace_all: bool = False) -> SwingLimits:
     """The slot's caps: the policy's (5 ideas, `max_skeptic_calls`, `max_calls_per_slot`,
-    `deadline_s`) unless a paper run asked for `wide` ideas."""
+    `deadline_s`) unless a paper run asked for `wide` ideas and/or `trace_all` (every idea with a
+    fact card gets a Skeptic call and a vote: the budget and the deadline scale with the batches)."""
     llm = _swing(policy).llm
     n = check_wide(wide)
     if n is None:
-        return SwingLimits(MAX_SCOUT_IDEAS, llm.max_skeptic_calls, llm.max_calls_per_slot, float(llm.deadline_s))
-    return SwingLimits(n, n, 1 + 2 * n + 2 + llm.pm_replicates,
-                       float(llm.deadline_s + WIDE_DEADLINE_PER_IDEA_S * n), wide=n)
+        base = SwingLimits(MAX_SCOUT_IDEAS, llm.max_skeptic_calls, llm.max_calls_per_slot, float(llm.deadline_s))
+    else:
+        base = SwingLimits(n, n, 1 + 2 * n + 2 + llm.pm_replicates,
+                           float(llm.deadline_s + WIDE_DEADLINE_PER_IDEA_S * n), wide=n)
+    if not trace_all:
+        return base
+    m = base.max_ideas + TRACE_CARRIED_ROOM
+    return SwingLimits(base.max_ideas, m, 1 + trace_calls(m, llm.pm_replicates),
+                       float(llm.deadline_s + WIDE_DEADLINE_PER_IDEA_S * m
+                             + TRACE_DEADLINE_PER_BATCH_S * trace_batches(m)),
+                       wide=base.wide, trace_all=True)
+
+
+def trace_batches(n: int) -> int:
+    """Debate + PM batches of at most `TRACE_BATCH` ideas (the bull / bear / PM schemas cap
+    claims and actions; a batch of 5 keeps every idea's vote inside them)."""
+    return -(-max(0, n) // TRACE_BATCH)
+
+
+def trace_calls(n: int, pm_replicates: int) -> int:
+    """Calls after the Scout in trace-all: a Skeptic call + one fallback retry per idea, and per
+    batch the bull, the bear and the PM replicates."""
+    return 2 * n + trace_batches(n) * (2 + pm_replicates)
 
 
 _WIDE_SCHEMAS: dict[int, type[ScoutOutput]] = {}
@@ -610,10 +638,11 @@ async def run_swing_council(
     result: SwingCouncilResult | None = None,
     stage: list[str] | None = None,
     wide: int | None = None,
+    trace_all: bool = False,
 ) -> SwingCouncilResult:
     """One swing slot's council. May raise; `run_swing_stage` is the never-raising wrapper."""
     sw = _swing(policy)
-    lim = swing_limits(policy, wide)
+    lim = swing_limits(policy, wide, trace_all)
     result = result if result is not None else SwingCouncilResult(slot=inputs.slot.isoformat())
     stage = stage if stage is not None else ["setup"]
     result.code_exits = list(dict.fromkeys(inputs.code_exits))
@@ -628,6 +657,8 @@ async def run_swing_council(
     scout = res.parsed if isinstance(res.parsed, ScoutOutput) else None
     if scout is None:
         result.flags.append(f"scout_failed:{res.call.status}")
+    else:
+        result.scout_passed = [str(t) for t in scout.passed]
     check = accept_ideas(scout, catalysts=catalysts, setups_live=[x for x in sw.setups_live if x != DAY2_SETUP],
                          setups_paper_only=sw.setups_paper_only, recent_rejections=inputs.recent_rejections)
     add_carried(check, inputs.carried, catalysts, result,
@@ -642,6 +673,9 @@ async def run_swing_council(
     # ③ code gate: resolve + fact card (injected), chase, best <= max_skeptic_calls
     stage[0] = "gate"
     gated = await gate(list(check.accepted)) if check.accepted else {}
+    if lim.trace_all:
+        return await _trace_rest(run, result, inputs, check.accepted, gated, catalysts, policy,
+                                 skeptic_gw=skeptic_gw, stage=stage, wide=wide)
     survivors: list[SwingIdea] = []
     for i in check.accepted:
         result.ideas[i.ref] = i
@@ -652,18 +686,9 @@ async def run_swing_council(
             _outcome(result, i, "gate", reason)
             continue
         i.card = g.card
-        sig = directional_sigma(i.card, i.idea.side)
-        if sig is not None and sig > sw.chase.max_move_since_news_sigma:
-            _outcome(result, i, "gate", "chased")
-            continue
-        if i.day2 and not day2_confirmed(i.card, i.idea.side):
-            _outcome(result, i, "gate", "day2_unconfirmed")
-            continue
-        atr = i.card.fields.get("atr14_pct")
-        econ = gate_net_rr(i.idea.stop_pct, i.idea.target_pct, sp=sw,
-                           atr_pct=float(atr) / 100.0 if isinstance(atr, int | float) and not isinstance(atr, bool) else None)
-        if econ is not None:
-            _outcome(result, i, "gate", econ)
+        code = _gate_code(i, sw)
+        if code is not None:
+            _outcome(result, i, "gate", code)
             continue
         survivors.append(i)
     survivors.sort(key=lambda i: not i.day2)      # a confirmed carried wait first (stable otherwise)
@@ -775,6 +800,219 @@ async def run_swing_council(
 WAIT_DEBATED = "skeptic_wait_debated"
 
 
+def _gate_code(i: SwingIdea, sw: SwingPolicy) -> str | None:
+    """The code gate after the fact card (chase, day-2 confirmation, net reward/risk): a drop code
+    or None."""
+    card = i.card
+    sig = directional_sigma(card, i.idea.side)
+    if sig is not None and sig > sw.chase.max_move_since_news_sigma:
+        return "chased"
+    if i.day2 and not day2_confirmed(card, i.idea.side):
+        return "day2_unconfirmed"
+    atr = card.fields.get("atr14_pct") if card is not None else None
+    return gate_net_rr(i.idea.stop_pct, i.idea.target_pct, sp=sw,
+                       atr_pct=float(atr) / 100.0 if isinstance(atr, int | float) and not isinstance(atr, bool) else None)
+
+
+def _pick(stage: str, code: str | None, note: str = "") -> dict[str, Any]:
+    return {"stage": stage, "code": code, "note": note}
+
+
+async def _trace_rest(run: _Runner, result: SwingCouncilResult, inputs: SwingInputs, accepted: Sequence[SwingIdea],
+                      gated: Mapping[str, GateResult], catalysts: Mapping[str, CatalystMeta], policy: Policy, *,
+                      skeptic_gw: Gateway | None, stage: list[str], wide: int | None) -> SwingCouncilResult:
+    """`council cycle --paper --trace-all`: after the Scout, EVERY idea with a fact card goes through
+    every stage. The code gate, the best-N cut, the budget plan and the Skeptic are evaluated as the
+    real slot would (`result.outcomes`, `result.aggregate`: the REAL pipeline, so the ledger and the
+    paper rows stay what a normal slot would write), but they do not block the trace: each traced
+    idea gets a Skeptic call, a place in a debate + PM batch (<= `TRACE_BATCH` ideas) and a vote
+    (`result.trace_aggregate`). `result.trace` = {"ideas": {ref: {"real": ..., "traced": ...,
+    "batch": k}}, "batches": [...], "real_budget_flags": [...], "real_verdict_refs": [...]}. The
+    real PM stage is approximated by the traced vote (the traced PM saw more ideas: noted)."""
+    sw = _swing(policy)
+    real_lim = swing_limits(policy, wide)
+    trace: dict[str, Any] = {"ideas": {}, "batches": [], "real_budget_flags": [], "real_verdict_refs": [],
+                             "batch_size": TRACE_BATCH}
+    result.trace = trace
+    tids = trace["ideas"]
+    for o in result.outcomes:                            # Scout drops and paper-only setups: listed
+        tids[o.ref] = {"ticker": o.ticker, "real": _pick(o.stage, o.code), "traced": _pick(o.stage, o.code,
+                       "no fact card: the trace cannot go further"), "batch": None}
+    traced: list[SwingIdea] = []
+    real: list[SwingIdea] = []
+    for i in accepted:
+        result.ideas[i.ref] = i
+        g = gated.get(i.ref)
+        if g is None or not g.ok or g.card is None or not g.card.ok:
+            reason = (g.reason if g is not None and g.reason else None) or (
+                g.card.reason if g is not None and g.card is not None else None) or "no_facts"
+            _outcome(result, i, "gate", reason)
+            tids[i.ref] = {"ticker": i.ticker, "real": _pick("gate", reason),
+                           "traced": _pick("gate", reason, "no fact card: the trace cannot go further"), "batch": None}
+            continue
+        i.card = g.card
+        traced.append(i)
+        tids[i.ref] = {"ticker": i.ticker, "real": None, "traced": None, "batch": None}
+        code = _gate_code(i, sw)
+        if code is not None:
+            _outcome(result, i, "gate", code)
+            tids[i.ref]["real"] = _pick("gate", code)
+            continue
+        real.append(i)
+    real.sort(key=lambda i: not i.day2)
+    for i in real[real_lim.max_skeptic:]:
+        _outcome(result, i, "gate", "not_best_3")
+        tids[i.ref]["real"] = _pick("gate", "not_best_3")
+    real = real[:real_lim.max_skeptic]
+    review = [t for t in inputs.open_trades if t.under_review and t.ref not in result.code_exits]
+    plan = plan_budget(len(real), len(review), max_calls=real_lim.max_calls, max_skeptic=real_lim.max_skeptic,
+                       pm_replicates=sw.llm.pm_replicates)
+    trace["real_budget_flags"] = list(plan.flags)
+    for i in real[plan.skeptic_ideas:]:
+        _outcome(result, i, "gate", "budget_no_skeptic")
+        tids[i.ref]["real"] = _pick("gate", "budget_no_skeptic")
+    real = real[:plan.skeptic_ideas]
+    trace["real_verdict_refs"] = [i.ref for i in real]
+    run.max_calls = result.calls_used + trace_calls(len(traced), sw.llm.pm_replicates)
+    traced.sort(key=lambda i: int(i.ref.split(":")[1]))
+
+    # ④ Skeptic: every traced idea (recorded; it blocks only the REAL pipeline)
+    stage[0] = "skeptic"
+    real_refs = {i.ref for i in real}
+    real_pm: list[SwingIdea] = []
+    if traced:
+        sk_gw, sk_flags = await choose_skeptic(run.gw, skeptic_gw, policy)
+        result.flags.extend(sk_flags)
+        result.skeptic_model = sk_gw.model
+
+        async def one(idea: SwingIdea) -> tuple[SwingIdea, VerdictOutcome]:
+            secs, admissible = skeptic_input(idea, catalysts=catalysts, inputs=inputs)
+            r = await run.call("skeptic", SkepticVerdict, secs, gw=sk_gw)
+            if r.parsed is None and r.call.status in ("transport", "timeout") and sk_gw is not run.gw:
+                if "skeptic_same_model" not in result.flags:
+                    result.flags.append("skeptic_same_model")
+                r = await run.call("skeptic", SkepticVerdict, secs, gw=run.gw, replicate=1)
+            v = r.parsed if isinstance(r.parsed, SkepticVerdict) else None
+            return idea, accept_verdict(v, idea=idea, admissible=admissible,
+                                        prior_wait_sigma=sw.chase.prior_wait_sigma)
+
+        for idea, out in await asyncio.gather(*(one(i) for i in traced)):
+            heard = wait_gets_hearing(out)
+            if heard:
+                out = _replace(out, flags=(*out.flags, WAIT_DEBATED))
+            idea.verdict = out
+            if idea.ref not in real_refs:
+                continue
+            if out.status == "pass" or heard:
+                real_pm.append(idea)
+            else:
+                _outcome(result, idea, "skeptic", out.code, out.flags)
+                tids[idea.ref]["real"] = _pick("skeptic", out.code)
+    real_pm_refs = {i.ref for i in real_pm}
+
+    # ⑤ + ⑥ debate and PM in batches; the open trades under review go to the first batch only
+    guard_no_canary(traced)
+    seeds = pm_seeds(policy)[:sw.llm.pm_replicates]
+    merged: list[tuple[int, int, AggregatedSwingAction]] = []
+    others: list[AggregatedSwingAction] = []
+    flags: list[str] = []
+    batches = [traced[k:k + TRACE_BATCH] for k in range(0, len(traced), TRACE_BATCH)]
+    if not batches and review:
+        batches = [[]]
+    for b, batch in enumerate(batches):
+        trades = review if b == 0 else []
+        idea_refs = [i.ref for i in batch]
+        trade_refs = [t.ref for t in trades]
+        refs = set(idea_refs) | set(trade_refs)
+        for i in batch:
+            tids[i.ref]["batch"] = b
+        stage[0] = "debate"
+        secs, admissible = full_input(batch, trades, catalysts=catalysts, inputs=inputs)
+        rb = await run.call("swing_bull", SwingCase, secs)
+        bull, d1 = accept_case(rb.parsed if isinstance(rb.parsed, SwingCase) else None, refs=refs, admissible=admissible)
+        secs, _ = full_input(batch, trades, catalysts=catalysts, inputs=inputs, bull=bull)
+        rr = await run.call("swing_bear", SwingBearCase, secs)
+        bear, d2 = accept_case(rr.parsed if isinstance(rr.parsed, SwingBearCase) else None, refs=refs,
+                               admissible=admissible)
+        bear = bear if isinstance(bear, SwingBearCase) else None
+        if d1 or d2:
+            flags.append(f"debate_claims_dropped:{d1 + d2}")
+        if b == 0:
+            result.bull, result.bear = bull, bear
+        stage[0] = "pm"
+        secs, admissible = full_input(batch, trades, catalysts=catalysts, inputs=inputs, bull=bull, bear=bear)
+        votes: list[int | None] = [None] * len(seeds)
+        reasons: list[str] = [""] * len(seeds)
+        raw: list[Any] = [None] * len(seeds)
+
+        async def rep(k: int, seed: int, secs: list[Segmented] = secs, admissible: set[str] = admissible,
+                      idea_refs: list[str] = idea_refs, trade_refs: list[str] = trade_refs,
+                      votes: list[int | None] = votes, reasons: list[str] = reasons,
+                      raw: list[Any] = raw) -> list[Any] | None:
+            r = await run.call("swing_pm", SwingPMDecision, secs, seed=seed, replicate=k)
+            dec = r.parsed if isinstance(r.parsed, SwingPMDecision) else None
+            votes[k] = accept_budget(dec, admissible=admissible, budget=policy.swing.budget)
+            if votes[k] is not None and dec is not None:
+                reasons[k] = dec.swing_budget_reason
+            raw[k] = dec.model_dump(mode="json") if dec is not None else None
+            return accept_actions(dec, idea_refs=set(idea_refs), trade_refs=set(trade_refs), admissible=admissible)
+
+        reps = await asyncio.gather(*(rep(k, s) for k, s in enumerate(seeds)))
+        agg = aggregate_actions(reps, idea_refs=idea_refs, trade_refs=trade_refs, max_entries=None)
+        if b == 0:
+            result.budget_votes = votes
+            result.budget_reasons = [x for x, v in zip(reasons, votes, strict=True) if v is not None]
+        order = {r: n for n, r in enumerate(idea_refs)}
+        for a in agg.actions:
+            if a.action == "enter":
+                merged.append((-a.votes_for, b * TRACE_BATCH + order[a.ref], a))
+            else:
+                others.append(a)
+        trace["batches"].append({
+            "refs": idea_refs, "trades": trade_refs,
+            "bull": bull.model_dump(mode="json") if bull is not None else None,
+            "bear": bear.model_dump(mode="json") if bear is not None else None,
+            "pm_replicates": [{"replicate": k, "seed": s, "valid": raw[k] is not None, "decision": raw[k],
+                               "accepted_actions": [a.model_dump(mode="json") for a in (reps[k] or [])]
+                               if reps[k] is not None else None, "budget_vote": votes[k]}
+                              for k, s in enumerate(seeds)],
+            "actions": [a.model_dump(mode="json") for a in agg.actions],
+        })
+    merged.sort(key=lambda t: (t[0], t[1]))
+    full = SwingAggregate(actions=[*others, *(t[2] for t in merged)], flags=flags, ranked=[t[2].ref for t in merged])
+    result.trace_aggregate = full
+    result.flags.extend(flags)
+
+    # the REAL aggregate: only the ideas the real pipeline would have shown the PM (+ open trades)
+    room = len(real_pm_refs) if inputs.max_entries is None else max(0, inputs.max_entries)
+    ranked = [r for r in full.ranked if r in real_pm_refs]
+    keep, extra = ranked[:room], ranked[room:]
+    real_actions = []
+    for a in full.actions:
+        if a.ref.startswith("trade:") or (a.ref in real_pm_refs and a.ref not in extra):
+            real_actions.append(a)
+        elif a.ref in extra:
+            real_actions.append(AggregatedSwingAction(ref=a.ref, action="pass", votes_for=a.replicates - a.votes_for,
+                                                      replicates=a.replicates, failed_replicates=a.failed_replicates))
+    result.aggregate = SwingAggregate(actions=real_actions, flags=[f"no_room:{r}" for r in extra], ranked=keep)
+    result.flags.extend(result.aggregate.flags)
+    entered_all = {a.ref for a in full.entries()}
+    note = f"the traced PM saw batches of up to {TRACE_BATCH} ideas; the real PM would have seen only the survivors"
+    for i in real_pm:
+        entered = i.ref in keep
+        _outcome(result, i, "pm", None if entered else "pm_pass", _heard_flags(i))
+        tids[i.ref]["real"] = _pick("pm", "enter" if entered else ("no_room" if i.ref in extra else "pm_pass"), note)
+    for i in traced:
+        a = next((x for x in full.actions if x.ref == i.ref), None)
+        if a is None:
+            votes_txt = "no vote"
+        else:
+            enter = a.votes_for if a.action == "enter" else a.replicates - a.votes_for - a.failed_replicates
+            votes_txt = f"enter votes {max(0, enter)} of {a.replicates}"
+        tids[i.ref]["traced"] = _pick("pm", "enter" if i.ref in entered_all else "pm_pass", votes_txt)
+    return result
+
+
 def add_carried(check: Any, carried: Sequence[CarriedWait], catalysts: Mapping[str, CatalystMeta],
                 result: SwingCouncilResult, *, start: int, live: bool) -> None:
     """Append the carried waits to the accepted ideas as code-made `day2_confirmation` ideas
@@ -845,15 +1083,17 @@ async def run_swing_stage(
     sink: InputSink | None = None,
     deadline_s: float | None = None,
     wide: int | None = None,
+    trace_all: bool = False,
 ) -> SwingCouncilResult:
     """The swing stage as the cycle calls it: bounded by the wall-clock deadline, never raises
     (except `CanaryLeak`, a code bug). On a timeout or an error no entry survives; code exits do."""
     result = SwingCouncilResult(slot=inputs.slot.isoformat(), code_exits=list(dict.fromkeys(inputs.code_exits)))
     stage = ["setup"]
-    timeout = float(deadline_s if deadline_s is not None else swing_limits(policy, wide).deadline_s)
+    timeout = float(deadline_s if deadline_s is not None else swing_limits(policy, wide, trace_all).deadline_s)
     try:
         await asyncio.wait_for(run_swing_council(gw, reg, policy, inputs, gate=gate, skeptic_gw=skeptic_gw,
-                                                 sink=sink, result=result, stage=stage, wide=wide), timeout)
+                                                 sink=sink, result=result, stage=stage, wide=wide,
+                                                 trace_all=trace_all), timeout)
     except TimeoutError:
         _abort(result, "swing_error:timeout")
     except CanaryLeak:
@@ -867,6 +1107,7 @@ async def run_swing_stage(
 def _abort(result: SwingCouncilResult, flag: str) -> None:
     result.flags.append(flag)
     result.aggregate = None                             # no new entries, no LLM exits: holds unchanged
+    result.trace_aggregate = None
 
 
 def drops_of(result: SwingCouncilResult) -> list[Drop]:

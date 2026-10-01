@@ -103,6 +103,9 @@ class CycleContext:
     # `council cycle --paper --ideas N` only (cli.paper_context): a WIDE paper swing slot of N ideas.
     # The cycle refuses it on any context that is not a paper run (cycle.swing_wide_of).
     swing_wide: int | None = None
+    # `council cycle --paper --trace-all` only: every idea with a fact card goes through every swing
+    # stage (the real outcome is recorded beside it). Refused off paper (cycle.swing_trace_of).
+    swing_trace_all: bool = False
 
 
 # --------------------------------------------------------------------------------------- lock
