@@ -362,6 +362,7 @@ def test_every_swing_seat_has_a_page_with_paper_data(built):
         t = _text(html)
         assert not re.search(r"[$€£]\s?\d", t), slug                           # percent-only
     skeptic = _text(pages["agents/skeptic.html"])
+    assert "different model family" not in skeptic and "same model as the Scout" in skeptic
     assert re.search(r"(passed|said wait to|rejected|could not judge) \d", skeptic)
     assert "Open decision #1" in skeptic
 

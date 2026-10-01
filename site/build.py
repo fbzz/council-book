@@ -4333,8 +4333,9 @@ SWING_AGENT_SPECS: tuple[AgentSpec, ...] = (
               "Checks, without seeing the pitch, whether the move is already in the price, and looks at the bigger "
               "picture.",
               roles=("skeptic",), source="prompts/skeptic.md",
-              more="It runs on a different model family and sees only the ticker, the side, the cited items, a one-line "
-                   "factual claim and the fact card: never the thesis or the levels. It answers pass, wait or reject; "
+              more="It runs on the same model as the Scout and stays blind by its input: it sees only the ticker, the "
+                   "side, the cited items (the catalyst), a one-line factual claim and the fact card, never the Scout's "
+                   "thesis or levels. It answers pass, wait or reject; "
                    "code turns a 'mostly priced in' pass into a wait. A weekly canary (a past event whose move was "
                    "already in the price) checks that it still says no.",
               short="Checks, blind to the pitch, whether the news is already priced in.", phase="swing"),

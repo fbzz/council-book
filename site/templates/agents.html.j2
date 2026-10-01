@@ -21,7 +21,7 @@
 {% set okp = (100.0 * llm_ok / llm_calls) if llm_calls else none %}
 <dl class="strip strip-agents">
   <div class="st"><dt>{{ icon("users") }}Seats</dt><dd class="st-v">{{ seats | length }}</dd><dd class="st-sub">plus {{ plural(seating.machinery | length, "code officer") }} below</dd></div>
-  <div class="st"><dt>{{ icon("cpu") }}Model</dt><dd class="st-v st-v-sm st-model"><code>{{ model or "—" }}</code></dd><dd class="st-sub">the council's language-model seats · thinking {{ "on" if think else "off" }}; the Skeptic runs on another model family</dd></div>
+  <div class="st"><dt>{{ icon("cpu") }}Model</dt><dd class="st-v st-v-sm st-model"><code>{{ model or "—" }}</code></dd><dd class="st-sub">the council's language-model seats · thinking {{ "on" if think else "off" }}; the Skeptic is kept blind by its input, not by its model</dd></div>
   <div class="st st-ring"><dt>{{ icon("circle-check") }}Usable replies</dt><dd>{{ m.pring(okp, ring_css(okp), (llm_ok ~ " of " ~ llm_calls ~ " calls usable") if llm_calls else "no calls yet") }}</dd><dd class="st-v st-v-sm">{{ llm_ok }} <span class="st-of">of {{ llm_calls | count }} calls</span></dd></div>
   <div class="st"><dt>{{ icon("list-checks") }}Meetings</dt><dd class="st-v">{{ meetings_count }}</dd><dd class="st-sub">{{ paper_count }} paper · {{ cycles_count }} live or rehearsal</dd></div>
 </dl>
