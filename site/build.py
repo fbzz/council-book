@@ -191,6 +191,27 @@ LLM_ROLES = {
     "pm": ("Portfolio manager", "Proposes at most three changes to the reference, inside ranges that code enforces. Three independent attempts; the most typical one (the medoid) is used.", "DECIDES", "pm"),
     "single_agent_control": ("Single-agent control", "One agent, the same facts, no analysts and no debate. Published as a control; it never trades.", "CONTEXT", "control"),
 }
+# The swing book's roster (how.html): (name, what, authority, accent); replicates come from policy/swing.yaml.
+SWING_LLM_ROLES = {
+    "scout": ("Scout", "Reads public RSS feeds, SEC filings and a screen of the day's movers, and pitches swing ideas: a US "
+                       "stock, long or short, held 3 to 15 sessions, citing each news item by its id.", "ADVISES", "scout"),
+    "skeptic": ("Skeptic", "Blind to the pitch: sees only the ticker, the side, the cited items, a one-line claim and the "
+                           "fact card, and answers pass, wait or reject on whether the news is already in the price.",
+                "ADVISES", "skeptic"),
+    "swing_bull": ("Bull · swing", "Argues for the trade from the fact card and the cited news.", "ADVISES", "bull"),
+    "swing_bear": ("Bear · swing", "Rebuts the bull's claims one by one.", "ADVISES", "bear"),
+    "swing_pm": ("Manager · swing", "Three independent attempts; an idea enters only if two of the three vote for it. "
+                                    "Also sets the swing budget, 0-50% of the portfolio.", "DECIDES", "pm"),
+}
+SWING_CODE_ROLES = (
+    ("Movers screen", "After each US close, lists unusual movers, volume spikes, unmoved filers and sector "
+                      "laggards from completed daily bars: facts for the Scout, not picks.", "data"),
+    ("Code gate", "Checks the ticker, builds the fact card from completed daily bars and drops ideas that chase a "
+                  "move or whose reward against risk is too thin after cost.", "risk"),
+    ("Swing risk officer", "Enforces every swing rule (S1-S18): size, stops, targets, earnings, shorts, the loss brake "
+                           "and the drawdown scaling.", "risk"),
+    ("Paper tracker", "Tracks every idea, entered or not, the same way on paper, net of the declared cost.", "neutral"),
+)
 ROSTER_AGENT = {"news": "news", "macro": "macro", "bull": "bull", "bear": "bear", "pm": "pm",
                 "single_agent_control": "control"}
 PROMPT_ROLE_ALIASES = {"bull_open": "bull", "bull_rebuttal": "bull", "single_agent": "single_agent_control"}
@@ -753,8 +774,19 @@ def load_roster(prompts_dir: Path, policy_dir: Path) -> dict[str, Any]:
             "page": f"agents/{ROSTER_AGENT[role]}.html" if role in ROSTER_AGENT else "",
         })
     code = [{"name": n, "what": w, "accent": a} for n, w, a in CODE_ROLES]
+    swing_file = policy_dir / "swing.yaml"
+    sw_llm = ((yaml.safe_load(swing_file.read_text()) or {}) if swing_file.exists() else {}).get("llm") or {}
+    swing_reps = {"skeptic": f"up to {sw_llm.get('max_skeptic_calls', 1)}",
+                  "swing_pm": str(sw_llm.get("pm_replicates", 3))}
+    swing = [{"role": role, "name": name, "what": what, "authority": authority, "accent": accent,
+              "replicates": swing_reps.get(role, "1"), "prompts": manifest.get(role, []),
+              "model": str(sw_llm.get("skeptic_model") or council.get("model", "")) if role == "skeptic"
+              else str(council.get("model", ""))}
+             for role, (name, what, authority, accent) in SWING_LLM_ROLES.items()]
+    swing_code = [{"name": n, "what": w, "accent": a} for n, w, a in SWING_CODE_ROLES]
     return {
-        "code": code, "llm": llm, "model": str(council.get("model", "")),
+        "code": code, "llm": llm, "swing": swing, "swing_code": swing_code,
+        "pm_entry_votes": sw_llm.get("pm_entry_votes", 2), "model": str(council.get("model", "")),
         "think": bool(council.get("think", False)), "temperature": council.get("temperature", 0),
         "seeds": council.get("seeds", {}), "max_calls": council.get("max_calls_per_cycle"),
         "slots": council.get("slots_utc_hours", []), "slot_minute": council.get("slot_minute", 0),
@@ -6048,7 +6080,8 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
                 dv["run_href"] = f"cycles/{doc.cycle_id}.html"
             render("decision.html.j2", paper_href(no), "../../", "decisions", d=dv,
                    book=paper_book_home(after.book, after.as_of, geo) if after is not None else None)
-    render("how.html.j2", "how.html", "", "how", roster=load_roster(prompts_dir, policy_dir))
+    render("how.html.j2", "how.html", "", "how", roster=load_roster(prompts_dir, policy_dir),
+           paper_no=max(view.paper_cycles) if view.paper_cycles else None)
     render("rules.html.j2", "rules.html", "", "rules", rules=load_rules(policy_dir), book=rule_book(policy_dir))
     render("record.html.j2", "record.html", "", "record", incidents=view.incidents, withdrawn=load_withdrawn(),
            rv=record_view(view, geo))

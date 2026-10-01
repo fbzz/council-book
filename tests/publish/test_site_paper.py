@@ -358,3 +358,11 @@ def test_meetings_and_role_stats_count_paper_runs(published, tmp_path, _core_pol
     assert stats["scout"]["by_kind"]["paper"] >= 1 and stats["scout"]["calls"] >= 1
     assert {"skeptic", "swing_bull", "swing_bear", "swing_pm", "pm", "bull"} <= set(stats)
     assert view.has_swing
+
+
+def test_how_page_links_the_latest_paper_decision_with_a_paper_badge(built):
+    _, _, pages = built
+    how = pages["how.html"]
+    nos = sorted(int(m) for m in re.findall(r"^decisions/(\d+)/index\.html$", "\n".join(pages), re.M))
+    assert f'href="decisions/{nos[-1]}/index.html">the latest paper decision</a>' in how
+    assert "paper-badge" in how

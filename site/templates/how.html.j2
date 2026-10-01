@@ -1,111 +1,254 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
+{% import "paper_macros.html.j2" as pm %}
 {% block title %}How it works{% endblock %}
 {% block toc %}
 {{ m.toc_item("what", "What is it?", "neutral") }}
+{{ m.toc_item("core", "How does the core decide?", "pm") }}
+{{ m.toc_item("swing", "How does a swing idea get in?", "scout") }}
 {{ m.toc_item("who", "Who's on the council?", "neutral") }}
 {{ m.toc_item("stop", "What can code stop?", "risk") }}
 {{ m.toc_item("button", "Who presses the button?", "human") }}
+{{ m.toc_item("news", "Where does the news come from?", "news") }}
 {{ m.toc_item("hindsight", "How do we know it isn't hindsight?", "neutral") }}
 {{ m.toc_item("never", "What can this never prove?", "neutral") }}
-{{ m.toc_item("llm", "Roster: language models", "neutral") }}
-{{ m.toc_item("code", "Roster: code and people", "neutral") }}
+{{ m.toc_item("glossary", "Glossary", "neutral") }}
 {% endblock %}
 {% block hero %}
 <header class="hero">
   <p class="eyebrow">How it works</p>
   <h1>An LLM council proposes. Code limits. A human decides.</h1>
-  <p class="lede">Every four hours a council of language-model agents looks at a small multi-asset portfolio and may propose a few changes. Deterministic code enforces every risk limit, a person approves every order, and every decision is sealed before it can be executed. <strong>Paper for now: real data, real agents, nothing traded.</strong></p>
+  <p class="lede">Language-model agents run one small portfolio as two books: a core book that rebalances every four hours, and a swing book of news-driven stock trades held for days. Deterministic code enforces every risk limit, a person approves every live trade, and every decision is sealed before it can be executed. <strong>Paper for now: real data, real agents, nothing traded.</strong> {{ pm.badge() }}</p>
 </header>
 {% endblock %}
 {% block main %}
+{% set slot_list %}{% for h in roster.slots %}{{ "%02d" | format(h) }}:{{ "%02d" | format(roster.slot_minute) }}{% if not loop.last %}, {% endif %}{% endfor %}{% endset %}
 
 {% call m.section("what", 1, "What is it?", "neutral") %}
-<p class="big">A forward-only test of whether a council of language models, boxed in by code, can run a small real-money portfolio without fooling itself.</p>
-<p>The portfolio holds exposure <em>lines</em>, not stock picks:
-{% for l in lines %}<span class="chip line-chip">{{ l.name }}</span>{% endfor %}.
-A mechanical <strong>reference book</strong> is the default position and the benchmark: {{ reference_gloss }}. It invests about {{ (reference_gross_max * 100) | round(0) | int }}% of the portfolio, never borrows and never goes short. The council can only propose a few changes to it.</p>
+<p class="big">Two books, one portfolio.</p>
+<figure class="split">
+  <svg class="split-svg" viewBox="0 0 400 244" role="img" aria-labelledby="split-t split-d" focusable="false">
+    <title id="split-t">The portfolio splits into a core book and a swing book</title>
+    <desc id="split-d">One bar is the whole portfolio. The core book holds at least half of it; the swing book takes 0 to 50%, set by the swing manager each US session, and any swing money that is not in a trade flows back into the core. Below the bar, the core book is the reference book plus council tilts on ETFs, CFDs, Bitcoin and Ether every four hours; the swing book is news-driven US stock trades, long or short, held 3 to 15 sessions.</desc>
+    <defs><marker id="split-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="sp-head" d="M0,0 L10,5 L0,10 z"></path></marker></defs>
+    <path class="sp-return" d="M290 56 C290 24, 110 24, 110 56" marker-end="url(#split-arrow)"></path>
+    <text class="sp-note" x="200" y="14" text-anchor="middle">idle swing money → core</text>
+    <rect class="sp-core" x="8" y="58" width="190" height="38" rx="4"></rect>
+    <rect class="sp-swing" x="202" y="58" width="190" height="38" rx="4"></rect>
+    <text class="sp-label" x="103" y="82" text-anchor="middle">CORE ≥ 50%</text>
+    <text class="sp-label" x="297" y="82" text-anchor="middle">SWING 0–50%</text>
+    <line class="sp-link" x1="103" y1="96" x2="103" y2="116"></line>
+    <line class="sp-link" x1="297" y1="96" x2="297" y2="116"></line>
+    <rect class="sp-box sp-box-core" x="8" y="116" width="190" height="120" rx="6"></rect>
+    <rect class="sp-box sp-box-swing" x="202" y="116" width="190" height="120" rx="6"></rect>
+    <text class="sp-line" x="20" y="144">Reference book</text>
+    <text class="sp-line" x="20" y="166">+ council tilts</text>
+    <text class="sp-line sp-dim" x="20" y="192">ETFs · CFDs · BTC · ETH</text>
+    <text class="sp-line sp-dim" x="20" y="214">every 4 hours</text>
+    <text class="sp-line" x="214" y="144">News-driven trades</text>
+    <text class="sp-line" x="214" y="166">US stocks, long/short</text>
+    <text class="sp-line sp-dim" x="214" y="192">held 3–15 sessions</text>
+    <text class="sp-line sp-dim" x="214" y="214">1 slot per US session</text>
+  </svg>
+  <figcaption class="small muted">The same split in words:</figcaption>
+</figure>
+<div class="books">
+  <section class="book accent-pm" aria-labelledby="book-core">
+    <h3 id="book-core">Core book</h3>
+    <dl class="vb-rows">
+      <div><dt>What</dt><dd>A mechanical <strong>reference book</strong> ({{ reference_gloss }}) plus at most {{ max_deviations }} council tilts a run.</dd></div>
+      <div><dt>Holds</dt><dd>London-listed ETFs and CFDs for {% for l in lines if l.symbol not in ("BTC", "ETH") %}<span class="chip line-chip">{{ l.name }}</span>{% endfor %} and spot <span class="chip line-chip">Bitcoin</span> <span class="chip line-chip">Ether</span>.</dd></div>
+      <div><dt>When</dt><dd>Every 4 hours, at {{ slot_list }} UTC. London lines trade only in LSE hours.</dd></div>
+      <div><dt>Size</dt><dd>Whatever the swing book is not using: re-sized when open swing exposure moves by 4% of the portfolio or more.</dd></div>
+    </dl>
+  </section>
+  <section class="book accent-scout" aria-labelledby="book-swing">
+    <h3 id="book-swing">Swing book</h3>
+    <dl class="vb-rows">
+      <div><dt>What</dt><dd>News-driven trades in single US stocks, long or short (a short is a 1x stock CFD), held 3 to 15 sessions.</dd></div>
+      <div><dt>Budget</dt><dd>0–50% of the portfolio in steps of 5, set each US-session slot by the swing manager. <a href="rules.html#budget">The budget rule →</a></dd></div>
+      <div><dt>When</dt><dd>One slot per US session (18:40 UTC in winter), at least an hour after the open and half an hour before the close.</dd></div>
+      <div><dt>Idle money</dt><dd>Never left as cash: whatever is not in a swing trade is invested in the core.</dd></div>
+    </dl>
+  </section>
+</div>
 {% endcall %}
 
-{% call m.section("who", 2, "Who's on the council?", "neutral") %}
-<ul class="roles">
-  <li><span class="dot accent-data"></span><strong>Code roles</strong> build the facts, the reference book, the event and volatility cards and the costs. Every number comes from code.</li>
-  <li><span class="dot accent-news"></span><strong>Analysts</strong> (language models) write evidence cards that must cite facts from the pack.</li>
-  <li><span class="dot accent-bull"></span><strong>A bull</strong> and <span class="dot accent-bear"></span><strong>a bear</strong> debate: the bear has to answer the bull's claims one by one.</li>
-  <li><span class="dot accent-pm"></span><strong>A portfolio manager</strong> makes three independent attempts, each proposing at most {{ max_deviations }} changes. The most typical attempt — the one closest to the others, called the <em>medoid</em> — is used: a real decision, never an average.</li>
-</ul>
-<div class="how-chamber">{{ m.hemicycle(seats, "", "hemi-lg", label="The council's fourteen seats, in speaking order") }}<p class="chamber-cap small muted">The fourteen seats in speaking order. Each keeps its colour on every page and opens its agent.</p></div>
-{{ m.flow(flow_empty, "The steps of every run", states=false) }}
-{{ m.flow_key(flow_empty) }}
-<p class="small">The <a href="index.html#latest">Portfolio page</a> shows this diagram filled in for the latest run, and the <a href="agents/index.html">Agents page</a> shows each agent's record.</p>
+{% set core_steps = [
+  ("Data", "data", "fact pack from completed bars", "a stale or closed market is frozen"),
+  ("News · macro", "news", "evidence cards cite ids", ""),
+  ("Bull · bear", "bull", "the bear answers each claim", ""),
+  ("Manager ×3", "pm", "the medoid attempt is used", "≤ " ~ max_deviations ~ " changes; uncited ones revert"),
+  ("Risk rules", "risk", "every limit, in code", "caps, deadband, anti-chase, net-of-cost gate"),
+  ("Plan", "costs", "order legs and their costs", "a cost budget can trim it"),
+  ("You approve", "human", "typed code, separate terminal", "rejected, or not approved in time"),
+] %}
+{% call m.section("core", 2, "How does the core decide?", "pm") %}
+<p class="big">Seven steps, every four hours.</p>
+<ol class="jp jp-how jp-n7" aria-label="The core run, step by step">
+  {% for label, seat, word, why in core_steps %}
+  <li class="jp-step jp-ok accent-{{ seat }}{% if seat == 'bull' %} jp-debate{% endif %}">
+    <span class="jp-dot" aria-hidden="true">{{ loop.index }}</span>
+    <span class="jp-label">{{ label }}</span>
+    <span class="jp-word">{{ word }}</span>
+    {% if why %}<span class="jp-why"><span class="jp-die">Stops here:</span> {{ why }}</span>{% endif %}
+  </li>
+  {% endfor %}
+</ol>
+<p>The manager makes three independent attempts; the most typical one, the <a href="#g-medoid">medoid</a>, is used: a real decision, never an average. If the attempts disagree too much, or the council is unavailable, the run falls back to the reference book.</p>
+<p class="small">{% if paper_no %}See it filled in: <a href="decisions/{{ paper_no }}/index.html">the latest paper decision</a> {{ pm.badge() }} · {% endif %}<a href="agents/index.html">each agent's record</a> · <a href="rules.html#p-core">the core rules</a></p>
 {% endcall %}
 
-{% call m.section("stop", 3, "What can code stop?", "risk") %}
+{% set swing_steps = [
+  ("Screen", "data", "news + movers", "", ""),
+  ("Scout", "scout", "pitches, citing ids", "no cited item, or a ticker it may not trade", ""),
+  ("Gate", "risk", "code builds the fact card", "chased move, thin reward after cost, liquidity, earnings", "S11"),
+  ("Skeptic", "skeptic", "blind to the pitch", "already priced in; a wait comes back on day 2", ""),
+  ("Debate", "bull", "bull, then bear", "", ""),
+  ("PM ×3", "pm", "2 of 3 votes to enter", "fewer than two votes", ""),
+  ("Rules", "risk", "swing rules S1–S18", "size, stop, open risk, budget, the loss brake", ""),
+  ("You approve", "human", "within 60 minutes", "not approved in time", "S16"),
+] %}
+{% call m.section("swing", 3, "How does a swing idea get in?", "scout") %}
+<p class="big">Eight steps, and most ideas die on the way.</p>
+<ol class="jp jp-how jp-n8" aria-label="A swing idea's way in, step by step">
+  {% for label, seat, word, why, rule in swing_steps %}
+  <li class="jp-step jp-ok accent-{{ seat }}{% if label == 'Debate' %} jp-debate{% endif %}">
+    <span class="jp-dot" aria-hidden="true">{{ loop.index }}</span>
+    <span class="jp-label">{{ label }}</span>
+    <span class="jp-word">{{ word }}</span>
+    {% if why %}<span class="jp-why"><span class="jp-die">Dies here:</span> {{ why }}{% if rule %} <a class="rule-link" href="rules.html#{{ rule }}">{{ rule }}</a>{% endif %}</span>{% endif %}
+  </li>
+  {% endfor %}
+</ol>
+<p>These are the steps each idea's journey card shows on a decision page. <strong>Day-2 confirmation:</strong> a Skeptic "wait" is re-proposed by code at the next slot after at least one completed session, if the close since the news moved the trade's way. <strong>Cost:</strong> every swing result is counted net of a declared 1.25% of the position per leg, and levels whose reward against risk falls below 1.2 at that cost die at the gate (<a class="rule-link" href="rules.html#S6">S6</a>).</p>
+<p class="small"><a href="rules.html#p-swing">The swing rules</a> · <a href="https://github.com/fbzz/council-book/blob/main/docs/swing-book-prereg.md">the swing pre-registration</a></p>
+{% endcall %}
+
+{% set swing_seats = [("scout", "Scout"), ("skeptic", "Skeptic"), ("bull", "Bull · swing"), ("bear", "Bear · swing"), ("pm", "Manager · swing")] %}
+{% call m.section("who", 4, "Who's on the council?", "neutral") %}
+<p class="big">Fourteen core seats and five swing seats.</p>
+<div class="how-chamber">{{ m.hemicycle(seats, "", "hemi-lg", label="The council's fourteen seats, in speaking order") }}<p class="chamber-cap small muted">The core book's fourteen seats in speaking order: code officers, analysts, the bull and the bear, the manager and the checks. Each keeps its colour on every page and opens its agent.</p></div>
+<ol class="swing-seats" aria-label="The swing book's five seats, in speaking order">
+  {% for slug, name in swing_seats %}<li class="accent-{{ slug }}"><span class="ss-dot" aria-hidden="true">{{ loop.index }}</span>{{ name }}</li>{% endfor %}
+</ol>
+<p class="chamber-cap small muted">The swing book's five seats. Its bull, bear and manager are separate agents with their own prompts; they wear the core seats' colours.</p>
+<p>Every number comes from code; language models only read the facts and argue. Roles that DECIDE write the changes, inside ranges code enforces; ADVISES roles give evidence or argument; CONTEXT roles give background only.</p>
+<details class="jd rule-more" id="roster">
+  <summary>Full roster and prompt hashes</summary>
+  <div class="jd-body accent-neutral">
+  <h3>Core · language models</h3>
+  <p class="small muted">Model <code>{{ roster.model }}</code>, thinking {{ "on" if roster.think else "off" }}, temperature {{ roster.temperature }}. Runs at {{ slot_list }} UTC.</p>
+  {{ m.wrap_open("Core language-model roster (scrolls sideways)") }}
+  <table class="wide">
+    <thead><tr><th>Role</th><th>Kind</th><th>Authority</th><th class="n">Runs</th><th>Prompt</th></tr></thead>
+    <tbody>
+    {% for r in roster.llm %}
+    <tr{% if not r.enabled %} class="disabled"{% endif %}>
+      <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{% if r.page %}<a href="{{ r.page }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</strong><br><span class="muted small">{{ r.what }}</span></td>
+      <td><span class="chip kind-llm">LLM</span></td>
+      <td><span class="chip auth-{{ r.authority | lower }}">{{ r.authority }}</span></td>
+      <td class="n">{{ r.replicates }}{% if r.cadence != "every run" %}<br><span class="muted small">{{ r.cadence }}</span>{% endif %}</td>
+      <td>{% for p in r.prompts %}<code>{{ p.prompt_id }}</code> <span class="n muted small">{{ p.sha | sha }}</span><br>{% else %}<span class="muted small">not yet in the manifest</span>{% endfor %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <h3>Swing · language models</h3>
+  <p class="small muted">One slot per US session. The manager's three attempts need {{ roster.pm_entry_votes }} votes to enter an idea.</p>
+  {{ m.wrap_open("Swing language-model roster (scrolls sideways)") }}
+  <table class="wide">
+    <thead><tr><th>Role</th><th>Kind</th><th>Authority</th><th class="n">Runs</th><th>Model and prompt</th></tr></thead>
+    <tbody>
+    {% for r in roster.swing %}
+    <tr>
+      <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
+      <td><span class="chip kind-llm">LLM</span></td>
+      <td><span class="chip auth-{{ r.authority | lower }}">{{ r.authority }}</span></td>
+      <td class="n">{{ r.replicates }}</td>
+      <td><code>{{ r.model }}</code><br>{% for p in r.prompts %}<code>{{ p.prompt_id }}</code> <span class="n muted small">{{ p.sha | sha }}</span><br>{% else %}<span class="muted small">not yet in the manifest</span>{% endfor %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <h3>Code and people</h3>
+  {{ m.wrap_open("Code and people roster (scrolls sideways)") }}
+  <table class="wide">
+    <thead><tr><th>Role</th><th>Book</th><th>Kind</th><th>Authority</th></tr></thead>
+    <tbody>
+    {% for r in roster.code %}
+    <tr>
+      <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
+      <td>Core</td>
+      <td><span class="chip kind-code">CODE</span></td>
+      <td><span class="chip auth-code">CODE</span></td>
+    </tr>
+    {% endfor %}
+    {% for r in roster.swing_code %}
+    <tr>
+      <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
+      <td>Swing</td>
+      <td><span class="chip kind-code">CODE</span></td>
+      <td><span class="chip auth-code">CODE</span></td>
+    </tr>
+    {% endfor %}
+    <tr>
+      <td class="text"><span class="dot accent-human" aria-hidden="true"></span><strong>Human operator</strong><br><span class="muted small">Approves or rejects every live order in a separate terminal. Nothing trades without this step.</span></td>
+      <td>Both</td>
+      <td><span class="chip kind-human">HUMAN</span></td>
+      <td><span class="chip auth-decides">DECIDES</span></td>
+    </tr>
+    </tbody>
+  </table>
+  </div>
+  </div>
+</details>
+{% endcall %}
+
+{% call m.section("stop", 5, "What can code stop?", "risk") %}
 <p class="big">Everything that matters. Prompts explain the rules; code enforces them.</p>
 <ul class="ticks">
   <li>Total exposure at most <span class="n">{{ invariants.gross }}x</span> the portfolio, hard-coded.</li>
-  <li>Kill switch, measured from the best value ever reached: {{ kill_phrase }}.</li>
-  <li>Every opening order carries a catastrophe stop-loss.</li>
-  <li>Borrowing and shorts only through the council, and only when the order passes a net-of-cost gate.</li>
-  <li>Allowed ranges, a deadband, minimum holds, turnover and cost budgets, event blocks and an anti-chase rule. <a href="rules.html">All the rules →</a></li>
+  <li>Kill switch, measured from the best value ever reached: {{ kill_phrase }}. <a class="rule-link" href="rules.html#R3">R3</a></li>
+  <li>Every opening order carries a <a href="#g-stop">catastrophe stop</a>, core and swing.</li>
+  <li>Swing loss brake: new swing entries stop after a 5% loss of the portfolio over 30 days, net of all costs, until the operator lifts it. <a class="rule-link" href="rules.html#S15">S15</a></li>
+  <li>Swing drawdown scaling: 10% below the lifetime peak, swing trades are halved in size and at most three stay open. <a class="rule-link" href="rules.html#S17">S17</a></li>
+  <li>Borrowing and shorts in the core only through the council, and only when the order passes the <a href="#g-gate">net-of-cost gate</a>.</li>
+  <li>Allowed ranges, a <a href="#g-deadband">deadband</a>, minimum holds, turnover and cost budgets, event blocks and an <a href="#g-chase">anti-chase</a> rule. <a href="rules.html">All the rules →</a></li>
 </ul>
 {% endcall %}
 
-{% call m.section("button", 4, "Who presses the button?", "human") %}
-<p class="big">A person, every time.</p>
-<p>The unattended runner can only read. Orders are approved in a separate operator terminal that refuses to run under automation or an agent, asks for a typed confirmation code, and unlocks a separate, auto-locking keychain. Notifications carry percentages only. Nothing trades on its own.</p>
+{% call m.section("button", 6, "Who presses the button?", "human") %}
+<p class="big">A person, every live trade.</p>
+<p>The unattended runner can only read. Orders are approved in a separate operator terminal that refuses to run under automation or an agent, asks for a typed confirmation code, and unlocks a separate, auto-locking keychain. A swing entry's approval is valid for 60 minutes. Notifications carry percentages only. Nothing trades on its own; on paper, nothing trades at all.</p>
 {% endcall %}
 
-{% call m.section("hindsight", 5, "How do we know it isn't hindsight?", "neutral") %}
+{% call m.section("news", 7, "Where does the news come from?", "news") %}
+<p class="big">Public RSS feeds and SEC filings, cited by id.</p>
+<p>The news analyst and the Scout read public RSS feeds, official releases and SEC filings, and must cite every item they rely on by its id. The headline text of licensed feeds is shown to the models only and never published: the record shows the item's id and its source, nothing more.</p>
+{% endcall %}
+
+{% call m.section("hindsight", 8, "How do we know it isn't hindsight?", "neutral") %}
 <p class="big">Each run is sealed before any order can be approved.</p>
-<p>A hash commitment of the full run is published first; the run itself and the salt that opens the seal are published once the decision is final. Anyone can re-hash the revealed file. Only forward, sealed runs count as evidence. Language models have read the history we could backtest on, so no council backtest is ever shown.</p>
+<p>A hash <a href="#g-seal">commitment</a> of the full run is published first; the run itself and the salt that opens the seal are published once the decision is final. Anyone can re-hash the revealed file. Only forward, sealed runs count as evidence. Language models have read the history we could backtest on, so no council backtest is ever shown.</p>
 {% endcall %}
 
-{% call m.section("never", 6, "What can this never prove?", "neutral") %}
+{% call m.section("never", 9, "What can this never prove?", "neutral") %}
 <p class="big">A small edge.</p>
 <p>Even a real but small edge takes about 16 years of results to tell apart from luck, so this record can show rule-keeping and costs, not skill. It can also show how deep the falls are and how often the council disagrees with the reference.</p>
+<p>Swing book: at 30 trades, a mean of +0.3 R with a per-trade spread of about 1.2 R has a standard error of about 0.22 R, so the review can detect a disaster, not prove an edge (<a href="https://github.com/fbzz/council-book/blob/main/docs/swing-book-prereg.md#7-honest-power-statement">pre-registration §7</a>).</p>
 {% endcall %}
 
-{% call m.section("llm", 7, "Roster: language models", "neutral") %}
-<p class="small muted">Model <code>{{ roster.model }}</code>, thinking {{ "on" if roster.think else "off" }}, temperature {{ roster.temperature }}. Runs at {% for h in roster.slots %}{{ "%02d" | format(h) }}:{{ "%02d" | format(roster.slot_minute) }}{% if not loop.last %}, {% endif %}{% endfor %} UTC.</p>
-{{ m.wrap_open("Roster (scrolls sideways)") }}
-<table class="wide">
-  <thead><tr><th>Role</th><th>Kind</th><th>Authority</th><th class="n">Runs</th><th>Prompt</th></tr></thead>
-  <tbody>
-  {% for r in roster.llm %}
-  <tr{% if not r.enabled %} class="disabled"{% endif %}>
-    <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{% if r.page %}<a href="{{ r.page }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</strong><br><span class="muted small">{{ r.what }}</span></td>
-    <td><span class="chip kind-llm">LLM</span></td>
-    <td><span class="chip auth-{{ r.authority | lower }}">{{ r.authority }}</span></td>
-    <td class="n">{{ r.replicates }}{% if r.cadence != "every run" %}<br><span class="muted small">{{ r.cadence }}</span>{% endif %}</td>
-    <td>{% for p in r.prompts %}<code>{{ p.prompt_id }}</code> <span class="n muted small">{{ p.sha | sha }}</span><br>{% else %}<span class="muted small">not yet in the manifest</span>{% endfor %}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
-<p class="muted small">DECIDES = sole author of the council's changes, inside ranges that code enforces. ADVISES = evidence or argument the decider may use. CONTEXT = background only.</p>
-{% endcall %}
-
-{% call m.section("code", 8, "Roster: code and people", "neutral") %}
-{{ m.wrap_open("Roster (scrolls sideways)") }}
-<table class="wide">
-  <thead><tr><th>Role</th><th>Kind</th><th>Authority</th></tr></thead>
-  <tbody>
-  {% for r in roster.code %}
-  <tr>
-    <td class="text"><span class="dot accent-{{ r.accent }}" aria-hidden="true"></span><strong>{{ r.name }}</strong><br><span class="muted small">{{ r.what }}</span></td>
-    <td><span class="chip kind-code">CODE</span></td>
-    <td><span class="chip auth-code">CODE</span></td>
-  </tr>
-  {% endfor %}
-  <tr>
-    <td class="text"><span class="dot accent-human" aria-hidden="true"></span><strong>Human operator</strong><br><span class="muted small">Approves or rejects every order in a separate terminal. Nothing trades without this step.</span></td>
-    <td><span class="chip kind-human">HUMAN</span></td>
-    <td><span class="chip auth-decides">DECIDES</span></td>
-  </tr>
-  </tbody>
-</table>
-</div>
+{% call m.section("glossary", 10, "Glossary", "neutral") %}
+<dl class="gloss">
+  <div id="g-medoid"><dt>Medoid</dt><dd>Of the manager's three attempts, the one closest to the other two. A real attempt is used, never an average of them. <a href="agents/pm.html">The manager →</a></dd></div>
+  <div id="g-deadband"><dt>Deadband</dt><dd>A change too small to be worth its trading cost is skipped. <a class="rule-link" href="rules.html#R11">R11</a></dd></div>
+  <div id="g-chase"><dt>Anti-chase</dt><dd>No adding right after a large one-day move in the core; in the swing book, ideas whose move since the news is already too big die at the gate. <a class="rule-link" href="rules.html#R17">R17</a> <a class="rule-link" href="rules.html#S11">S11</a></dd></div>
+  <div id="g-gate"><dt>Net-of-cost gate</dt><dd>Borrowing or a short goes through only if the expected gain beats the spread, fees and overnight carry it costs. <a class="rule-link" href="rules.html#R15">R15</a></dd></div>
+  <div id="g-seal"><dt>Commitment and salt</dt><dd>A hash of the run is published before approval; the salt revealed afterwards lets anyone check the run was not changed. <a href="#hindsight">How the seal works</a></dd></div>
+  <div id="g-stop"><dt>Catastrophe stop</dt><dd>A stop-loss placed with every opening order to cap a disaster. In the core it sits about three times a typical week's swing away, never closer than a floor for its asset class; a swing trade's stop is part of its plan. <a class="rule-link" href="rules.html#R4">R4</a> <a class="rule-link" href="rules.html#S5">S5</a></dd></div>
+</dl>
 {% endcall %}
 {% endblock %}

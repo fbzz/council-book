@@ -10,8 +10,8 @@ Design: swing-book design rev 2, §8. Policy: `policy/swing.yaml`. Code: `swing/
 
 ## 1. What is being tested
 
-Whether language-model agents that read the news (a Scout proposes, a blind Skeptic on another model
-family checks whether the news is already in the price, a bull, a bear and a manager decide, code
+Whether language-model agents that read the news (a Scout proposes, a Skeptic that is blind by input
+(on the Scout's model, §2) checks whether the news is already in the price, a bull, a bear and a manager decide, code
 enforces the S-rules and a human approves every trade) produce swing trades — US stocks, long or
 short (short = 1x stock CFD), held 3 to 15 sessions — with a positive expected R **after a declared
 cost of 1.25% of the position per leg**.
