@@ -1,31 +1,83 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
-{% import "swing_macros.html.j2" as swm %}
+{% import "paper_macros.html.j2" as pm %}
+{% import "agent_macros.html.j2" as am %}
+{% set s = agent.stats %}
 {% block title %}{{ agent.name }}{% endblock %}
 {% block toc %}
+{% if agent.banner %}{{ m.toc_item("latest", "Latest call", agent.accent) }}{% endif %}
 {{ m.toc_item("job", "Its job", agent.accent) }}
-{{ m.toc_item("record", "Its record", "neutral") }}
-{{ m.toc_item("cast", "Swing agents", "neutral") }}
+{{ m.toc_item("record", "Its numbers", "neutral") }}
+{{ m.toc_item("history", "History (" ~ (agent.rows | length) ~ ")", agent.accent) }}
+{{ m.toc_group("Other agents", "toc-desk") }}
+{{ am.others(agents, swing_agents, agent.slug) }}
 {% endblock %}
 {% block hero %}
-<header class="hero">
+<header class="hero hero-agent">
   <p class="eyebrow"><a href="index.html">Agents</a> / Swing book</p>
-  <div class="member">{{ m.avatar(agent.icon, agent.accent, "lg") }}<div class="member-text"><h1>{{ agent.name }}</h1><p class="lede">{{ agent.job }}</p></div></div>
+  <div class="ahead ahead-hero">
+    {{ m.avatar(agent.icon, agent.accent, "lg") }}
+    <div class="ahead-text">
+      <h1>{{ agent.name }} <span class="node-kind kind-llm">LLM</span></h1>
+      <p class="lede">{{ agent.job }}</p>
+    </div>
+  </div>
 </header>
 {% endblock %}
 {% block main %}
+{{ am.banner(agent, agent) }}
+
 {% call m.section("job", 1, "Its job", agent.accent) %}
-<p>{{ agent.short }}</p>
 <p>{{ agent.more }}</p>
-<p class="small">Prompt: <a href="{{ agent.source }}"><code>{{ agent.source_path }}</code></a> · a language model; it never places an order.</p>
-{% endcall %}
-{% call m.section("record", 2, "Its record", "neutral") %}
-<dl class="strip">
-  <div class="st"><dt>Calls</dt><dd class="st-v">{{ agent.calls }}</dd><dd class="st-sub">{{ agent.stats.by_kind.paper }} paper · {{ agent.stats.by_kind.live + agent.stats.by_kind.rehearsal }} live or rehearsal</dd></div>
-  <div class="st"><dt>Usable</dt><dd class="st-v st-v-sm">{{ agent.ok_pct }}</dd><dd class="st-sub">{{ agent.ok }} of {{ agent.calls }} replies</dd></div>
-  <div class="st"><dt>Latest</dt><dd class="st-v st-v-sm">{{ agent.verdict or "—" }}</dd><dd class="st-sub">{% if agent.last %}<a href="../{{ agent.last_href }}">{{ agent.last_slot | short_when }}</a>{% if agent.last_paper %} <span class="chip state-rehearsal paper-badge">PAPER</span>{% endif %}{% else %}not yet{% endif %}</dd></div>
+<dl class="facts facts-plain">
+  <div><dt>Kind</dt><dd>a language model; it never places an order</dd></div>
+  <div><dt>Prompt</dt><dd class="prompt"><a href="{{ agent.source }}"><code>{{ agent.source_path }}</code></a>{% if agent.prompt %} <span class="n muted">in force: {{ agent.prompt.id }} {{ agent.prompt.sha }}</span>{% endif %}</dd></div>
 </dl>
-<p class="small"><a href="../swing/index.html#sw-funnel">The idea funnel</a> compares what the Skeptic passed, rejected and sent to wait, all tracked on paper.</p>
+{% if agent.banner and agent.banner.prompt_note %}<p class="small prompt-note">{{ icon("circle-alert") }}{{ agent.banner.prompt_note }}</p>{% endif %}
+{% if agent.core_page %}<p class="small">The same seat in the core council: <a href="{{ agent.core_page }}">its core page</a>.</p>{% endif %}
+<p class="small"><a href="../swing/index.html">The swing book</a> · <a href="../rules.html">the swing rules</a></p>
 {% endcall %}
-<ul class="cast sw-cast" id="cast">{% for a in swing_agents %}{{ swm.agent_card(a, "../") }}{% endfor %}</ul>
+
+{% call m.section("record", 2, "Its numbers", "neutral") %}
+<dl class="strip strip-agent">
+  <div class="st st-ring"><dt>{{ icon("circle-check") }}Usable replies</dt><dd>{{ m.pring(s.ok_num, ring_css(s.ok_num), (s.ok_pct ~ " of calls usable") if s.calls else "no calls yet") }}</dd><dd class="st-v st-v-sm">{{ s.ok }} <span class="st-of">of {{ s.calls }} calls</span></dd></div>
+  <div class="st"><dt>{{ icon("list-checks") }}Calls by kind</dt><dd class="st-v st-v-sm">{{ s.by_kind.paper }} <span class="st-of">paper</span></dd><dd class="st-sub">{{ s.by_kind.live }} live · {{ s.by_kind.rehearsal }} rehearsal · in {{ plural(s.runs, "meeting") }}</dd></div>
+  <div class="st"><dt>{{ icon("clock-3") }}Median time</dt><dd class="st-v">{{ s.latency }}</dd><dd class="st-sub">per call</dd></div>
+</dl>
+<p class="list-label">Failed calls</p>
+{% if agent.failed %}
+<ul class="failed-calls">{% for f in agent.failed %}<li><a href="{{ f.href }}">{% if f.no %}decision #{{ f.no }}{% else %}{{ f.when }}{% endif %}</a> {{ m.mark({"css": f.css, "word": f.word}) }} <span>it {{ f.what }}</span></li>{% endfor %}</ul>
+{% else %}<p class="small muted">No failed call in the published meetings.</p>{% endif %}
+{% endcall %}
+
+{% call m.section("history", 3, "History", agent.accent) %}
+{% if agent.rows %}
+<p class="small muted">One entry per paper decision, newest first; the latest is open. Each idea links to its journey card on the decision page.</p>
+{% for r in agent.rows %}
+<details class="entry" id="d-{{ r.no }}"{% if loop.first %} open{% endif %}>
+  <summary class="entry-head">{{ icon("chevron-right", "chev") }}<span class="entry-when">#{{ r.no }} · {{ r.slot | when }}</span> {{ pm.badge() }} <span class="hc-inline hc-{{ r.chip.state }}"><span aria-hidden="true">{{ "✓" if r.chip.state == "ok" else "✗" if r.chip.state == "no" else "—" }}</span> {{ r.chip.word }}</span> <span class="entry-sum">{{ r.said | plain_terms("swing") }}</span></summary>
+  <p class="entry-open small"><a href="{{ r.href }}">Open decision #{{ r.no }} →</a> · {{ m.chip(r.outcome) }} {{ r.outcome.text }}</p>
+  {% if agent.slug == "scout" %}
+  <ul class="sa-list">{% for j in r.journeys %}<li><a class="tkr" href="{{ r.decision_href }}#{{ j.anchor }}">{{ j.i.ticker | ticker }}</a> {{ pm.side(j.i.side) }} <span class="muted small">{{ j.setup }}</span> — {% if j.stop == 6 %}<strong>entered</strong>{% else %}stopped at <strong>{{ j.stop_label }}</strong>{% if j.reason %} ({{ j.reason }}){% endif %}{% endif %}{% if j.i.thesis %}<br><span class="sa-text">{{ j.i.thesis | plain_terms("swing") }}</span>{% endif %}</li>{% endfor %}</ul>
+  {% if r.sw.scout_passed %}<p class="small">Looked at and passed on: {% for t in r.sw.scout_passed %}<span class="tkr">{{ t | ticker }}</span>{% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
+  {% elif agent.slug == "skeptic" %}
+  <ul class="sa-list">{% for j in r.journeys if j.verdict %}<li><a class="tkr" href="{{ r.decision_href }}#{{ j.anchor }}">{{ j.i.ticker | ticker }}</a> {{ pm.side(j.i.side) }} <span class="chip state-{{ j.verdict.css }}">{{ j.verdict.plain }}</span>{% if j.verdict.priced_in and j.verdict.priced_in != "unknown" %} <span class="small muted">priced in: {{ j.verdict.priced_in }}</span>{% endif %}{% if j.verdict.override %} <span class="small muted">{{ j.verdict.override }}</span>{% endif %}
+    {% if j.verdict.reasons %}<ul class="jd-list">{% for x in j.verdict.reasons %}<li>{{ x.text | plain_terms("swing") }}</li>{% endfor %}</ul>{% endif %}</li>{% else %}<li class="muted">No idea reached the Skeptic.</li>{% endfor %}</ul>
+  {% elif agent.slug in ("swing_bull", "swing_bear") %}
+  {% set attr = "bull" if agent.slug == "swing_bull" else "bear" %}
+  {% for b in r.sw.batches %}{% set case = b[attr] %}{% if case %}
+  <blockquote class="argument"><p>{{ case.argument | plain_terms("swing") }}</p></blockquote>
+  {% if case.claims %}<ol class="claims">{% for cl in case.claims %}<li class="claim"><span class="cid">{{ cl.claim_id }}</span> {% if cl.ref %}<span class="tkr">{{ r.tk.get(cl.ref, cl.ref) }}</span>: {% endif %}{{ cl.text | plain_terms("swing") }}</li>{% endfor %}</ol>{% endif %}
+  {% endif %}{% else %}<p class="muted small">No debate this slot.</p>{% endfor %}
+  {% elif agent.slug == "swing_pm" %}
+  <ul class="sa-list">{% for j in r.journeys if j.pm %}<li><a class="tkr" href="{{ r.decision_href }}#{{ j.anchor }}">{{ j.i.ticker | ticker }}</a> {{ pm.side(j.i.side) }}{% if j.votes %} <strong>{{ j.votes[0] }} of {{ j.votes[1] }}</strong> attempts to enter{% endif %}
+    <ul class="jd-list">{% for x in j.pm %}<li>Attempt {{ x.n }}: <strong>{{ x.action }}</strong>{% if x.levels %} · {{ x.levels }}{% endif %}{% if x.reason %} — {{ x.reason | plain_terms("swing") }}{% endif %}</li>{% endfor %}</ul></li>{% else %}<li class="muted">No idea reached the manager.</li>{% endfor %}</ul>
+  {% if r.budget_reason %}<p class="small"><strong>Swing budget</strong>{% if r.sw.budget %} {{ "%g" | format(r.sw.budget.swing_pct) }}%{% endif %}: {{ r.budget_reason | plain_terms("swing") }}</p>{% endif %}
+  {% endif %}
+</details>
+{% endfor %}
+{% else %}
+{{ m.empty("No paper decision yet", "This seat's history fills in from the first paper decision with a swing part.") }}
+{% endif %}
+{% endcall %}
 {% endblock %}

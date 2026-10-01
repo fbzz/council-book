@@ -469,14 +469,17 @@ def test_the_agents_said_section_threads_claims_and_their_fates(built):
     assert "decisive fact" in semis
 
 
-def test_agent_pages_fold_their_history_and_open_with_a_table(built):
+def test_agent_pages_fold_their_history_and_open_with_a_banner(built):
     _, pages = built
     bull = pages["agents/bull.html"]
     entries = re.findall(r'<details class="entry" id="run-[^"]+"( open)?>', bull)
     assert len(entries) == 5 and entries[0] == " open" and not any(entries[1:])
-    over = bull[bull.index('id="overview"'):bull.index('id="history"')]
-    assert over.count('<tr><td class="when">') == 5 and "Manager sided with" in over and "hold ref → cut SEMIS" in over
-    assert bull.index('id="overview"') < bull.index('id="history"')
+    banner = bull[bull.index('id="latest"'):bull.index('id="what"')]
+    assert '<section class="card vb vb-agent accent-bull" id="latest"' in bull and "Latest:" in banner and "→" in banner
+    chips = re.findall(r'<a class="hc hc-(ok|no|none)" href="[^"]+">', banner)
+    assert len(chips) == 5                                                    # one per meeting, linked
+    assert "manager agreed" in banner and "the manager did what it asked" in banner   # the glyphs' meaning in words
+    assert 'id="overview"' not in bull and bull.index('id="latest"') < bull.index('id="history"')
     assert "<p class=\"big\">" not in bull[bull.index('id="what"'):bull.index('id="numbers"')]   # no repeated lead
     assert 'class="strip strip-agent strip-n6"' in bull
 

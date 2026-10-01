@@ -3533,6 +3533,9 @@ def agent_verdicts(cv: CycleView, run: dict[str, Any], tr: dict[str, Any],
     if total == 0 or valid == 0 or c.basis in ("fallback_parse", "fallback_disagreement", "council_unavailable"):
         verdicts["pm"] = "no usable answer: reference used"
     else:
+        used = next((r for r in c.pm.replicates if r.replicate == c.pm.medoid), None)
+        if used is not None and used.valid and not used.deviations:
+            council = {}                         # no deviation claimed: level drift is not a decision
         verdicts["pm"] = (compact_changes(council, lines) or "hold the reference") + (f" · {agree}" if agree else "")
     ctrl = c.single_agent
     if ctrl is None:
@@ -4082,46 +4085,58 @@ def _set_aside(cv: CycleView, turn_of: tuple[str, ...]) -> int:
 
 def build_agents(view: JournalView, transcripts: dict[str, dict[str, Any]], prompts: dict[str, dict[str, str]],
                  model: str, runs: dict[str, dict[str, Any]] | None = None,
-                 lines: Lines | None = None) -> list[dict[str, Any]]:
-    """One entry per agent: its spec, its numbers over every published run, an overview row per run
-    (what it said or did, whose side the manager took, the outcome) and its history (newest first;
-    the transcript sections of each run, with links into the run page)."""
+                 lines: Lines | None = None, sources: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """One entry per agent: its spec, its numbers over every published meeting (live runs and paper
+    decisions, `agent_sources`), an overview row per meeting (what it said or did, whose side the
+    manager took, the outcome) and its history (newest first; the transcript sections of each
+    meeting, with links into the run or decision page)."""
     out = []
+    if sources is None:
+        sources = [{"kind": "rehearsal" if cv.rehearsal else "live", "cv": cv, "no": None,
+                    "run": (runs or {}).get(cv.doc.cycle_id), "tr": transcripts[cv.doc.cycle_id],
+                    "href": f"../cycles/{cv.doc.cycle_id}.html", "core_anchor": ""} for cv in view.cycles]
     verdicts: dict[str, dict[str, str]] = {}
-    if runs is not None and lines is not None:
-        for cv in view.cycles:
-            cid = cv.doc.cycle_id
-            verdicts[cid] = agent_verdicts(cv, runs[cid], transcripts[cid], lines)[0]
+    if lines is not None:
+        for src in sources:
+            if src["run"] is not None:
+                verdicts[src["cv"].doc.cycle_id + str(src["no"] or "")] = agent_verdicts(
+                    src["cv"], src["run"], src["tr"], lines)[0]
+                if src["kind"] == "paper":
+                    verdicts[src["cv"].doc.cycle_id + str(src["no"])]["human"] = "not needed: a paper run"
     for spec in AGENT_SPECS:
-        calls = [call_view(x) for cv in view.cycles for x in cv.doc.calls if x.role in spec.roles]
+        calls = [call_view(x) for src in sources for x in src["cv"].doc.calls if x.role in spec.roles]
         n = len(calls)
         ok = sum(1 for x in calls if not x["failed"])
-        # every failed call, newest run first, linking to its place in the run
-        failed = [{"when": fmt_short_when(cv.doc.slot), "word": v["word"], "error": v["error_word"],
-                   "what": v["fail_phrase"], "css": v["css"],
+        # every failed call, newest meeting first, linking to its place in the run (or the decision)
+        failed = [{"when": fmt_short_when(src["cv"].doc.slot), "word": v["word"], "error": v["error_word"],
+                   "what": v["fail_phrase"], "css": v["css"], "no": src["no"],
                    "attempt": v["replicate"] if x.role in ("pm", "single_agent") else 0,
-                   "href": f"../cycles/{cv.doc.cycle_id}.html#{v['anchor']}"}
-                  for cv in view.cycles for x in cv.doc.calls if x.role in spec.roles
+                   "href": src["href"] + "#" + (src["core_anchor"] or v["anchor"])}
+                  for src in sources for x in src["cv"].doc.calls if x.role in spec.roles
                   for v in [call_view(x)] if v["failed"]]
         kinds: dict[str, int] = {}
         for f in failed:
             kinds[f["word"]] = kinds.get(f["word"], 0) + 1
         entries = []
-        for cv in view.cycles:
-            tr = transcripts[cv.doc.cycle_id]
+        for src in sources:
+            cv, tr = src["cv"], src["tr"]
+            meta = {"kind": src["kind"], "no": src["no"], "key": cv.doc.cycle_id + str(src["no"] or ""),
+                    "chip": PAPER_CHIP if src["kind"] == "paper" else cv.chip}
             if spec.slug == "human":
                 # the person is not a section of the transcript: its entry is the run's decision
                 legs = len(cv.doc.plan.legs) if cv.doc.plan else 0
-                entries.append({"cv": cv, "sections": [], "href": f"../cycles/{cv.doc.cycle_id}.html",
-                                "anchor": "a-decision", "chain": tr["chain"], "status": tr["decision_status"],
-                                "decision": {"chip": cv.chip, "legs": legs, "reason": cv.decision_reason,
+                entries.append({"cv": cv, "sections": [], "href": src["href"], **meta,
+                                "anchor": src["core_anchor"] or "a-decision", "chain": tr["chain"],
+                                "status": tr["decision_status"],
+                                "decision": {"chip": meta["chip"], "legs": legs, "reason": cv.decision_reason,
+                                             "paper": src["kind"] == "paper",
                                              "approved": fmt_when(cv.approved_slot) if cv.approved_slot else ""}})
                 continue
             sections = [a for a in tr["agents"] if a["slug"] == spec.slug]
             if not sections:
                 continue
-            entries.append({"cv": cv, "sections": sections, "href": f"../cycles/{cv.doc.cycle_id}.html",
-                            "anchor": sections[0]["id"],
+            entries.append({"cv": cv, "sections": sections, "href": src["href"], **meta,
+                            "anchor": src["core_anchor"] or sections[0]["id"],
                             "chain": tr["chain"] if spec.slug in ("bull", "bear", "pm", "control") else [],
                             "status": sections[0]["status"] if len(sections) == 1 else _merge_status(sections)})
         seen = [e for e in entries if any(a["calls"] for a in e["sections"])] if spec.roles else entries
@@ -4161,15 +4176,19 @@ def build_agents(view: JournalView, transcripts: dict[str, dict[str, Any]], prom
             stats["got"] = f"{got} of {plural(decided, 'run')}" if decided else "—"
             stats["named"] = named
             stats["dismissed"] = _share_words(dismissed, claims)
+            # the same record in plain words (the index card and the page's numbers)
+            stats["agree_words"] = (f"Manager agreed with it {got} of {plural(decided, 'time')}" if decided
+                                    else "No usable manager decision yet")
+            stats["points_words"] = (f"{dismissed} of its {plural(claims, 'point')} rejected" if claims else "")
+            stats["got_n"], stats["decided_n"], stats["dismissed_n"], stats["claims_n"] = got, decided, dismissed, claims
         elif spec.slug == "pm":
-            valid = [r for cv in view.cycles for r in cv.doc.pm.replicates]
+            valid = [r for src in sources for r in src["cv"].doc.pm.replicates]
             stats["valid"] = _share_words(sum(1 for r in valid if r.valid), len(valid))
             stats["changed"] = _share_words(
-                sum(1 for cv in view.cycles if transcripts[cv.doc.cycle_id]["by_id"]["a-pm"]["body"]["decision"]),
-                len(view.cycles))
+                sum(1 for src in sources if src["tr"]["by_id"]["a-pm"]["body"]["decision"]), len(sources))
         elif spec.slug == "control":
-            stats["differs"] = _share_words(sum(1 for cv in view.cycles if cv.control_agrees is False),
-                                            sum(1 for cv in view.cycles if cv.control_agrees is not None))
+            stats["differs"] = _share_words(sum(1 for src in sources if src["cv"].control_agrees is False),
+                                            sum(1 for src in sources if src["cv"].control_agrees is not None))
         elif spec.slug == "human":
             asked = [cv for cv in view.cycles if not cv.rehearsal and cv.doc.plan and cv.doc.plan.legs]
             stats["asked"] = len(asked)
@@ -4186,8 +4205,10 @@ def build_agents(view: JournalView, transcripts: dict[str, dict[str, Any]], prom
             used = next((r for r in c.pm.replicates if r.replicate == c.pm.medoid), None)
             sided = SIDED_WORDS.get(used.sided_with or "", "—") if used is not None and used.valid else "—"
             row = {"cv": cv, "href": e["href"], "anchor": e["anchor"], "status": e["status"],
-                   "said": verdicts.get(c.cycle_id, {}).get(spec.slug, ""), "sided": sided, "set_aside": None,
-                   "chip": cv.chip}
+                   "said": verdicts.get(e["key"], {}).get(spec.slug, ""), "sided": sided, "set_aside": None,
+                   "chip": e["chip"], "kind": e["kind"], "no": e["no"],
+                   "risk_said": verdicts.get(e["key"], {}).get("risk", ""),
+                   "core_verb": core_line(c, lines)["verb"] if lines is not None else ""}
             if spec.slug == "bull":
                 row["set_aside"] = _set_aside(cv, ("bull_open", "bull_rebuttal"))
             elif spec.slug == "bear":
@@ -5606,6 +5627,437 @@ def agent_role_stats(view: JournalView) -> dict[str, dict[str, Any]]:
     return {slug: role_stats(view, roles, calls) for slug, roles in AGENT_ROLE_SLUGS.items()}
 
 
+# ------------------------------------------------------------------------------ the agents pages
+# Council seating cards (approved 2026-10-01): one card per seat in the order a decision flows
+# (Scout -> Skeptic -> Bull / Bear -> Manager -> analysts -> Risk -> You), code officers in a compact
+# "Machinery" band, and agent pages that open with a verdict banner and a ✓/✗/— strip of recent calls.
+PAPER_CHIP = {"label": "PAPER", "css": "rehearsal", "title": "A paper run: real data and models, nothing traded"}
+# The agents' shorthand in published argument text, in plain words (the claim-chip translations
+# of MARKET_FIELDS / SWING_FIELD_WORDS, worded for a sentence). Only identifier-like tokens are
+# rewritten, never plain English words.
+TERM_WORDS: tuple[tuple[str, str], ...] = (
+    (r"\bmom10d\b", "10-day momentum"), (r"\bmom63d\b", "3-month momentum"),
+    (r"\bdd52\b", "drop from 52-week high"), (r"\bSMA ?(\d{2,3})\b", r"\1-day average"),
+    (r"\bdist_sma(\d{2,3})(?:_pct)?\b", r"distance from the \1-day average"),
+    (r"\bsigma_ann\b", "yearly volatility"), (r"\bret1d_sigma\b", "last day's move vs normal"),
+    (r"\bdist_52w_high(?:_pct)?\b", "distance from 52-week high"),
+    (r"\bdist_52w_low(?:_pct)?\b", "distance from 52-week low"), (r"\brel_move(?:_since_pct)?\b", "move vs sector"),
+    (r"\bret_(\d{1,3})d\b", r"\1-day return"), (r"\bvol_ratio_last\b", "last day's volume vs normal"),
+    (r"\bvol_ratio_since\b", "volume since the news vs normal"),
+    (r"\bshort_interest_pct_float\b", "short interest"), (r"\bdays_to_cover\b", "days to cover"),
+    (r"\bnews_age_sessions\b", "news age"), (r"\bfiling_age_d\b", "filing age"),
+    (r"\brev_yoy\b", "revenue vs a year ago"), (r"\brev_accel\b", "revenue growth change"),
+    (r"\bgm_chg\b", "gross margin change"), (r"\bom_chg\b", "operating margin change"),
+    (r"\bbeta_60d\b", "60-day beta"), (r"\bsigma_daily\b", "daily volatility"),
+    (r"(\d)\s?bps?\b", r"\1 basis points"), (r"\bbps?\b", "basis points"), (r"\byoy\b", "year on year"),
+)
+_TERM_RES = tuple((re.compile(p), w) for p, w in TERM_WORDS)
+_FIELD_TOKEN = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")     # identifier-like: move_since_news_close_sigma
+
+
+def plain_terms(text: Any, book: str = "core") -> str:
+    """Agent shorthand in plain words: `mom10d` -> "10-day momentum", `SMA50` -> "50-day average",
+    `40bps` -> "40 basis points", and any other fact-field name the claim chips translate. In the
+    swing book `vol_ratio` is a volume ratio; in the core it is the volatility ratio. Redaction
+    markers ("[value removed]") pass through untouched."""
+    out = "" if text is None else str(text)
+    for rx, words in _TERM_RES:
+        out = rx.sub(words, out)
+    swing = book == "swing"
+    fields = {**MARKET_FIELDS, **VOL_FIELDS, **SWING_FIELD_WORDS,
+              "vol_ratio": "volume vs normal" if swing else VOL_FIELDS.get("vol_ratio", "volatility ratio")}
+    return _FIELD_TOKEN.sub(lambda m: fields.get(m.group(0), m.group(0)), out)
+
+
+_RAW_TAGS = ("pre", "code", "script", "style", "title", "head")
+
+
+def plain_html(html: str, book: str = "core") -> str:
+    """`plain_terms` over a rendered page's text nodes only (never a tag, an attribute, or the
+    contents of <pre>/<code>/<head>), so every argument, rebuttal and attempt reads in words."""
+    parts = re.split(r"(<[^>]+>)", html)
+    raw = 0
+    out = []
+    for p in parts:
+        if p.startswith("<"):
+            m = re.match(r"<(/?)([a-zA-Z0-9]+)", p)
+            if m and m.group(2).lower() in _RAW_TAGS and not p.endswith("/>"):
+                raw += -1 if m.group(1) else 1
+                raw = max(raw, 0)
+            out.append(p)
+        else:
+            out.append(p if raw else plain_terms(p, book))
+    return "".join(out)
+
+
+def agent_sources(view: JournalView, lines: Lines, runs: dict[str, dict[str, Any]],
+                  linked: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every meeting an agent page reads, newest first: the live runs (with their run pages) and the
+    paper decisions, whose core council goes through the same run and transcript views (its
+    links land on the decision page's core section)."""
+    out: list[dict[str, Any]] = []
+    for cv in view.cycles:
+        cid = cv.doc.cycle_id
+        out.append({"kind": "rehearsal" if cv.rehearsal else "live", "cv": cv, "no": None, "run": runs[cid],
+                    "tr": linked[cid], "href": f"../cycles/{cid}.html", "core_anchor": "", "doc": None})
+    for no, doc in sorted(view.paper_cycles.items()):
+        cv = CycleView(doc=doc.core, path="", verified=view.paper_verified.get(no, False))
+        run = build_run_view(cv, lines)
+        tr = build_transcript(cv, lines, run, base=f"../{paper_href(no)}")
+        for st in tr["chain"]:                    # a paper run is not a rehearsal
+            for part in (st, *st.get("segs", [])):
+                for k in ("text", "plain"):
+                    if isinstance(part.get(k), str):
+                        part[k] = part[k].replace("not needed: rehearsal", "not needed: a paper run")
+        out.append({"kind": "paper", "cv": cv, "no": no, "run": run, "tr": tr, "href": f"../{paper_href(no)}",
+                    "core_anchor": "d-core", "doc": doc})
+    out.sort(key=lambda s: (s["cv"].doc.slot, s["no"] or 0), reverse=True)
+    return out
+
+
+def _glyph(state: str) -> str:
+    return {"ok": "✓", "no": "✗", "none": "—"}[state]
+
+
+def _hchip(state: str, word: str, entry: dict[str, Any], href: str) -> dict[str, str]:
+    """One mini-history chip: a glyph AND a word (never colour alone), linked to the meeting."""
+    no = entry.get("no")
+    return {"state": state, "glyph": _glyph(state), "word": word, "href": href,
+            "label": f"#{no}" if no else fmt_short_when(entry["cv"].doc.slot),
+            "badge": "PAPER" if entry.get("kind") == "paper" else "LIVE" if entry.get("kind") == "live" else "REHEARSAL"}
+
+
+def _latest_prompt_note(calls: list[Any], prompts: dict[str, dict[str, str]]) -> str:
+    """"This call ran X; the prompt in force is now Y" when the newest call's prompt differs from
+    the manifest's (a versioned policy change since)."""
+    for x in calls:
+        meta = prompts.get(x.role)
+        if not meta or not x.prompt_id:
+            continue
+        ran_sha = short_sha(x.prompt_sha) if x.prompt_sha else ""
+        if x.prompt_id != meta["id"] or (ran_sha and meta["sha"] and ran_sha != meta["sha"]):
+            return (f"This call ran the prompt {x.prompt_id}" + (f" ({ran_sha})" if ran_sha else "")
+                    + f"; the prompt in force is now {meta['id']}" + (f" ({meta['sha']})" if meta["sha"] else "")
+                    + ". The next call uses the new one.")
+    return ""
+
+
+def agent_track(agent: dict[str, Any], prompts: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """A core agent page's banner (the latest call: what it said -> what happened, its meeting) and
+    the ✓/✗/— strip of its last calls, with the strip's meaning in words."""
+    slug = agent["slug"]
+    rows = agent["overview"]
+    chips = []
+    for e, o in zip(agent["entries"], rows, strict=False):
+        href = f"{e['href']}#{e['anchor']}"
+        body = next((a["body"] for a in reversed(e["sections"]) if a["body"]), None)
+        st = e["status"]["css"]
+        if slug in ("bull", "bear"):
+            if body and body.get("used_ok"):
+                chips.append(_hchip("ok", "manager agreed", e, href) if body.get("used_got")
+                             else _hchip("no", "not followed", e, href))
+            else:
+                chips.append(_hchip("none", "no usable decision", e, href))
+        elif slug == "risk":
+            held = "held" in (o["said"] or "")
+            chips.append(_hchip("no" if held else "ok", "held a change" if held else "all checks pass", e, href))
+        elif slug == "human":
+            chips.append(_hchip("none", "not needed" if e["kind"] != "live" else (e["chip"]["label"] or "").lower(),
+                                e, href))
+        elif agent["kind"] == "LLM":
+            chips.append(_hchip("no", e["status"]["word"], e, href) if st in ("failed", "timeout") else
+                         _hchip("none", "not run", e, href) if st == "idle" else _hchip("ok", "usable", e, href))
+        else:
+            chips.append(_hchip("ok" if st == "ok" else "none", o["said"] or e["status"]["word"], e, href))
+    legend = {"bull": "✓ the manager did what it asked · ✗ the manager went another way · — no usable manager decision",
+              "bear": "✓ the manager did what it asked · ✗ the manager went another way · — no usable manager decision",
+              "risk": "✓ every check passed · ✗ it held a change back (its job)",
+              "human": "— no approval needed (rehearsal or paper)"}.get(
+        slug, "✓ a usable reply · ✗ the call failed · — it did not run" if agent["kind"] == "LLM" else "✓ it ran")
+    banner = None
+    if agent["entries"]:
+        e, o = agent["entries"][0], rows[0] if rows else {}
+        body = next((a["body"] for a in reversed(e["sections"]) if a["body"]), None)
+        c = e["cv"].doc
+        if slug in ("bull", "bear"):
+            happened = (("the manager did what it asked" if body.get("used_got") else f"the manager chose to {body['did']}")
+                        if body and body.get("used_ok") else "no usable manager decision")
+        elif slug == "human":
+            happened = "nothing to approve: a paper run trades nothing" if e["kind"] == "paper" else (e["chip"]["label"] or "").lower()
+        elif slug == "pm":
+            happened = "the risk engine: " + (o.get("risk_said") or "checked it")
+        else:
+            happened = "the core " + o["core_verb"] if o.get("core_verb") else ""
+        calls = [x for x in c.calls if x.role in agent["spec"].roles]
+        banner = {"said": o.get("said") or e["status"]["word"], "happened": happened, "no": e["no"],
+                  "kind": e["kind"], "href": f"{e['href']}#{e['anchor']}", "when": c.slot,
+                  "prompt_note": _latest_prompt_note(calls, prompts)}
+    return {"chips": chips[:10], "legend": legend, "banner": banner}
+
+
+SEAT_TEXT = {   # slug -> (reads, decides)
+    "scout": ("Public news, SEC filings, licensed headlines (by id only) and a screen of big movers.",
+              "Which stocks to pitch as swing ideas, long or short, each with a stop, a target and a time limit."),
+    "skeptic": ("Only the ticker, the side, the cited items, a one-line claim and the fact card; never the pitch.",
+                "Pass, wait or reject: is the news already in the price?"),
+    "bull": ("The fact pack, the analysts' cards and, in the swing book, the ideas the Skeptic let through.",
+             "Nothing: it argues for positions (core weights and swing entries); the manager decides."),
+    "bear": ("The bull's claims and the same evidence.",
+             "Nothing: it contests the bull claim by claim and argues its own case."),
+    "pm": ("The debate, the evidence and the ranges code allows.",
+           "Core: up to three line changes, three attempts, the most typical used. Swing: enter or pass (two of "
+           "three attempts must enter) and the swing budget."),
+    "news": ("Public RSS feeds and SEC filings.", "Nothing: it writes evidence cards that cite their sources by id."),
+    "macro": ("Public macro data: rates, the dollar, the VIX.", "Nothing: it describes the regime, as context only."),
+    "risk": ("Every proposal, the risk policy and the book.",
+             "The final word: it holds back any change that breaks a limit. Code, not a language model."),
+    "human": ("A live proposal, in a separate operator terminal.",
+              "Approves or rejects every live order. Paper runs trade nothing, so they need no approval."),
+}
+SEAT_ORDER = ("scout", "skeptic", "bull", "bear", "pm", "news", "macro", "risk", "human")
+SEAT_ROLES = {"scout": ("scout",), "skeptic": ("skeptic",), "bull": ("bull_open", "bull_rebuttal", "swing_bull"),
+              "bear": ("bear", "swing_bear"), "pm": ("pm", "swing_pm"), "news": ("news",), "macro": ("macro",)}
+SEAT_SWING_PAGE = {"bull": "swing_bull", "bear": "swing_bear", "pm": "swing_pm"}
+MACHINERY = ("data", "reference", "vol", "event", "audit", "costs", "control")
+
+
+def _reliability(st: dict[str, Any], failed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The small reliability line: calls, usable share, the paper / live split, failures in words."""
+    if not st["calls"]:
+        return {"text": "no model call yet", "fails": [], "fail_words": ""}
+    bk = st["by_kind"]
+    split = " · ".join(x for x in (f"{bk['paper']} paper" if bk["paper"] else "",
+                                   f"{bk['live']} live" if bk["live"] else "",
+                                   f"{bk['rehearsal']} rehearsal" if bk["rehearsal"] else "") if x)
+    kinds: dict[str, int] = {}
+    for f in failed or []:
+        kinds[f["word"]] = kinds.get(f["word"], 0) + 1
+    words = ", ".join(plural(n, w, w if w in ("skipped", "invalid", "not run") else None) for w, n in kinds.items())
+    return {"text": f"{plural(st['calls'], 'call')} · {st['ok_pct']} usable · {split}", "fails": failed or [],
+            "fail_words": words}
+
+
+def swing_seat_history(view: JournalView, lines: Lines) -> dict[str, list[dict[str, Any]]]:
+    """{swing role: one row per paper decision with a swing part, newest first}: what the role said,
+    what happened next, a ✓/✗/— chip, and the decision page's journeys behind it."""
+    out: dict[str, list[dict[str, Any]]] = {r: [] for r in SWING_ROLES_ALL}
+    for no, doc in sorted(view.paper_cycles.items(), reverse=True):
+        sw = doc.swing
+        if sw is None:
+            continue
+        dv = decision_view(doc, view.paper_verified.get(no, False), lines)
+        journeys = dv["journeys"]
+        tk = {j["ref"]: f"{ticker(j['i'].ticker)} {j['i'].side}" for j in journeys}
+        bn = dv["banner"]
+        if bn["entered"]:
+            outcome = {"label": "ENTERED", "css": "executed", "title": "",
+                       "text": "entered " + ", ".join(tk[j["ref"]] for j in bn["entered"])}
+        else:
+            outcome = {"label": "NO TRADE", "css": "stone", "title": "", "text": "no swing trade"}
+            if bn["closest"]:
+                c = bn["closest"]
+                outcome["text"] += f"; closest was {tk[c['ref']]}, stopped at {c['stop_label']} ({c['reason']})"
+        href = f"../{paper_href(no)}"
+        base = {"no": no, "slot": doc.slot, "kind": "paper", "href": href + "#d-ideas", "decision_href": href,
+                "outcome": outcome, "journeys": journeys, "sw": sw, "tk": tk,
+                "budget_reason": next((rp.budget_reason for b in sw.batches for rp in b.replicates
+                                       if rp.valid and rp.budget_reason), "")}
+        calls = {r: [x for x in doc.core.calls if x.role == r] for r in SWING_ROLES_ALL}
+
+        def status(role: str, calls: dict[str, list[Any]] = calls) -> tuple[str, str]:
+            cs = calls[role]
+            if not cs:
+                return "none", "not run"
+            bad = sum(1 for x in cs if x.status not in ("ok", "cached"))
+            return ("no", f"{bad} of {plural(len(cs), 'reply', 'replies')} unusable") if bad else ("ok", "usable")
+
+        entered_pm = [t.ref for b in sw.batches for t in b.tally if t.action == "enter"]
+        # the Scout
+        st, word = status("scout")
+        names = [tk[j["ref"]] for j in journeys]
+        said = (f"pitched {plural(len(names), 'idea')}: " + ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
+                if names else "pitched no idea")
+        out["scout"].append({**base, "said": said, "chip": {"state": st, "word": word}, "calls": calls["scout"]})
+        # the Skeptic
+        st, word = status("skeptic")
+        verdicts = [j["verdict"]["word"] for j in journeys if j["verdict"]]
+        vw = {"pass": "passed", "wait": "said wait to", "reject": "rejected", "failed": "could not judge"}
+        said = (", ".join(f"{vw[w]} {verdicts.count(w)}" for w in ("pass", "wait", "reject", "failed") if verdicts.count(w))
+                or "judged no idea")
+        out["skeptic"].append({**base, "said": said, "chip": {"state": st, "word": word}, "calls": calls["skeptic"]})
+        # the swing bull and bear: the ideas their claims are about; ✓ when the manager went their way
+        for role, attr in (("swing_bull", "bull"), ("swing_bear", "bear")):
+            refs = list(dict.fromkeys(cl.ref for b in sw.batches for case in [getattr(b, attr)] if case
+                                      for cl in case.claims if cl.ref))
+            st, word = status(role)
+            if not calls[role] and not refs:
+                continue
+            verb = "argued for" if attr == "bull" else "argued against"
+            said = (f"{verb} " + ", ".join(tk.get(r, r) for r in refs)) if refs else "made no claim"
+            mine = [r for r in entered_pm if r in refs]
+            if st == "no" and not refs:
+                chip = {"state": "no", "word": word}
+            elif attr == "bull":
+                chip = ({"state": "ok", "word": "manager voted to enter " + ", ".join(tk.get(r, r) for r in mine)}
+                        if mine else {"state": "no", "word": "manager passed on all"})
+            else:
+                chip = ({"state": "no", "word": "manager voted to enter " + ", ".join(tk.get(r, r) for r in mine)}
+                        if mine else {"state": "ok", "word": "manager passed on all"})
+            out[role].append({**base, "said": said, "chip": chip, "calls": calls[role]})
+        # the swing manager
+        st, word = status("swing_pm")
+        if calls["swing_pm"] or sw.batches:
+            enters = [f"{tk.get(t.ref, t.ref)} ({t.votes_for} of {t.replicates})" for b in sw.batches for t in b.tally
+                      if t.action == "enter"]
+            passes = sum(1 for b in sw.batches for t in b.tally if t.action != "enter")
+            said = ("voted to enter " + ", ".join(enters) if enters else "passed on every idea") + (
+                f"; passed on {passes}" if enters and passes else "")
+            if sw.budget is not None:
+                said += f"; swing budget {sw.budget.swing_pct:g}%"
+            out["swing_pm"].append({**base, "said": said, "chip": {"state": st, "word": word}, "calls": calls["swing_pm"]})
+    return out
+
+
+SWING_SEAT_SPECS: tuple[AgentSpec, ...] = (
+    AgentSpec("swing_bull", "Bull · swing", "LLM", "bull", "Swing book",
+              "Argues for the swing ideas the Skeptic let through, claim by claim, citing the fact card.",
+              roles=("swing_bull",), source="prompts/swing_bull.md",
+              more="The same seat as the core bull, run on the swing ideas of a slot in one batch. It has no "
+                   "authority: the swing manager decides.",
+              short="Argues for the swing ideas the Skeptic let through."),
+    AgentSpec("swing_bear", "Bear · swing", "LLM", "bear", "Swing book",
+              "Answers the swing bull's claims and argues against the ideas, citing the fact card.",
+              roles=("swing_bear",), source="prompts/swing_bear.md",
+              more="The same seat as the core bear, run on the swing ideas. It has no authority.",
+              short="Contests the swing bull, idea by idea."),
+    AgentSpec("swing_pm", "Manager · swing", "LLM", "pm", "Swing book",
+              "Makes three separate attempts at enter-or-pass for each swing idea; two of three must enter. Also "
+              "votes the swing budget.",
+              roles=("swing_pm",), source="prompts/swing_pm.md",
+              more="Each attempt sets a stop, a target and a time limit for an entry; code then checks the swing "
+                   "rules. The budget is the median of the valid votes; idle swing money stays in the core.",
+              short="Decides enter or pass on each swing idea, and the swing budget."),
+)
+SWING_SEAT_ICON = {"scout": "file-search", "skeptic": "flask-conical", "swing_bull": "trending-up",
+                   "swing_bear": "trending-down", "swing_pm": "briefcase"}
+SWING_SEAT_LEGEND = {
+    "scout": "✓ a usable reply · ✗ the call failed",
+    "skeptic": "✓ every reply usable · ✗ a reply could not be read (that idea is stopped)",
+    "swing_bull": "✓ the manager voted to enter an idea it argued for · ✗ the manager passed on all of them",
+    "swing_bear": "✓ the manager passed on every idea · ✗ the manager voted to enter one it argued against",
+    "swing_pm": "✓ usable replies · ✗ a reply could not be read (it counts as a pass)",
+}
+
+
+def swing_seat_pages(view: JournalView, lines: Lines, prompts: dict[str, dict[str, str]],
+                     calls_all: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """The five swing seats' pages (Scout, Skeptic, swing bull, bear and manager): banner, the ✓/✗/—
+    strip, numbers over paper and live calls, and one history entry per paper decision."""
+    calls_all = calls_all if calls_all is not None else role_calls(view)
+    hist = swing_seat_history(view, lines)
+    out = []
+    for spec in (*SWING_AGENT_SPECS, *SWING_SEAT_SPECS):
+        st = role_stats(view, spec.roles, calls_all)
+        rows = hist[spec.slug]
+        failed = []
+        for r in calls_all:
+            if r["call"].role in spec.roles:
+                v = call_view(r["call"])
+                if v["failed"]:
+                    failed.append({"what": v["fail_phrase"], "word": v["word"], "css": v["css"],
+                                   "no": r["decision_no"], "when": fmt_short_when(r["slot"]),
+                                   "href": "../" + r["href"] + ("#d-ideas" if r["decision_no"] else "#swing-ideas")})
+        chips = [{"state": r["chip"]["state"], "glyph": _glyph(r["chip"]["state"]), "word": r["chip"]["word"],
+                  "href": r["href"], "label": f"#{r['no']}", "badge": "PAPER"} for r in rows[:10]]
+        banner = None
+        if rows:
+            r = rows[0]
+            banner = {"said": r["said"], "happened": r["outcome"]["text"], "no": r["no"], "kind": "paper",
+                      "href": r["href"], "when": r["slot"], "prompt_note": _latest_prompt_note(r["calls"], prompts)}
+        out.append({"spec": spec, "slug": spec.slug, "name": spec.name, "accent": spec.accent, "kind": "LLM",
+                    "icon": SWING_SEAT_ICON[spec.slug], "job": spec.job, "more": spec.more, "short": spec.short,
+                    "stats": st, "rel": _reliability(st, failed), "failed": failed, "rows": rows[:HISTORY_CAP],
+                    "chips": chips, "legend": SWING_SEAT_LEGEND[spec.slug], "banner": banner,
+                    "source": f"{REPO_URL}/blob/main/{spec.source}", "source_path": spec.source,
+                    "prompt": prompts.get(spec.roles[0]), "page": f"agents/{spec.slug}.html",
+                    "core_page": {"swing_bull": "bull.html", "swing_bear": "bear.html", "swing_pm": "pm.html"}.get(spec.slug, "")})
+    return out
+
+
+def seat_cards(view: JournalView, agents: list[dict[str, Any]], swing_pages: list[dict[str, Any]],
+               sources: list[dict[str, Any]], lines: Lines, calls_all: list[dict[str, Any]]) -> dict[str, Any]:
+    """The agents index: one seating card per seat in decision-flow order, then the machinery band."""
+    by = {a["slug"]: a for a in agents}
+    sw_by = {a["slug"]: a for a in swing_pages}
+    latest = sources[0] if sources else None
+    verdicts = agent_verdicts(latest["cv"], latest["run"], latest["tr"], lines)[0] if latest else {}
+    if latest is not None and latest["kind"] == "paper":
+        verdicts["human"] = "not needed: a paper run trades nothing"
+    seats = []
+    for slug in SEAT_ORDER:
+        a = by.get(slug)
+        s = sw_by.get(slug) or sw_by.get(SEAT_SWING_PAGE.get(slug, ""))
+        if a is None and slug not in sw_by:
+            continue
+        reads, decides = SEAT_TEXT[slug]
+        if slug in sw_by:                        # Scout, Skeptic: the swing record
+            card = sw_by[slug]
+            row = card["rows"][0] if card["rows"] else None
+            last = ({"text": row["said"][:1].upper() + row["said"][1:] + ".", "chip": row["outcome"], "no": row["no"],
+                     "kind": "paper", "href": row["href"]} if row else None)
+            st, rel = card["stats"], card["rel"]
+            name, accent, icon, page, kind = card["name"], card["accent"], card["icon"], f"{slug}.html", "LLM"
+            also = None
+        else:
+            spoke = [x for x in a["entries"] if any(sec["calls"] for sec in x["sections"])] if a["kind"] == "LLM" else a["entries"]
+            e = spoke[0] if spoke else None
+            last = None
+            if e is not None and latest is not None:
+                said = verdicts.get(slug, "") if e["key"] == latest["cv"].doc.cycle_id + str(latest["no"] or "") else (
+                    a["overview"][0]["said"] if a["overview"] else "")
+                text = said[:1].upper() + said[1:] if said else e["status"]["word"].capitalize()
+                if slug in ("bull", "bear", "pm") and s is not None and s["rows"] and s["rows"][0]["no"] == e["no"]:
+                    text = f"Core: {said or e['status']['word']}. Swing: {s['rows'][0]['said']}"
+                body = next((x["body"] for x in reversed(e["sections"]) if x["body"]), None)
+                if slug in ("bull", "bear"):
+                    ch = ({"label": "MANAGER AGREED", "css": "executed", "title": ""} if body and body.get("used_ok") and body.get("used_got")
+                          else {"label": "NOT FOLLOWED", "css": "halted", "title": ""} if body and body.get("used_ok")
+                          else {"label": "NO DECISION", "css": "stone", "title": ""})
+                elif slug == "pm" or slug == "risk":
+                    held = "held" in verdicts.get("risk", "")
+                    ch = {"label": "RISK HELD SOME" if held else "PASSED RISK", "css": "warn" if held else "executed", "title": ""}
+                elif slug == "human":
+                    ch = {"label": "NOT NEEDED", "css": "stone", "title": ""} if e["kind"] != "live" else e["chip"]
+                else:
+                    ch = {"label": "CONTEXT", "css": "stone", "title": "Evidence for the debate; code never acts on it"}
+                last = {"text": text.rstrip(".") + ".", "chip": ch, "no": e["no"], "kind": e["kind"],
+                        "href": f"{e['href']}#{e['anchor']}"}
+            roles = SEAT_ROLES.get(slug)
+            st = role_stats(view, roles, calls_all) if roles else None
+            fails = [f for f in a["stats"]["failed"]] + ([f for f in s["failed"]] if s and slug in SEAT_SWING_PAGE else [])
+            rel = _reliability(st, fails) if st else {
+                "text": (f"code · {plural(a['stats']['runs'], 'meeting')}" if a["kind"] == "CODE" else
+                         f"a person · {plural(a['stats'].get('asked', 0), 'live proposal')} to decide"),
+                "fails": [], "fail_words": ""}
+            name, accent, icon, page, kind = a["name"], a["accent"], a["icon"], f"{slug}.html", a["kind"]
+            also = ({"href": f"{SEAT_SWING_PAGE[slug]}.html", "name": s["name"]} if s and slug in SEAT_SWING_PAGE else None)
+        seats.append({"slug": slug, "name": name, "accent": accent, "icon": icon, "page": page, "kind": kind,
+                      "reads": reads, "decides": decides, "last": last, "rel": rel, "also": also,
+                      "worst": a["stats"]["worst"] if a is not None and slug not in sw_by else None,
+                      "record": (" · ".join(x for x in (a["stats"]["agree_words"], a["stats"]["points_words"]) if x)
+                                 if a is not None and "agree_words" in a["stats"] else ""),
+                      "swing": slug in ("scout", "skeptic") or also is not None})
+    machinery = []
+    for slug in MACHINERY:
+        a = by.get(slug)
+        if a is None:
+            continue
+        said = verdicts.get(slug, "")
+        machinery.append({"slug": slug, "name": a["name"], "accent": a["accent"], "icon": a["icon"], "kind": a["kind"],
+                          "job": a["spec"].short or a["job"], "said": said, "page": f"{slug}.html"})
+    return {"seats": seats, "machinery": machinery, "latest": latest}
+
+
 # ------------------------------------------------------------------------------ the rules page
 def _p(frac: Any, digits: int = 2) -> str:
     """A fraction as a percent in words (0.08 -> "8%", 1.9 -> "190%")."""
@@ -5994,7 +6446,7 @@ def make_env(lines: Lines | list[str] | None = None) -> Environment:
         signed=fmt_signed, move=move_dir, count=fmt_int, secs=fmt_secs, ticker=ticker, short_when=fmt_short_when,
         share1=fmt_share1, cap=lambda s: str(s)[:1].upper() + str(s)[1:],
         asset=lambda k: asset_page(k) if k in line_set.info else "",
-        flag_words=flag_words,
+        flag_words=flag_words, plain_terms=plain_terms,
     )
     env.globals["move_words"] = lambda b: SCREEN_MOVE_WORDS.get(b or "", "—")
     env.globals.update(
@@ -6165,6 +6617,8 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
 
     def render(template: str, target: str, root: str, page: str, **ctx: Any) -> None:
         html = redacted_chips(env.get_template(template).render(**common, root=root, page=page, **ctx))
+        if target.startswith("agents/"):        # agent shorthand in words (text nodes only)
+            html = plain_html(html, "swing" if target[7:-5] in SWING_ROLES_ALL else "core")
         path = out_dir / target
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(html, encoding="utf-8")
@@ -6177,7 +6631,13 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     linked = {cid: build_transcript(cv, lines, runs[cid], base=f"../cycles/{cid}.html")
               for cv in view.cycles for cid in [cv.doc.cycle_id]}
     council_cfg = yaml.safe_load((policy_dir / "council.yaml").read_text()) or {}
-    agents = build_agents(view, linked, prompt_files(prompts_dir), str(council_cfg.get("model", "")), runs, lines)
+    prompts = prompt_files(prompts_dir)
+    sources = agent_sources(view, lines, runs, linked)        # live runs + paper decisions, newest first
+    agents = build_agents(view, linked, prompts, str(council_cfg.get("model", "")), runs, lines, sources)
+    for agent in agents:
+        agent["track"] = agent_track(agent, prompts)
+    calls_all = role_calls(view)
+    swing_pages = swing_seat_pages(view, lines, prompts, calls_all) if view.has_swing else []
     latest = view.cycles[0] if view.cycles else None
     ops_on_time = sum(1 for r in view.ops if r.status == "on_time")
     # the performance chart in two shapes: wide from 641 px, narrow on phones (text stays legible)
@@ -6210,14 +6670,20 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
         render("cycle.html.j2", f"cycles/{cv.doc.cycle_id}.html", "../", "runs", cv=cv, c=cv.doc,
                run=runs[cv.doc.cycle_id], tr=transcripts[cv.doc.cycle_id],
                sw=swing_run_view(cv.doc.swing, geo, view.swing))
-    swing_cards = swing_agent_cards(view) if view.has_swing else []
-    render("agents.html.j2", "agents/index.html", "../", "agents", agents=agents, cycles_count=len(view.cycles),
-           model=str(council_cfg.get("model", "")), think=bool(council_cfg.get("think", False)),
-           swing_agents=swing_cards)
+    seating = seat_cards(view, agents, swing_pages, sources, lines, calls_all)
+    stats_all = agent_role_stats(view)
+    llm_calls = sum(stats_all[k]["calls"] for k in stats_all)
+    llm_ok = sum(stats_all[k]["ok"] for k in stats_all)
+    render("agents.html.j2", "agents/index.html", "../", "agents", agents=agents, seating=seating,
+           meetings_count=len(sources), paper_count=len(view.paper_cycles), cycles_count=len(view.cycles),
+           llm_calls=llm_calls, llm_ok=llm_ok, swing_agents=swing_pages,
+           model=str(council_cfg.get("model", "")), think=bool(council_cfg.get("think", False)))
     for agent in agents:
-        render("agent.html.j2", f"agents/{agent['slug']}.html", "../", "agents", agent=agent, agents=agents)
-    for card in swing_cards:
-        render("swing_agent.html.j2", card["page"], "../", "agents", agent=card, swing_agents=swing_cards)
+        render("agent.html.j2", f"agents/{agent['slug']}.html", "../", "agents", agent=agent, agents=agents,
+               swing_agents=swing_pages)
+    for card in swing_pages:
+        render("swing_agent.html.j2", card["page"], "../", "agents", agent=card, agents=agents,
+               swing_agents=swing_pages)
     for a in assets:
         render("asset.html.j2", a["asset"]["page"], "../", "portfolio", a=a, book_target=holdings["target"],
                others=[{"page": x["asset"]["page"], "ticker": x["asset"]["ticker"], "ac": x["asset"]["ac"],

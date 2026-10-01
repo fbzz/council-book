@@ -99,9 +99,10 @@ def test_swing_page_has_trades_metrics_benchmarks_funnel_and_health(built):
 def test_scout_and_skeptic_cards_explain_themselves(built):
     _, pages = built
     idx = pages["agents/index.html"]
-    assert 'class="agent-card accent-scout"' in idx and 'class="agent-card accent-skeptic"' in idx
-    assert "Reads the news and proposes swing ideas." in _text(idx)
-    assert "blind to the pitch, whether the news is already priced in" in _text(idx)
+    assert 'class="seat-card accent-scout"' in idx and 'class="seat-card accent-skeptic"' in idx
+    assert idx.index('id="ag-scout"') < idx.index('id="ag-skeptic"') < idx.index('id="ag-bull"')   # decision flow
+    assert "Which stocks to pitch as swing ideas" in _text(idx)
+    assert "is the news already in the price?" in _text(idx)
     assert "bigger picture" in _text(pages["agents/skeptic.html"])
     assert 'href="../agents/scout.html"' in pages["swing/index.html"]
 

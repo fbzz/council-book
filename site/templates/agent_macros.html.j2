@@ -1,0 +1,31 @@
+{# Agent pages: the verdict-style banner (the latest call -> what happened), the ✓/✗/— strip of its
+   last calls (glyph AND word, never colour alone) and the other-agents links. #}
+{% import "paper_macros.html.j2" as pm %}
+
+{% macro banner(agent, track) %}
+{% set b = track.banner %}
+{% if b %}
+<section class="card vb vb-agent accent-{{ agent.accent }}" id="latest" aria-labelledby="latest-h">
+  <h2 id="latest-h" class="vb-title"><span class="vb-k">Latest:</span> {{ b.said | plain_terms }} <span class="vb-arrow" aria-label="then">→</span> {{ b.happened | plain_terms }}</h2>
+  <p class="vb-closest">{% if b.kind == "paper" %}{{ pm.badge() }} {% endif %}<a href="{{ b.href }}">{% if b.no %}Decision #{{ b.no }}{% else %}The run of {{ b.when | short_when }}{% endif %}</a>{% if b.prompt_note %} · <span class="vb-note">prompt changed since</span>{% endif %}</p>
+  {% if track.chips %}
+  <h3 class="hc-h">Its last {{ plural(track.chips | length, "meeting") }}, newest first</h3>
+  <ol class="hc-list">
+  {% for c in track.chips %}<li><a class="hc hc-{{ c.state }}" href="{{ c.href }}"><span class="hc-g" aria-hidden="true">{{ c.glyph }}</span><span class="hc-l">{{ c.label }}</span><span class="hc-w">{{ c.word }}</span></a></li>{% endfor %}
+  </ol>
+  <p class="small muted hc-key">{{ track.legend }}</p>
+  {% endif %}
+</section>
+{% else %}
+<section class="card vb vb-agent accent-{{ agent.accent }}" id="latest" aria-labelledby="latest-h">
+  <h2 id="latest-h" class="vb-title">No call yet</h2>
+  <p class="vb-closest">This seat has not spoken at a published meeting.</p>
+</section>
+{% endif %}
+{% endmacro %}
+
+{% macro others(agents, swing_agents, current) %}
+{% set rest = (agents | rejectattr("slug", "equalto", current) | list) + (swing_agents | rejectattr("slug", "equalto", current) | list) %}
+{% for a in rest %}<li class="toc-desk"><a href="{{ a.slug }}.html"><span class="dot accent-{{ a.accent }}" aria-hidden="true"></span><span class="toc-label">{{ a.name }}</span></a></li>{% endfor %}
+<li class="toc-phone"><details class="toc-more"><summary>Other agents ({{ rest | length }})</summary><ol>{% for a in rest %}<li><a href="{{ a.slug }}.html"><span class="dot accent-{{ a.accent }}" aria-hidden="true"></span><span class="toc-label">{{ a.name }}</span></a></li>{% endfor %}</ol></details></li>
+{% endmacro %}

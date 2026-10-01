@@ -1,15 +1,16 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
+{% import "paper_macros.html.j2" as pm %}
+{% import "agent_macros.html.j2" as am %}
 {% block title %}{{ agent.name }}{% endblock %}
 {% block toc %}
+{% if agent.track.banner %}{{ m.toc_item("latest", "Latest call", agent.accent) }}{% endif %}
 {{ m.toc_item("what", "What it does", agent.accent) }}
 {{ m.toc_item("numbers", "Its numbers", "neutral") }}
-{{ m.toc_item("overview", "Run by run", "neutral") }}
 {{ m.toc_item("history", "History (" ~ (agent.entries | length) ~ ")", agent.accent) }}
 {% if agent.older %}{{ m.toc_item("older", "Older runs", "neutral") }}{% endif %}
 {{ m.toc_group("Other agents", "toc-desk") }}
-{% for a in agents if a.slug != agent.slug %}<li class="toc-desk"><a href="{{ a.slug }}.html"><span class="dot accent-{{ a.accent }}" aria-hidden="true"></span><span class="toc-label">{{ a.name }}</span></a></li>{% endfor %}
-<li class="toc-phone"><details class="toc-more"><summary>Other agents ({{ agents | length - 1 }})</summary><ol>{% for a in agents if a.slug != agent.slug %}<li><a href="{{ a.slug }}.html"><span class="dot accent-{{ a.accent }}" aria-hidden="true"></span><span class="toc-label">{{ a.name }}</span></a></li>{% endfor %}</ol></details></li>
+{{ am.others(agents, swing_agents, agent.slug) }}
 {% endblock %}
 {% block hero %}
 <header class="hero hero-agent">
@@ -25,6 +26,7 @@
 {% endblock %}
 {% block main %}
 {% set s = agent.stats %}
+{{ am.banner(agent, agent.track) }}
 
 {% macro turn_block(a, href) %}
 {% set b = a.body %}
@@ -32,13 +34,13 @@
 {{ m.failure(a.failure) }}
 {% if b %}
 <p class="stance">{% if b.changes %}Wants to <strong>{{ m.changes_stance(b.stance_parts, "../") }}</strong>{% else %}Stance: <strong>{{ b.stance }}</strong>{% endif %}</p>
-<blockquote class="argument"><p>{{ b.argument }}</p></blockquote>
+<blockquote class="argument"><p>{{ b.argument | plain_terms }}</p></blockquote>
 {% if b.legacy_cut %}<p class="small muted legacy">Shortened when published: early runs kept only the first 600 characters of each argument; later runs publish it whole.</p>{% endif %}
 {% if b.claims %}
 <ol class="claims">
 {% for cl in b.claims %}
-  <li class="claim"><a class="cid" href="{{ href }}#{{ cl.anchor }}">{{ cl.id }}</a> {{ cl.text }}{% if cl.chips %}<span class="evs">{{ m.chips(cl.chips) }}</span>{% endif %}
-  {% if cl.fates %}<ul class="fates-inline">{% for f in cl.fates %}<li>{{ m.verdict(f.verdict) }} <a href="{{ f.href }}">{{ f.who }}</a>{% if f.dagger %}<sup class="dag">†</sup>{% endif %}: {{ f.text }}</li>{% endfor %}</ul>{% endif %}
+  <li class="claim"><a class="cid" href="{{ href }}#{{ cl.anchor }}">{{ cl.id }}</a> {{ cl.text | plain_terms }}{% if cl.chips %}<span class="evs">{{ m.chips(cl.chips) }}</span>{% endif %}
+  {% if cl.fates %}<ul class="fates-inline">{% for f in cl.fates %}<li>{{ m.verdict(f.verdict) }} <a href="{{ f.href }}">{{ f.who | replace("the used attempt", "its final decision") }}</a>{% if f.dagger %}<sup class="dag">†</sup>{% endif %}: {{ f.text | plain_terms }}</li>{% endfor %}</ul>{% endif %}
   </li>
 {% endfor %}
 </ol>
@@ -46,13 +48,13 @@
 {% endif %}
 {% if b.rebuttals %}
 <p class="list-label">Answers to the bull: concedes {{ b.concede }}, contests {{ b.refute }}</p>
-<ul class="rebuttals">{% for rb in b.rebuttals %}<li>{{ m.verdict(rb.verdict) }} {% if rb.target_href %}<a class="cref" href="{{ rb.target_href }}">bull's {{ rb.claim_id }}</a>{% else %}<span class="cid">{{ rb.claim_id }}</span>{% endif %}{% if rb.target_text %} <q class="muted">{{ rb.target_text }}</q>{% endif %}<br>{{ rb.text }}{% if rb.chips %}<span class="evs">{{ m.chips(rb.chips) }}</span>{% endif %}</li>{% endfor %}</ul>
+<ul class="rebuttals">{% for rb in b.rebuttals %}<li>{{ m.verdict(rb.verdict) }} {% if rb.target_href %}<a class="cref" href="{{ rb.target_href }}">bull's {{ rb.claim_id }}</a>{% else %}<span class="cid">{{ rb.claim_id }}</span>{% endif %}{% if rb.target_text %} <q class="muted">{{ rb.target_text | plain_terms }}</q>{% endif %}<br>{{ rb.text | plain_terms }}{% if rb.chips %}<span class="evs">{{ m.chips(rb.chips) }}</span>{% endif %}</li>{% endfor %}</ul>
 {% endif %}
 {% if b.concessions %}
 <p class="list-label">Concedes</p>
-<ul class="concessions">{% for x in b.concessions %}<li>{% if x.href %}<a class="cref" href="{{ x.href }}">bear's {{ x.ref }}</a>: {% endif %}{{ x.text }}</li>{% endfor %}</ul>
+<ul class="concessions">{% for x in b.concessions %}<li>{% if x.href %}<a class="cref" href="{{ x.href }}">bear's {{ x.ref }}</a>: {% endif %}{{ x.text | plain_terms }}</li>{% endfor %}</ul>
 {% endif %}
-{% if b.used_ok %}<p class="small muted">{% if b.used_got %}The used manager attempt did what {{ b.who }} asked here ({{ b.asked }}){% else %}The used manager attempt chose to {{ b.did }}; {{ b.who }} asked to {{ b.asked }}{% endif %} · it named {{ b.used_label or "no side" }} as its side.</p>{% endif %}
+{% if b.used_ok %}<p class="small muted">{% if b.used_got %}The manager did what {{ b.who }} asked here ({{ b.asked }}).{% else %}The manager chose to {{ b.did }}; {{ b.who }} asked to {{ b.asked }}.{% endif %}</p>{% endif %}
 {% endif %}
 {% endmacro %}
 
@@ -63,23 +65,24 @@
   {% if agent.kind == "LLM" %}<div><dt>Model</dt><dd><code>{{ agent.model }}</code></dd></div>{% endif %}
   {% if agent.source %}<div><dt>{{ "Prompt" if agent.kind == "LLM" else "Source" }}</dt><dd class="prompt"><a href="{{ agent.source }}">{{ agent.source_dir }}<wbr>{{ agent.source_file }}</a></dd></div>{% endif %}
 </dl>
+{% if agent.track.banner and agent.track.banner.prompt_note %}<p class="small prompt-note">{{ icon("circle-alert") }}{{ agent.track.banner.prompt_note }}</p>{% endif %}
 {% if agent.prompts %}
 <p class="small">Prompts in force: {% for p in agent.prompts %}<a href="{{ p.href }}">{{ p.id }}</a> <span class="n muted">{{ p.sha }}</span>{% if not loop.last %} · {% endif %}{% endfor %}. Each run records the hash of the prompts it used; a prompt change is a versioned policy change.</p>
 {% endif %}
 {% endcall %}
 
 {% call m.section("numbers", 2, "Its numbers", "neutral") %}
-{% set n_tiles = (3 if agent.kind == "LLM" else 0) + 1 + (2 if s.got is defined else 0) + (2 if s.valid is defined else 0) + (2 if s.asked is defined else 0) + (1 if s.differs is defined else 0) %}
+{% set n_tiles = (3 if agent.kind == "LLM" else 0) + 1 + (2 if s.agree_words is defined else 0) + (2 if s.valid is defined else 0) + (2 if s.asked is defined else 0) + (1 if s.differs is defined else 0) %}
 <dl class="strip strip-agent strip-n{{ n_tiles }}">
   {% if agent.kind == "LLM" %}
   <div class="st st-ring"><dt>{{ icon("circle-check") }}Usable replies</dt><dd>{{ m.pring(s.ok_num, s.ok_css, (s.ok_pct ~ " of calls usable") if s.calls else "no calls yet") }}</dd><dd class="st-v st-v-sm">{{ s.ok }} <span class="st-of">of {{ s.calls }} calls</span></dd></div>
   <div class="st"><dt>{{ icon("circle-x") }}Failed calls</dt><dd class="st-v">{{ s.failed | length }}</dd><dd class="st-sub">{% if s.failed %}{{ s.fail_words | join(", ") }}{% else %}none{% endif %}{% if s.corrected %} · {{ s.corrected }} fixed by a correction{% endif %}</dd></div>
   <div class="st"><dt>{{ icon("clock-3") }}Median time</dt><dd class="st-v">{{ s.latency }}</dd><dd class="st-sub">per call</dd></div>
   {% endif %}
-  <div class="st"><dt>{{ icon("list-checks") }}Runs</dt><dd class="st-v">{{ s.runs }}</dd><dd class="st-sub">{% if s.last %}last seen <a href="../cycles/{{ s.last.cv.doc.cycle_id }}.html">{{ s.last.cv.doc.slot | short_when }}</a>{% else %}not seen yet{% endif %}</dd></div>
-  {% if s.got is defined %}
-  <div class="st"><dt>{{ icon("briefcase") }}Manager did what it asked</dt><dd class="st-v st-v-sm">{{ s.got }}</dd><dd class="st-sub">by its final proposal · named it as its side: {{ s.named }}</dd></div>
-  <div class="st"><dt>{{ icon("ban") }}Claims set aside</dt><dd class="st-v">{{ s.dismissed }}</dd><dd class="st-sub">by the used attempt</dd></div>
+  <div class="st"><dt>{{ icon("list-checks") }}Meetings</dt><dd class="st-v">{{ s.runs }}</dd><dd class="st-sub">{% set kinds = agent.entries | map(attribute="kind") | list %}{{ kinds | select("equalto", "paper") | list | length }} paper · {{ kinds | reject("equalto", "paper") | list | length }} live or rehearsal</dd></div>
+  {% if s.agree_words is defined %}
+  <div class="st"><dt>{{ icon("briefcase") }}Manager agreed with it</dt><dd class="st-v st-v-sm">{{ s.got_n }} <span class="st-of">of {{ plural(s.decided_n, "time") }}</span></dd><dd class="st-sub">the manager's decision matched what it finally asked for</dd></div>
+  <div class="st"><dt>{{ icon("ban") }}Points rejected</dt><dd class="st-v st-v-sm">{{ s.dismissed_n }} <span class="st-of">of {{ s.claims_n }}</span></dd><dd class="st-sub">its points the manager named and dismissed</dd></div>
   {% endif %}
   {% if s.valid is defined %}
   <div class="st"><dt>{{ icon("file-check") }}Valid attempts</dt><dd class="st-v">{{ s.valid }}</dd><dd class="st-sub">after the auditor</dd></div>
@@ -96,37 +99,19 @@
 {% if agent.kind == "LLM" %}
 <p class="list-label">Failed calls</p>
 {% if s.failed %}
-<ul class="failed-calls">{% for f in s.failed %}<li><a href="{{ f.href }}">{{ f.when }}{% if f.attempt %} · attempt {{ f.attempt }}{% endif %}</a> {{ m.mark({"css": f.css, "word": f.word}) }} <span class="muted">it {{ f.what }}</span></li>{% endfor %}</ul>
+<ul class="failed-calls">{% for f in s.failed %}<li><a href="{{ f.href }}">{% if f.no %}decision #{{ f.no }}{% else %}{{ f.when }}{% endif %}{% if f.attempt %} · attempt {{ f.attempt }}{% endif %}</a> {{ m.mark({"css": f.css, "word": f.word}) }} <span>it {{ f.what }}</span></li>{% endfor %}</ul>
 {% else %}<p class="small muted">No failed call in the published runs.</p>{% endif %}
 {% endif %}
 {% endcall %}
 
-{% call m.section("overview", 3, "Run by run", "neutral") %}
-{% if agent.overview %}
-{{ m.wrap_open("Run by run (scrolls sideways)") }}
-<table class="wide stack runs overview">
-  <caption class="small muted">Newest run first; each row opens the agent's part of the run.</caption>
-  <thead><tr><th>Run</th><th>Status</th><th>{{ "Asked" if agent.slug in ("bull", "bear") else "Decided" if agent.slug == "pm" else "Said or did" }}</th>{% if agent.debate %}<th>Manager sided with</th><th class="n">{{ "Set aside" if agent.slug == "pm" else "Claims set aside" }}</th>{% endif %}<th>Outcome</th></tr></thead>
-  <tbody>
-  {% for o in agent.overview %}
-  <tr><td class="when"><a href="{{ o.href }}#{{ o.anchor }}">{{ o.cv.doc.slot | short_when }}</a></td><td data-label="Status">{{ m.mark(o.status) }}</td><td class="text" data-label="{{ 'Asked' if agent.slug in ('bull', 'bear') else 'Decided' if agent.slug == 'pm' else 'Said or did' }}">{{ o.said or "—" }}</td>{% if agent.debate %}<td data-label="Manager sided with">{{ o.sided }}</td><td class="n" data-label="Set aside">{{ o.set_aside if o.set_aside is not none else "—" }}</td>{% endif %}<td data-label="Outcome">{{ m.chip(o.chip) }}</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
-{% else %}
-{{ m.empty("No runs yet", "This agent has not appeared in a published run.") }}
-{% endif %}
-{% endcall %}
-
-{% call m.section("history", 4, "History", agent.accent) %}
+{% call m.section("history", 3, "History", agent.accent) %}
 {% if agent.entries %}
-<p class="small muted">Newest first{% if agent.older %}; the latest {{ agent.entries | length }} runs{% endif %}. The latest run is open; each other run opens on a click, and each entry links to its place in the run.</p>
+<p class="small muted">Newest first{% if agent.older %}; the latest {{ agent.entries | length }} meetings{% endif %}. The latest is open; each other meeting opens on a click and links to its run or decision page.</p>
 {% for e in agent.entries %}
 {% set cv = e.cv %}
-<details class="entry" id="run-{{ cv.doc.cycle_id }}"{% if loop.first %} open{% endif %}>
-  <summary class="entry-head">{{ icon("chevron-right", "chev") }}<span class="entry-when">{{ cv.doc.slot | when }}</span> {{ m.chip(cv.mode_chip) }} {{ m.mark(e.status) }}{% set ov = agent.overview[loop.index0] if loop.index0 < agent.overview | length else none %}{% if ov and ov.said %} <span class="entry-sum">{{ ov.said }}</span>{% endif %}</summary>
-  <p class="entry-open small"><a href="{{ e.href }}#{{ e.anchor }}">Open in the run →</a></p>
+<details class="entry" id="run-{{ cv.doc.cycle_id }}{% if e.no %}-p{{ e.no }}{% endif %}"{% if loop.first %} open{% endif %}>
+  <summary class="entry-head">{{ icon("chevron-right", "chev") }}<span class="entry-when">{% if e.no %}#{{ e.no }} · {% endif %}{{ cv.doc.slot | when }}</span> {% if e.kind == "paper" %}{{ pm.badge() }}{% else %}{{ m.chip(cv.mode_chip) }}{% endif %} {{ m.mark(e.status) }}{% set ov = agent.overview[loop.index0] if loop.index0 < agent.overview | length else none %}{% if ov and ov.said %} <span class="entry-sum">{{ ov.said }}</span>{% endif %}</summary>
+  <p class="entry-open small"><a href="{{ e.href }}#{{ e.anchor }}">{% if e.no %}Open decision #{{ e.no }} →{% else %}Open in the run →{% endif %}</a></p>
   {% if e.chain %}{{ m.chain(e.chain, e.href, "../") }}{% endif %}
   {% for a in e.sections %}
   {% set b = a.body %}
@@ -138,7 +123,7 @@
   {{ m.failure(a.failure) }}
   {% if agent.slug == "macro" %}
     {% if b.note %}<p class="small muted">{{ b.note }}</p>{% endif %}
-    {% if b.macro %}<p>Regime: <span class="chip state-{{ b.macro.css }}">{{ b.macro.regime }}</span></p><ol class="claims">{% for d in b.macro.drivers %}<li class="claim">{{ d.text }}{% if d.chips %}<span class="evs">{{ m.chips(d.chips) }}</span>{% endif %}</li>{% endfor %}</ol>{% endif %}
+    {% if b.macro %}<p>Regime: <span class="chip state-{{ b.macro.css }}">{{ b.macro.regime }}</span></p><ol class="claims">{% for d in b.macro.drivers %}<li class="claim">{{ d.text | plain_terms }}{% if d.chips %}<span class="evs">{{ m.chips(d.chips) }}</span>{% endif %}</li>{% endfor %}</ol>{% endif %}
   {% endif %}
   {% for k in b.cards %}{{ m.kcard(k) }}{% endfor %}
   {% if agent.slug == "news" and not b.cards and not a.failure %}<p class="muted small">No cards.</p>{% endif %}
@@ -166,7 +151,7 @@
   {% endfor %}
   {% if e.decision is defined %}
   {% set d = e.decision %}
-  <p>{{ m.chip(d.chip) }} {% if cv.rehearsal %}Rehearsal: no order existed, so no one had to approve anything.{% elif d.legs %}A proposal with {{ plural(d.legs, "order") }}.{% else %}Nothing to approve: no order was needed.{% endif %}{% if d.reason %} Reason given: {{ d.reason }}{% endif %}{% if d.approved %} <span class="small muted">Approved during the slot starting {{ d.approved }}.</span>{% endif %}</p>
+  <p>{{ m.chip(d.chip) }} {% if d.paper %}A paper run: nothing is traded, so no one had to approve anything.{% elif cv.rehearsal %}Rehearsal: no order existed, so no one had to approve anything.{% elif d.legs %}A proposal with {{ plural(d.legs, "order") }}.{% else %}Nothing to approve: no order was needed.{% endif %}{% if d.reason %} Reason given: {{ d.reason }}{% endif %}{% if d.approved %} <span class="small muted">Approved during the slot starting {{ d.approved }}.</span>{% endif %}</p>
   {% endif %}
 </details>
 {% endfor %}
@@ -176,8 +161,8 @@
 {% endcall %}
 
 {% if agent.older %}
-{% call m.section("older", 5, "Older runs", "neutral") %}
-<ul class="older">{% for e in agent.older %}<li><a href="{{ e.href }}#{{ e.anchor }}">{{ e.cv.doc.slot | when }}</a> {{ m.mark(e.status) }}</li>{% endfor %}</ul>
+{% call m.section("older", 4, "Older meetings", "neutral") %}
+<ul class="older">{% for e in agent.older %}<li><a href="{{ e.href }}#{{ e.anchor }}">{% if e.no %}#{{ e.no }} · {% endif %}{{ e.cv.doc.slot | when }}</a> {{ m.mark(e.status) }}</li>{% endfor %}</ul>
 {% endcall %}
 {% endif %}
 {% endblock %}

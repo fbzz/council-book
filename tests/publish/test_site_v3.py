@@ -303,7 +303,7 @@ def test_an_ambiguous_claim_number_is_shown_once_never_as_a_firm_fate(built):
     control = run[run.index('id="a-control"'):run.index('id="a-audit"')]
     assert "Set aside" not in control                                      # the control saw no debate
     bear = pages["agents/bear.html"]
-    assert "Claims set aside</dt><dd class=\"st-v\">0 of 12</dd>" in bear
+    assert 'Points rejected</dt><dd class="st-v st-v-sm">0 <span class="st-of">of 12</span>' in bear
 
 
 def test_failed_calls_say_what_went_wrong_and_what_happened_instead(built):
@@ -329,18 +329,25 @@ def test_run_header_has_stat_tiles_and_a_progress_ring(built):
 
 
 # ------------------------------------------------------------------------------ the agents pages
-def test_agents_index_is_a_team_table_with_records(site, built):
+def test_agents_index_is_council_seating_cards(site, built):
     _, pages = built
     idx = pages["agents/index.html"]
-    assert idx.count('<table class="team stack">') == 6                     # one per group, the person included
+    seats = re.findall(r'<li class="seat-card accent-[a-z]+" id="ag-([a-z]+)">', idx)
+    assert seats == ["bull", "bear", "pm", "news", "macro", "risk", "human"]   # decision-flow order (no swing here)
     news_calls = sum(1 for p in (FIXTURE / "cycles").rglob("*.json") if not p.name.endswith(".reveal.json")
                      for c in json.loads(p.read_bytes())["calls"] if c["role"] == "news")
     news = idx[idx.index('id="ag-news"'):idx.index('id="ag-macro"')]
-    assert f'data-label="Calls">{news_calls}</td>' in news
+    assert f"{news_calls} calls · " in news and "Reads</dt>" in news and "Decides</dt>" in news
     assert 'class="avatar accent-news"' in news and "deepseek" not in news      # the model is said once, above
-    assert "deepseek" in idx[:idx.index('id="ag-data"')]
+    assert "deepseek" in idx[:idx.index('id="ag-bull"')]
     bull = idx[idx.index('id="ag-bull"'):idx.index('id="ag-bear"')]
-    assert "The manager did what it asked in 3 of 5 runs" in bull and "claims set aside by the used attempt" in bull
+    assert "Manager agreed with it 3 of 5 times" in bull and "points rejected" in bull
+    for jargon in ("used attempt", "named it as its side", "set aside"):
+        assert jargon not in idx, jargon
+    mach = idx[idx.index('id="machinery"'):]
+    assert re.findall(r'<a class="mach-a" href="([a-z]+)\.html">', mach) == ["data", "reference", "vol", "event",
+                                                                              "audit", "costs", "control"]
+    assert "— — —" not in idx and "<td" not in idx
 
 
 def test_agent_pages_show_history_newest_first(site, built):
@@ -532,7 +539,8 @@ def test_agent_pages_end_with_the_outcome(built):
     assert "Failed calls" in pm and 'href="../cycles/2026-09-24T1040Z.html#a-pm-3"' in pm
     idx = pages["agents/index.html"]
     news = idx[idx.index('id="ag-news"'):idx.index('id="ag-macro"')]
-    assert "1 timeout" in news and 'href="../cycles/2026-09-24T1040Z.html#a-news"' in news
+    assert "Failed: 1 timeout" in news and 'href="../cycles/2026-09-24T1040Z.html#a-news"' in news
+    assert "timed out after" in news                                          # the meaning in words, not a title
     toc = idx[idx.index('<nav class="toc"'):idx.index("</nav>", idx.index('<nav class="toc"'))]
     assert '<span class="tg-w">timeout</span>' in toc                       # the worst status in the window
 

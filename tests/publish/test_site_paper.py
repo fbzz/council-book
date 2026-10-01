@@ -55,6 +55,11 @@ def built(published, tmp_path_factory, _core_policy):  # noqa: F811
     return out, dest, {p.relative_to(dest).as_posix(): p.read_text() for p in dest.rglob("*.html")}
 
 
+@pytest.fixture(scope="module")
+def site():
+    return _load_site()
+
+
 def _text(html: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
 
@@ -342,6 +347,68 @@ def test_paper_swing_builds_the_scout_and_skeptic_pages(built):
     for slug in ("scout", "skeptic"):
         assert f"agents/{slug}.html" in pages, slug
         assert "paper" in _text(pages[f"agents/{slug}.html"])
+
+
+def test_every_swing_seat_has_a_page_with_paper_data(built):
+    _, _, pages = built
+    for slug in ("scout", "skeptic", "swing_bull", "swing_bear", "swing_pm"):
+        html = pages[f"agents/{slug}.html"]
+        assert f'content="{CSP}"' in html and "<script" not in html.lower() and 'style="' not in html, slug
+        banner = html[html.index('id="latest"'):html.index('id="job"')]
+        assert "Latest:" in banner and "→" in banner, slug                  # what it said -> what happened
+        assert ">PAPER<" in banner and 'href="../decisions/1/index.html#d-ideas">Decision #1</a>' in banner, slug
+        assert re.search(r'<a class="hc hc-(ok|no|none)" href="\.\./decisions/1/index\.html#d-ideas">', banner), slug
+        assert '<details class="entry" id="d-1" open>' in html, slug          # one entry per paper decision
+        t = _text(html)
+        assert not re.search(r"[$€£]\s?\d", t), slug                           # percent-only
+    skeptic = _text(pages["agents/skeptic.html"])
+    assert re.search(r"(passed|said wait to|rejected|could not judge) \d", skeptic)
+    assert "Open decision #1" in skeptic
+
+
+def test_agents_index_is_seating_cards_in_decision_order_with_paper(built):
+    _, _, pages = built
+    idx = pages["agents/index.html"]
+    seats = re.findall(r'<li class="seat-card accent-[a-z]+" id="ag-([a-z]+)">', idx)
+    assert seats == ["scout", "skeptic", "bull", "bear", "pm", "news", "macro", "risk", "human"]
+    scout = idx[idx.index('id="ag-scout"'):idx.index('id="ag-skeptic"')]
+    assert "Last call</dt>" in scout and ">PAPER<" in scout and "decision #" in scout
+    assert re.search(r"\d+ calls? · \d+% usable · \d+ paper", _text(scout))
+    for slug, page in (("bull", "swing_bull"), ("bear", "swing_bear"), ("pm", "swing_pm")):
+        card = idx[idx.index(f'id="ag-{slug}"'):]
+        assert f'href="{page}.html"' in card[:card.index("</li>")], slug     # the seat's swing page
+    assert "swing book" in _text(re.search(r'<p class="lede">.*?</p>', idx, re.S).group(0))
+    assert 'id="machinery"' in idx and "— — —" not in idx
+    for jargon in ("used attempt", "named it as its side", "set aside"):
+        assert jargon not in idx, jargon
+
+
+def test_core_agent_pages_read_paper_decisions(built):
+    _, _, pages = built
+    bull = pages["agents/bull.html"]
+    assert re.search(r'<details class="entry" id="run-[^"]+-p1"', bull)      # the paper decision's core debate
+    assert "Open decision #1 →" in bull and 'href="../decisions/1/index.html#d-core"' in bull
+    human = pages["agents/human.html"]
+    start = re.search(r'<details class="entry" id="run-[^"]+-p1"', human).start()
+    paper = _text(human[start:human.index("</details>", start)])
+    assert "nothing is traded, so no one had to approve anything" in paper and "not needed: rehearsal" not in paper
+
+
+def test_agent_shorthand_reads_in_words(site):
+    assert site.plain_terms("mom10d -6.7% and dd52 -13.1%, +3% over SMA50, carry 0.96 bps/day") == (
+        "10-day momentum -6.7% and drop from 52-week high -13.1%, +3% over 50-day average, "
+        "carry 0.96 basis points/day")
+    assert site.plain_terms("vol_ratio 2.1x", "swing") == "volume vs normal 2.1x"
+    assert site.plain_terms("[value removed] trend up") == "[value removed] trend up"   # markers and words untouched
+    html = '<p title="F:NDX:mom10d">mom10d</p><code>mom10d</code>'
+    assert site.plain_html(html) == '<p title="F:NDX:mom10d">10-day momentum</p><code>mom10d</code>'
+
+
+def test_a_changed_prompt_is_noted_against_the_call(site):
+    call = site.SimpleNamespace(role="pm", prompt_id="council-pm/v1", prompt_sha="a" * 64)
+    note = site._latest_prompt_note([call], {"pm": {"id": "council-pm/v2", "sha": "b" * 12, "href": ""}})
+    assert "council-pm/v1" in note and "now council-pm/v2" in note
+    assert site._latest_prompt_note([call], {"pm": {"id": "council-pm/v1", "sha": "a" * 12, "href": ""}}) == ""
 
 
 def test_meetings_and_role_stats_count_paper_runs(published, tmp_path, _core_policy):  # noqa: F811
