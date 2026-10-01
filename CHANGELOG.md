@@ -1,5 +1,15 @@
 # Changelog
 
+## Paper book: swing entries move their notional out of cash (2026-10-01)
+- **Fix** (`council.paperbook`): a paper swing entry paid only its declared leg from cash, so the
+  public split read core + swing + cash ~ 108% after an 8% entry (equity, weights and the paper
+  return were already right). Book version 2 follows the live eToro convention: a long buys and a
+  1x stock-CFD short posts its notional as margin, both out of cash; an open trade adds
+  `notional + P&L` to equity; closing returns `notional x (1 + gross - declared exit leg)`. The split
+  now sums to 100% (swing counted at notional + P&L) and the snapshot's credit is free cash, as live.
+  Version-1 books with open swing trades are migrated on load. Published paper files had no swing
+  trades and are unaffected.
+
 ## Decision pages as journey cards; public text and licence fixes (2026-10-01)
 - **Site** (`/decisions/<n>/`, user-approved design): a verdict banner (the entries or "No trade",
   "Closest to trading: <ticker> — stopped at <stage> (<plain reason>)" for the idea that got furthest:

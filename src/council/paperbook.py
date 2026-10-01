@@ -22,6 +22,14 @@ FLAT and the paper portfolio never built. The paper book closes that gap:
 - **Marks** (each paper cycle start): core lines at the last completed close; open swing trades run
   `swing.paper.evaluate` on the completed daily bars (gap/stop/target/time-stop conventions) and are
   otherwise marked at the last close.
+- **Cash / margin convention** (book version 2, the live eToro convention): opening a swing trade
+  moves its full sized notional out of cash (a long buys the stock; a 1x stock-CFD short posts its
+  notional as margin), plus the declared entry leg. An open trade contributes `notional + P&L` to
+  equity (eToro's "invested + P&L"), so cash is free credit, as the live `credit_usd`. Closing
+  returns `notional x (1 + gross return - declared exit leg)`. Hence core + swing + cash = 100% of
+  equity, where the swing split counts each open trade at `notional + P&L` (for a short this is its
+  margin plus P&L, not |exposure|); the signed weights / gross / net stay exposure-based as in the
+  live book. Version-1 books (notional left in cash) are migrated on load.
 
 `paper_book_public(state)` is the percent-only view the public paper record and the site render as
 "the portfolio" (weights %, swing trades with side / setup / stop % / target % / days held / return %
@@ -46,7 +54,7 @@ BOOK_FILE = "book.json"
 LEDGER_FILE = "book_ledger.jsonl"
 PAPER_STATE_DIR = "paper"
 EPS = 1e-9
-VERSION = 1
+VERSION = 2
 
 
 def is_paper_run(ctx: Any) -> bool:
@@ -99,9 +107,14 @@ class PaperSwing:
         return 1.0 if self.side == "long" else -1.0
 
     def pnl(self) -> float:
-        """Unrealised P&L at the last mark (the entry cost was already paid in cash)."""
+        """Unrealised P&L at the last mark (the entry cost was already paid from cash)."""
         px = self.last_price if self.last_price else self.entry_ref
         return self.notional * self.sign * (px / self.entry_ref - 1.0)
+
+    def invested_value(self) -> float:
+        """What the open trade adds to equity: the notional moved out of cash (a long's cost / a
+        short's 1x margin) plus its unrealised P&L (the module's cash / margin convention)."""
+        return self.notional + self.pnl()
 
     def value(self) -> float:
         """Signed exposure at the last mark."""
@@ -145,6 +158,9 @@ class PaperBook:
                    declared_swing_pct_per_leg=float(raw.get("declared_swing_pct_per_leg") or 1.25),
                    peak_nav=float(raw.get("peak_nav") or raw.get("start_nav") or 0.0),
                    build_phase=raw.get("build_phase") if isinstance(raw.get("build_phase"), dict) else None)
+        if int(raw.get("version") or 1) < 2:
+            # version 1 left an open swing trade's notional in cash; move it out (cash / margin convention)
+            book.cash -= sum(t.notional for t in book.open_swing())
         return book
 
     @classmethod
@@ -193,7 +209,7 @@ class PaperBook:
 
     def equity(self) -> float:
         core = sum(p["qty"] * p["price"] for p in self.core.values())
-        return self.cash + core + sum(t.pnl() for t in self.open_swing())
+        return self.cash + core + sum(t.invested_value() for t in self.open_swing())
 
     def signed_w(self) -> dict[str, float]:
         eq = self.equity()
@@ -298,7 +314,7 @@ class PaperBook:
             return False
         notional = float(size_nav) * self.equity()
         entry_cost = notional * self.declared_swing_pct_per_leg / 100.0
-        self.cash -= entry_cost
+        self.cash -= notional + entry_cost       # long: the purchase; 1x CFD short: the margin
         self.swing[trade_id] = PaperSwing(trade_id=trade_id, ticker=ticker, side=side, line=line, notional=notional,
                                           entry_ref=float(entry_ref), stop_pct=float(stop_pct),
                                           target_pct=float(target_pct), entry_day=entry_day,
@@ -312,7 +328,7 @@ class PaperBook:
         t = self.swing[trade_id]
         gross = t.sign * (exit_px / t.entry_ref - 1.0)
         leg = self.declared_swing_pct_per_leg / 100.0
-        self.cash += t.notional * (gross - leg)
+        self.cash += t.notional * (1.0 + gross - leg)
         t.status, t.exit_reason, t.exit_day, t.days_held = "closed", reason, day, int(days_held)
         t.last_price, t.net_ret = float(exit_px), gross - 2.0 * leg
         self.log({"kind": "swing_exit", "trade": trade_id, "reason": reason, "day": day,
@@ -348,9 +364,7 @@ class PaperBook:
         eq = self.equity()
         w = self.signed_w()
         core_lines = {s: round(100.0 * v, 2) for s, v in sorted(w.items()) if s in self.core and abs(v) > 5e-5}
-        swing_w = {t.line: 0.0 for t in self.open_swing()}
-        for t in self.open_swing():
-            swing_w[t.line] += t.value() / eq if eq > 0 else 0.0
+        swing_in = sum(t.invested_value() for t in self.open_swing())   # notional + P&L (margin for shorts)
         leg = 2.0 * self.declared_swing_pct_per_leg / 100.0
         trades = []
         for t in sorted(self.swing.values(), key=lambda x: (x.entry_day, x.trade_id)):
@@ -368,14 +382,14 @@ class PaperBook:
         core_gross = sum(abs(v) for v in core_lines.values())
         paid = self.costs_paid()
         cost_pct = round(100.0 * paid / self.start_nav, 2) if paid is not None and self.start_nav > 0 else None
-        swing_gross = sum(abs(v) for v in swing_w.values()) * 100.0
+        swing_pct = 100.0 * swing_in / eq if eq > 0 else 0.0
         return {
             "version": VERSION,
             "started_at": self.started_at, "marked_at": self.marked_at, "last_cycle": self.last_cycle,
             "paper_return_pct": round(100.0 * (eq / self.start_nav - 1.0), 2) if self.start_nav > 0 else 0.0,
             "core_weights_pct": core_lines,
             "swing_trades": trades,
-            "split_pct": {"core": round(core_gross, 2), "swing": round(swing_gross, 2),
+            "split_pct": {"core": round(core_gross, 2), "swing": round(swing_pct, 2),
                           "cash": round(100.0 * self.cash / eq, 2) if eq > 0 else 0.0},
             "cost_pct": cost_pct,          # declared costs paid since start, % of the start NAV (>= 0)
             "cost_basis": {"core": "policy cost model per side", "swing_pct_per_leg": self.declared_swing_pct_per_leg},

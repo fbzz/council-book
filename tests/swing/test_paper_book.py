@@ -387,3 +387,66 @@ def test_public_view_splits_out_the_declared_costs_paid(tmp_path):
                      setup="news_continuation", at=NOW, cycle_id="c1")
     assert book.public()["cost_pct"] == pytest.approx(0.18, abs=0.011)   # + 1.25% of an 8% position
     assert not MONEY.search(json.dumps(book.public()))
+
+
+def _split_sum(pub):
+    sp = pub["split_pct"]
+    return sp["core"] + sp["swing"] + sp["cash"]
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_swing_cash_accounting_sums_to_100_through_entry_marks_and_exit(tmp_path, side):
+    """Regression: a swing entry used to leave its notional in cash (core + swing + cash ~ 108%).
+    Cash / margin convention (module docstring): long buys, a 1x CFD short posts its notional as
+    margin; both move it out of cash. The split sums to 100% after every step; closing returns the
+    proceeds net of the declared exit leg; the paper return equals P&L net of both declared legs."""
+    book = _book(tmp_path / side)
+    book.trade_core({"NDX": 0.35, "BTC": 0.13}, {"NDX": 400.0, "BTC": 60000.0}, lambda s, b, a: 0.0,
+                    at=NOW, cycle_id="c1")
+    pub = book.public()
+    assert _split_sum(pub) == pytest.approx(100.0, abs=0.02) and pub["split_pct"]["cash"] == pytest.approx(52.0)
+    eq0 = book.equity()
+    book.enter_swing(trade_id="trade:a", ticker="ACME", side=side, line="SW_ACME", size_nav=0.08, entry_ref=50.0,
+                     stop_pct=0.05, target_pct=0.08, entry_day="2026-10-01", time_stop_day="2026-10-15",
+                     setup="breakout", at=NOW, cycle_id="c1")
+    pub = book.public()
+    assert _split_sum(pub) == pytest.approx(100.0, abs=0.02)
+    assert pub["split_pct"]["swing"] == pytest.approx(8.0 / 0.999, abs=0.02)      # 8% of the pre-entry NAV
+    assert pub["split_pct"]["cash"] == pytest.approx(100.0 * (0.52 * eq0 - 0.08 * eq0 * 1.0125) / book.equity(), abs=0.006)
+    assert book.equity() == pytest.approx(eq0 * (1 - 0.08 * 0.0125))                 # only the entry leg is lost
+    assert book.snapshot(NOW).credit_usd == pytest.approx(book.cash)                # free credit, as live
+    sign = 1.0 if side == "long" else -1.0
+    book.mark_core({"NDX": 420.0, "BTC": 57000.0}, NOW)
+    book.swing["trade:a"].last_price = 52.0                                          # a mark, ACME +4%
+    pub = book.public()
+    assert _split_sum(pub) == pytest.approx(100.0, abs=0.02)
+    w = book.signed_w()
+    assert w["SW_ACME"] == pytest.approx(sign * 0.08 * eq0 * 1.04 / book.equity())  # exposure-based weight
+    assert book.equity() == pytest.approx(book.cash + sum(p["qty"] * p["price"] for p in book.core.values())
+                                          + 0.08 * eq0 * (1 + sign * 0.04))
+    eq_before_exit, cash_before = book.equity(), book.cash
+    book.close_swing("trade:a", 52.0, "target", "2026-10-05", 2)
+    notional = 0.08 * eq0
+    assert book.cash - cash_before == pytest.approx(notional * (1 + sign * 0.04 - 0.0125))
+    assert book.equity() == pytest.approx(eq_before_exit - notional * 0.0125)        # exit leg only
+    pub = book.public()
+    assert _split_sum(pub) == pytest.approx(100.0, abs=0.02) and pub["split_pct"]["swing"] == 0.0
+    t = pub["swing_trades"][0]
+    assert t["return_net_pct"] == pytest.approx(100.0 * (sign * 0.04 - 0.025), abs=0.01)
+    core_pnl = sum(p["qty"] * p["price"] for p in book.core.values()) - 0.48 * FUNDED
+    assert book.equity() - FUNDED == pytest.approx(core_pnl + notional * (sign * 0.04 - 0.025))
+    book.save()
+    assert paper_book_public(tmp_path / side)["split_pct"] == pub["split_pct"]
+
+
+def test_version1_book_with_an_open_swing_is_migrated_on_load(tmp_path):
+    book = _book(tmp_path)
+    _open(book)
+    eq = book.equity()
+    book.save()
+    raw = json.loads(PaperBook.path_of(tmp_path).read_text())
+    raw["version"], raw["cash"] = 1, raw["cash"] + book.swing["trade:x"].notional    # the old convention
+    PaperBook.path_of(tmp_path).write_text(json.dumps(raw))
+    again = PaperBook.load(tmp_path)
+    assert again.equity() == pytest.approx(eq) and again.cash == pytest.approx(book.cash)
+    assert _split_sum(again.public()) == pytest.approx(100.0, abs=0.02)
