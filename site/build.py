@@ -4576,6 +4576,211 @@ def swing_assets(view: JournalView, now: datetime) -> dict[str, dict[str, Any]]:
 
 
 # ------------------------------------------------------------------------------ rendering
+# ------------------------------------------------------------------------------ record page
+# "How it's doing, and what went wrong" (approved 2026-10-01, SCOREBOARD FIRST): the paper book's
+# headline numbers with their sample size, the paper book against its controls, the idea funnel and
+# the Skeptic's health over every paper decision, then the honesty log (incidents, smaller problems
+# found in the logs, withdrawn claims). Percent and counts only.
+SWING_MIN_CLOSED = 20        # docs/swing-book-prereg.md §6: the first review with >= 20 closed trades
+CONTROLS_CHART_MIN = 10      # fewer daily points than this: a small table, not a chart
+RECORD_SERIES = (
+    ("paper", "Paper book (PAPER)", "c0", "Paper", "the paper book after its declared costs"),
+    *SWING_SERIES,
+)
+FUNNEL_STOPS = (   # (stop index, key, who stopped it, seat colour)
+    (0, "scout", "the Scout check", "scout"), (1, "gate", "the code gate", "risk"),
+    (2, "skeptic", "the Skeptic", "skeptic"), (3, "debate", "the debate", "bull"),
+    (4, "pm", "the manager", "pm"), (5, "rules", "the swing rules", "risk"),
+    (6, "entered", "entered on paper", "entered"),
+)
+FUNNEL_STAGES = (  # (label, minimum stop index to count as having got this far)
+    ("Ideas pitched", 0), ("Past the code gate", 2), ("Past the Skeptic", 3),
+    ("Reached the manager", 4), ("Manager said enter", 5), ("Passed the rules · entered", 6),
+)
+SKEPTIC_SHARES = (("pass", "pass", "executed"), ("wait", "wait", "warn"), ("reject", "reject", "halted"),
+                  ("failed", "no usable verdict", "stone"))
+# cycle flags that mean an input was degraded or a step fell back (the "smaller problems" rows)
+MINOR_FLAG_WORDS = {
+    "calendar:release_dates_skipped_no_fred_key": CALENDAR_UNLOADED,
+    "paper_no_reference": "an idea could not be tracked on paper (no reference price), so its outcome is not measured",
+    "llm_billing_error": "the model provider refused a call (billing or access)",
+    "swing_budget_fallback": "the manager gave no usable swing budget, so the last budget was kept",
+}
+MINOR_FLAG_PREFIXES = {
+    "news_source_error:": "a news source failed and its items were left out",
+    "news_source_backoff:": "a news feed asked us to slow down, so it was skipped for the rest of the day",
+    "swing_source_error:": "a swing data request failed; the ideas it fed were left out",
+    "calendar:release_dates_failed:": "some economic-release dates could not be loaded",
+}
+
+
+def _minor_flag(flag: str) -> str:
+    if flag in MINOR_FLAG_WORDS:
+        return MINOR_FLAG_WORDS[flag]
+    return next((w for p, w in MINOR_FLAG_PREFIXES.items() if flag.startswith(p)), "")
+
+
+def _unusable_words(calls: list[Any]) -> str:
+    bad = [c for c in calls if c.status != "ok"]
+    if not bad:
+        return ""
+    roles = ", ".join(dict.fromkeys(ROLE_WORDS_SHORT.get(c.role, c.role.replace("_", " ")) for c in bad))
+    return f"{plural(len(bad), 'model reply', 'model replies')} of {len(calls)} unusable ({roles})"
+
+
+ROLE_WORDS_SHORT = {"skeptic": "Skeptic", "scout": "Scout", "pm": "manager", "swing_pm": "swing manager",
+                    "news": "news", "macro": "macro", "bull_open": "bull", "bull_rebuttal": "bull", "bear": "bear",
+                    "swing_bull": "swing bull", "swing_bear": "swing bear", "single_agent": "single agent"}
+
+
+def minor_problems(view: JournalView) -> list[dict[str, Any]]:
+    """Smaller problems read straight from the logs, newest first: late starts, unusable model
+    replies, a fallback basis, withheld runs and degraded inputs, for live runs (journal/ops) and
+    paper decisions (journal/paper)."""
+    rows: list[dict[str, Any]] = []
+    kinds = {cv.doc.cycle_id: ("REHEARSAL" if cv.rehearsal else "LIVE") for cv in view.cycles}
+    for r in view.ops:
+        what = []
+        if r.late_by_min > 0:
+            what.append(f"started {fmt_late(r.late_by_min)} late")
+        bad = r.calls - r.calls_ok
+        if bad > 0:
+            what.append(f"{plural(bad, 'model reply', 'model replies')} of {r.calls} unusable"
+                        + (f" ({r.parse_fail} unreadable, {r.timeouts} timed out)" if r.parse_fail and r.timeouts else ""))
+        if r.basis and r.basis != "council":
+            what.append(f"fell back to the {str(r.basis).replace('_', ' ')}")
+        what += [w for w in dict.fromkeys(_minor_flag(f) for f in r.flags) if w]
+        if what:
+            rows.append({"slot": r.slot, "badge": kinds.get(r.cycle_id, "LIVE"), "label": f"Run {fmt_when(r.slot)}",
+                         "href": f"cycles/{r.cycle_id}.html" if r.cycle_id in kinds else "", "what": what})
+    for no, doc in view.paper_cycles.items():
+        c, sw = doc.core, doc.swing
+        what = []
+        if c is not None and c.late_by_min > 0:
+            what.append(f"started {fmt_late(c.late_by_min)} late")
+        calls = list(c.calls) if c is not None else []
+        if (u := _unusable_words(calls)):
+            what.append(u)
+        if c is not None and c.basis and c.basis != "council":
+            what.append(f"fell back to the {str(c.basis).replace('_', ' ')}")
+        if sw is not None and sw.budget is not None and sw.budget.fallback:
+            what.append(MINOR_FLAG_WORDS["swing_budget_fallback"])
+        flags = list(doc.flags) + (list(c.flags) if c is not None else []) + (list(sw.flags) if sw is not None else [])
+        what += [w for w in dict.fromkeys(_minor_flag(f) for f in flags) if w and w not in what]
+        if what:
+            rows.append({"slot": doc.slot, "badge": "PAPER", "label": f"Decision #{no} · {fmt_when(doc.slot)}", "href": paper_href(no),
+                         "what": what})
+    return sorted(rows, key=lambda x: x["slot"], reverse=True)
+
+
+def _paper_ideas(view: JournalView) -> list[tuple[int, Any, Any]]:
+    return [(no, doc, p) for no, doc in sorted(view.paper_cycles.items()) if doc.swing is not None
+            for p in doc.swing.ideas]
+
+
+def idea_funnel(view: JournalView, geo: Geometry) -> dict[str, Any] | None:
+    """Where every paper idea really stopped (not the traced run): stage counts with bar widths, and
+    one group per seat that stopped ideas, each idea linked to its card on the decision page."""
+    ideas = _paper_ideas(view)
+    if not ideas:
+        return None
+    total = len(ideas)
+    stops = [(no, p, _stop_index(p)) for no, _, p in ideas]
+    stages = []
+    for label, need in FUNNEL_STAGES:
+        n = sum(1 for _, _, s in stops if s >= need)
+        stages.append({"label": label, "n": n, "w": geo.cls("width", 100.0 * n / total), "share": f"{100.0 * n / total:.0f}%"})
+    groups = []
+    for idx, key, who, seat in FUNNEL_STOPS:
+        mine = [(no, p) for no, p, s in stops if s == idx]
+        if not mine:
+            continue
+        items = []
+        for no, p in mine:
+            o = p.real_outcome
+            code = (o.code if o is not None else None) or p.idea.drop_code or ""
+            reason = code_words(code) if idx < 6 else "a paper leg was built"
+            if idx == 2 and p.idea.verdict is not None:
+                vv = p.idea.verdict.verdict
+                reason = ("the Skeptic's reply could not be used" if vv == "failed"
+                          else f"the Skeptic {VERDICT_WORDS.get(vv, vv)}")
+            items.append({"no": no, "ticker": p.idea.ticker, "side": p.idea.side, "reason": reason, "code": code if idx < 6 else "",
+                          "href": paper_href(no) + "#sw-" + p.idea.ref.replace(":", "-")})
+        groups.append({"key": key, "who": who, "seat": seat, "n": len(mine), "ideas": items,
+                       "w": geo.cls("width", 100.0 * len(mine) / total)})
+    traced = any(doc.swing is not None and doc.swing.trace_all for _, doc, _ in ideas)
+    return {"total": total, "stages": stages, "groups": groups, "traced": traced,
+            "decisions": len({no for no, _, _ in ideas})}
+
+
+def skeptic_health(view: JournalView, geo: Geometry) -> dict[str, Any] | None:
+    """The Skeptic's verdict shares over every paper idea it judged, and its unusable replies."""
+    verdicts = [p.idea.verdict.verdict for _, _, p in _paper_ideas(view) if p.idea.verdict is not None]
+    calls = [x for doc in view.paper_cycles.values() if doc.core is not None for x in doc.core.calls if x.role == "skeptic"]
+    if not verdicts and not calls:
+        return None
+    n = len(verdicts)
+    shares = []
+    for key, label, css in SKEPTIC_SHARES:
+        k = sum(1 for v in verdicts if v == key)
+        shares.append({"key": key, "label": label, "css": css, "n": k,
+                       "pct": f"{100.0 * k / n:.0f}%" if n else "—", "w": geo.cls("width", 100.0 * k / n if n else 0.0)})
+    bad = sum(1 for x in calls if x.status != "ok")
+    return {"n": n, "shares": [s for s in shares if s["n"]], "calls": len(calls), "bad": bad,
+            "bad_pct": f"{100.0 * bad / len(calls):.0f}%" if calls else "—"}
+
+
+def record_controls(view: JournalView) -> dict[str, Any]:
+    """The paper book (base 100 after its declared costs, one point per day: its last decision)
+    against the swing controls (SQ-8 paper rule, matched index, index held)."""
+    days: dict[date, dict[str, float | None]] = {}
+    books = sorted(view.paper_books.values(), key=lambda b: b.as_of)
+    if view.paper_latest is not None and view.paper_latest.book is not None:
+        books.append(SimpleNamespace(as_of=view.paper_latest.as_of, book=view.paper_latest.book))
+    for b in books:
+        days.setdefault(b.as_of.date(), {})["paper"] = 100.0 + b.book.paper_return_pct
+    for p in (view.swing.benchmarks if view.swing is not None else []):
+        d = days.setdefault(p.day, {})
+        d.update(sq8=p.sq8, matched_index=p.matched_index, index_hold=p.index_hold)
+    points = [SimpleNamespace(as_of=d, **{k: v.get(k) for k, *_ in RECORD_SERIES}) for d, v in sorted(days.items())]
+    have = {k for p in points for k, *_ in RECORD_SERIES if getattr(p, k) is not None}
+    chart = chart_narrow = None
+    if len(points) >= CONTROLS_CHART_MIN:
+        chart = performance_chart(points, width=1000, height=260, spec=RECORD_SERIES)
+        chart_narrow = performance_chart(points, width=360, height=240, labels=False, spec=RECORD_SERIES)
+    rows = [{"day": fmt_day(p.as_of), "vals": [f"{getattr(p, k):.1f}" if getattr(p, k) is not None else "—"
+                                               for k, *_ in RECORD_SERIES]} for p in points[-10:][::-1]]
+    return {"n": len(points), "need": CONTROLS_CHART_MIN, "chart": chart, "chart_narrow": chart_narrow, "rows": rows,
+            "series": [{"key": k, "label": name, "css": css, "what": what, "has": k in have}
+                       for k, name, css, _, what in RECORD_SERIES]}
+
+
+def record_view(view: JournalView, geo: Geometry) -> dict[str, Any]:
+    latest = view.paper_latest
+    book = latest.book if latest is not None else None
+    head = None
+    if latest is not None or view.paper_rows:
+        n_dec = len(view.paper_rows) or (latest.decisions if latest is not None else 0)
+        trades = list(book.swing_trades) if book is not None else []
+        closed = sum(1 for t in trades if t.status == "closed")
+        ret = book.paper_return_pct if book is not None else None
+        cost = book.cost_pct if book is not None and book.cost_pct is not None else None
+        started = book.started if book is not None else None
+        as_of = latest.as_of.date() if latest is not None else None
+        head = {"decisions": n_dec, "ret": fmt_signed(ret) if ret is not None else "—",
+                "up": ret is not None and ret >= 0,
+                "market": fmt_signed(ret + cost) if ret is not None and cost is not None else "—",
+                "market_up": ret is not None and cost is not None and ret + cost >= 0,
+                "cost": fmt_signed(-cost) if cost is not None else "—",
+                "open": sum(1 for t in trades if t.status == "open"), "closed": closed, "need": SWING_MIN_CLOSED,
+                "thin": closed < SWING_MIN_CLOSED,
+                "days": (as_of - started).days if started and as_of else None,
+                "since": fmt_day(started) if started else "—", "as_of": fmt_when(latest.as_of) if latest else "—"}
+    return {"head": head, "controls": record_controls(view), "funnel": idea_funnel(view, geo),
+            "skeptic": skeptic_health(view, geo), "minor": minor_problems(view),
+            "swing_page": view.has_swing}
+
+
 # ------------------------------------------------------------------------------ paper decisions
 SCREEN_MOVE_WORDS = {"down_3s": "down sharply (3σ or more)", "down_2s": "down (2–3σ)", "down": "down (under 2σ)",
                      "flat": "flat (under 0.5σ)", "up": "up (under 2σ)", "up_2s": "up (2–3σ)", "up_3s": "up sharply (3σ or more)"}
@@ -5845,7 +6050,8 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
                    book=paper_book_home(after.book, after.as_of, geo) if after is not None else None)
     render("how.html.j2", "how.html", "", "how", roster=load_roster(prompts_dir, policy_dir))
     render("rules.html.j2", "rules.html", "", "rules", rules=load_rules(policy_dir), book=rule_book(policy_dir))
-    render("record.html.j2", "record.html", "", "record", incidents=view.incidents, withdrawn=load_withdrawn())
+    render("record.html.j2", "record.html", "", "record", incidents=view.incidents, withdrawn=load_withdrawn(),
+           rv=record_view(view, geo))
     for old, new, name in REDIRECTS:
         path = out_dir / old
         path.write_text(redirect_page(new, name), encoding="utf-8")

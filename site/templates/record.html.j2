@@ -1,21 +1,135 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
-{% block title %}Record{% endblock %}
+{% import "swing_macros.html.j2" as swm %}
+{% block title %}How it's doing{% endblock %}
 {% block toc %}
+{{ m.toc_item("score", "Scoreboard", "pm") }}
+{{ m.toc_item("controls", "Against the controls", "neutral") }}
+{{ m.toc_item("funnel", "Idea funnel", "scout") }}
+{{ m.toc_item("skeptic", "Skeptic health", "skeptic") }}
 {{ m.toc_item("incidents", "Incidents", "halted" if incidents else "stone") }}
+{{ m.toc_item("smaller", "Smaller problems", "stone") }}
 {{ m.toc_item("withdrawn", "Withdrawn claims", "stone") }}
 {{ m.toc_item("disclaimer", "Disclaimers", "code") }}
 {% endblock %}
 {% block hero %}
 <header class="hero">
   <p class="eyebrow">Record</p>
-  <h1>What went wrong, and what this is not</h1>
-  <p class="lede">Failures, fallbacks, withheld runs and withdrawn claims are part of the record.</p>
+  <h1>How it's doing, and what went wrong</h1>
+  <p class="lede">The scoreboard first, with the number of runs behind every figure; then every failure, fallback and withdrawn claim.</p>
 </header>
 {% endblock %}
 {% block main %}
+{% set h = rv.head %}
 
-{% call m.section("incidents", 1, "Incidents", "halted" if incidents else "stone") %}
+{% call m.section("score", 1, "Scoreboard", "pm") %}
+{% if h %}
+<p class="rec-n">{{ swm.paper() }} <strong>n = {{ h.decisions }} {{ "decision" if h.decisions == 1 else "decisions" }}: far too early to judge anything.</strong> No broker is connected: every number here is the paper book, after the declared costs.</p>
+<dl class="strip rec-strip">
+  <div class="st">
+    <dt>Paper return since start</dt>
+    <dd class="st-v"><span class="{{ 'up' if h.up else 'down' }}">{{ h.ret }}</span></dd>
+    <dd class="st-sub rec-parts"><span>market <span class="{{ 'up' if h.market_up else 'down' }}">{{ h.market }}</span></span> <span>costs <span class="down">{{ h.cost }}</span></span></dd>
+    <dd class="st-sub">n = {{ h.decisions }} {{ "decision" if h.decisions == 1 else "decisions" }} · no minimum was pre-registered for the paper book</dd>
+  </div>
+  <div class="st">
+    <dt>Decisions</dt>
+    <dd class="st-v">{{ h.decisions }}</dd>
+    <dd class="st-sub">numbered paper decisions · <a href="decisions/index.html">all of them</a></dd>
+  </div>
+  <div class="st{{ ' st-thin' if h.thin }}">
+    <dt>Swing paper trades</dt>
+    <dd class="st-v st-v-sm">{{ h.open }} open · {{ h.closed }} closed</dd>
+    <dd class="st-sub">{% if h.thin %}<span class="rec-need">n = {{ h.closed }} of {{ h.need }} needed</span> closed trades before the first pre-registered review can say anything{% else %}past the pre-registered minimum of {{ h.need }} closed trades{% endif %}</dd>
+  </div>
+  <div class="st">
+    <dt>Days since start</dt>
+    <dd class="st-v">{{ h.days if h.days is not none else "—" }}</dd>
+    <dd class="st-sub">started {{ h.since }} · as of {{ h.as_of }}</dd>
+  </div>
+</dl>
+<p class="small muted">The market part is the return before costs; the cost part is every declared fee and spread the paper book has paid since its start (building the book from cash paid most of it).</p>
+{% else %}
+{{ m.empty("No paper decision yet", "The scoreboard fills in after the first numbered paper decision.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("controls", 2, "Against the controls", "neutral") %}
+{% set c = rv.controls %}
+<p>The paper book is compared with three controls: the SQ-8 mechanical stock rule (on paper), the index held, and a matched index (the same trades' sector and beta). All are base 100 at the start and after the same declared costs.</p>
+{% if c.chart %}
+<figure class="chart">
+  {% for ch, cls in ((c.chart, "chart-wide"), (c.chart_narrow, "chart-narrow")) %}
+  <svg class="{{ cls }}" viewBox="0 0 {{ ch.width }} {{ ch.height }}" role="img" aria-label="The paper book and its controls, base 100 at the start">
+    {% for g in ch.grid %}
+    <line class="{{ 'chart-base' if g.base else 'chart-grid' }}" x1="{{ ch.x0 }}" x2="{{ ch.x1 }}" y1="{{ g.y }}" y2="{{ g.y }}"></line>
+    <text class="chart-tick" x="{{ ch.x0 - 6 }}" y="{{ g.y }}" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>
+    {% endfor %}
+    {% for s in ch.series %}
+    <polyline class="series series-{{ s.css }}" points="{{ s.points }}"><title>{{ s.label }}: {{ "%.1f" | format(s.last) }}</title></polyline>
+    {% if ch.labels %}<text class="series-end" x="{{ s.end_x }}" y="{{ s.label_y }}" dominant-baseline="middle">{{ s.short }} {{ "%.1f" | format(s.last) }}</text>{% endif %}
+    {% endfor %}
+  </svg>
+  {% endfor %}
+  <figcaption class="small">Base 100 at the start ({{ c.chart.first }} to {{ c.chart.last }}), one point per day.</figcaption>
+</figure>
+<ul class="legend">{% for s in c.chart.series %}<li><span class="swatch sw-line sw-{{ s.css }}"></span>{{ s.label }} <span class="n">{{ "%.1f" | format(s.last) }}</span> <span class="small muted">{{ s.what }}</span></li>{% endfor %}</ul>
+{% elif c.rows %}
+{{ m.wrap_open("The paper book and its controls") }}
+<table class="wide rec-controls">
+  <thead><tr><th scope="col">Day</th>{% for s in c.series %}<th scope="col" class="n">{{ s.label }}</th>{% endfor %}</tr></thead>
+  <tbody>{% for r in c.rows %}<tr><td class="n">{{ r.day }}</td>{% for v in r.vals %}<td class="n">{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+</table>
+</div>
+<p class="small muted">{{ c.n }} of {{ c.need }} daily points: a chart replaces this table at {{ c.need }}. {% for s in c.series if not s.has %}{% if loop.first %}Not recorded yet: {% endif %}{{ s.label }}{% if not loop.last %}, {% else %}. The controls start after enough closed sessions.{% endif %}{% endfor %}</p>
+{% else %}
+{{ m.empty("Nothing to compare yet", "The controls start after enough closed sessions; the paper book's first point comes with its first decision.") }}
+{% endif %}
+{% if rv.swing_page %}<p class="small"><a href="swing/index.html#sw-bench">Swing benchmarks</a> · <a href="swing/index.html#sw-metrics">pre-registered swing metrics</a></p>{% endif %}
+{% endcall %}
+
+{% call m.section("funnel", 3, "Idea funnel", "scout") %}
+{% set f = rv.funnel %}
+{% if f %}
+<p>{{ swm.paper() }} Every swing idea pitched across {{ f.decisions }} paper {{ "decision" if f.decisions == 1 else "decisions" }} (n = {{ f.total }} ideas), and how far it really got.{% if f.traced %} These were traced runs: every idea was also pushed through every stage to show the whole flow, but the funnel counts only where each idea really stopped.{% endif %}</p>
+<ol class="rf-stages">
+  {% for s in f.stages %}
+  <li class="rf-stage"><span class="rf-label">{{ s.label }}</span><span class="rf-track" aria-hidden="true"><span class="rf-fill {{ s.w }}"></span></span><span class="rf-n">{{ s.n }} <span class="muted">({{ s.share }})</span></span></li>
+  {% endfor %}
+</ol>
+<p class="rf-cap small">Where each idea stopped, coloured by the seat that stopped it:</p>
+<div class="rf-bar" aria-hidden="true">{% for g in f.groups %}<span class="rf-seg rf-{{ g.seat }} {{ g.w }}" title="{{ g.who }}: {{ g.n }}"></span>{% endfor %}</div>
+{% for g in f.groups %}
+<details class="jd rf-group">
+  <summary><span class="pbook-sw rf-{{ g.seat }}" aria-hidden="true"></span><strong>{{ "Entered on paper" if g.key == "entered" else "Stopped by " ~ g.who }}</strong> <span class="n">{{ g.n }}</span></summary>
+  <div class="jd-body accent-{{ 'bull' if g.seat == 'entered' else g.seat }}">
+    <ul class="jd-list">
+      {% for i in g.ideas %}<li><a href="{{ i.href }}"><span class="tkr">{{ i.ticker }}</span> {{ i.side }} · decision #{{ i.no }}</a>: {{ i.reason }}{% if i.code %} {{ rule_link(i.code, "") }}{% endif %}</li>{% endfor %}
+    </ul>
+  </div>
+</details>
+{% endfor %}
+{% else %}
+{{ m.empty("No swing idea yet", "The funnel fills in once a paper decision has swing ideas.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("skeptic", 4, "Skeptic health", "skeptic") %}
+{% set k = rv.skeptic %}
+{% if k %}
+<p>{{ swm.paper() }} What the Skeptic said on the ideas it judged (n = {{ k.n }}), and how often its reply could not be used. Small numbers: one idea moves a share by {{ "%.0f" | format(100 / k.n) if k.n else "—" }} points.</p>
+{% if k.n %}
+<div class="rf-bar" aria-hidden="true">{% for s in k.shares %}<span class="rf-seg rk-{{ s.css }} {{ s.w }}"></span>{% endfor %}</div>
+<ul class="pbook-legend rk-legend">{% for s in k.shares %}<li><span class="pbook-sw rk-{{ s.css }}" aria-hidden="true"></span>{{ s.label }} <span class="n">{{ s.n }} · {{ s.pct }}</span></li>{% endfor %}</ul>
+{% endif %}
+<p>Unusable replies: <strong class="n">{{ k.bad }} of {{ k.calls }}</strong> Skeptic calls ({{ k.bad_pct }}). An unusable reply counts as no verdict: the idea stops there.</p>
+{% if rv.swing_page %}<p class="small"><a href="swing/index.html#sw-agents">The Scout and the Skeptic</a> · <a href="agents/index.html">every agent</a></p>{% endif %}
+{% else %}
+{{ m.empty("No Skeptic verdict yet", "The Skeptic's shares appear once it has judged a paper idea.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("incidents", 5, "Incidents", "halted" if incidents else "stone") %}
 {% if incidents %}
 {{ m.wrap_open("Incidents") }}
 <table class="wide stack">
@@ -34,11 +148,24 @@
 </table>
 </div>
 {% else %}
-{{ m.empty("No incidents", "Nothing has gone wrong in public yet — mostly because nothing has run for real yet.") }}
+{{ m.empty("No incidents", "No incident has been opened. Smaller problems found in the logs are listed below.") }}
 {% endif %}
 {% endcall %}
 
-{% call m.section("withdrawn", 2, "Withdrawn claims", "stone") %}
+{% call m.section("smaller", 6, "Smaller problems, from the logs", "stone") %}
+<p>Read straight from the published runs: late starts, model replies that could not be used, fallbacks and inputs that were missing. Minor on their own, listed so none is hidden.</p>
+{% if rv.minor %}
+<ul class="rec-minor">
+  {% for r in rv.minor %}
+  <li><span class="chip state-{{ 'rehearsal' if r.badge != 'LIVE' else 'executed' }}">{{ r.badge }}</span> {% if r.href %}<a href="{{ r.href }}">{{ r.label }}</a>{% else %}{{ r.label }}{% endif %}: {{ r.what | join("; ") }}.</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="muted">Nothing found in the published runs.</p>
+{% endif %}
+{% endcall %}
+
+{% call m.section("withdrawn", 7, "Withdrawn claims", "stone") %}
 <p>Claims from the research that preceded this project which were later withdrawn. They are kept here so they are not repeated.</p>
 {% for w in withdrawn %}
 <article class="withdrawn">
@@ -50,9 +177,13 @@
 {% endfor %}
 {% endcall %}
 
-{% call m.section("disclaimer", 3, "Disclaimers", "code") %}
-<ul class="disclaimer">
-{% for d in disclaimer %}<li><strong>{{ d.title }}</strong> {{ d.text }}</li>{% endfor %}
-</ul>
-{% endcall %}
+<section class="rec-disc" id="disclaimer" aria-labelledby="disclaimer-h">
+  <h2 id="disclaimer-h" class="sr">Disclaimers</h2>
+  <details class="jd">
+    <summary>The short version is at the foot of every page. <span class="jd-sum">Full disclaimers</span></summary>
+    <ul class="disclaimer">
+    {% for d in disclaimer %}<li><strong>{{ d.title }}</strong> {{ d.text }}</li>{% endfor %}
+    </ul>
+  </details>
+</section>
 {% endblock %}

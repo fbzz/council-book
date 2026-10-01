@@ -1544,3 +1544,46 @@ a.rule-link.jc-code { color: var(--link); }
 .pbook-part { white-space: nowrap; }
 .pbook-part .up { color: var(--long); }
 .pbook-part .down { color: var(--short); }
+
+/* ---- record page: scoreboard first (approved 2026-10-01) ----
+   The headline strip with its sample size on every number (a metric below its pre-registered
+   minimum is greyed: "n = 0 of 20 needed"), the idea funnel as stage bars plus one bar split by the
+   seat that stopped each idea, the Skeptic's verdict shares, then the honesty log. */
+.rec-n { margin: 0 0 var(--sp-3); max-width: 72ch; }
+.rec-strip .up { color: var(--long); }
+.rec-strip .down { color: var(--short); }
+.rec-parts { display: flex; flex-wrap: wrap; gap: 0 var(--sp-3); }
+.st-thin .st-v { color: var(--muted); }
+.st-thin dt { color: var(--muted); }
+.rec-need { display: inline-block; font: 500 var(--fs-label)/1.3 var(--font-mono); color: var(--ink); background: var(--inset); border: 1px dashed var(--line-strong); border-radius: 4px; padding: 1px 6px; margin-right: 4px; white-space: nowrap; }
+.rec-controls td, .rec-controls th { white-space: nowrap; }
+.rf-stages { list-style: none; margin: var(--sp-3) 0; padding: 0; display: grid; gap: var(--sp-2); }
+.rf-stage { display: grid; grid-template-columns: minmax(9rem, 14rem) minmax(0, 1fr) 5.5rem; gap: var(--sp-3); align-items: center; }
+.rf-label { font-size: var(--fs-1); color: var(--ink); }
+.rf-track { display: block; height: 12px; border-radius: 6px; background: var(--track); overflow: hidden; }
+.rf-fill { display: block; height: 100%; background: var(--seat-scout); border-radius: 6px; }
+.rf-n { font: 500 var(--fs-1)/1.3 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-strong); text-align: right; }
+.rf-cap { margin: var(--sp-4) 0 var(--sp-1); color: var(--muted); }
+.rf-bar { display: flex; height: 14px; margin: 0 0 var(--sp-2); border-radius: 7px; overflow: hidden; background: var(--track); gap: 2px; }
+.rf-seg { display: block; height: 100%; }
+.rf-scout { background: var(--seat-scout); }
+.rf-risk { background: var(--seat-risk); }
+.rf-skeptic { background: var(--seat-skeptic); }
+.rf-bull { background: var(--seat-bull); }
+.rf-pm { background: var(--seat-pm); }
+.rf-entered { background: var(--executed); }
+.rk-executed { background: var(--executed); }
+.rk-warn { background: var(--warn); }
+.rk-halted { background: var(--halted); }
+.rk-stone { background: var(--stone); }
+.rf-group > summary { min-height: 44px; }
+.rk-legend { margin-top: var(--sp-1); }
+.rec-minor { list-style: none; padding: 0; margin: var(--sp-2) 0; }
+.rec-minor li { padding: var(--sp-2) 0; border-bottom: 1px solid var(--line-soft); overflow-wrap: break-word; }
+.rec-minor a { color: var(--link); }
+.rec-disc { margin: 0 0 24px; }
+.rec-disc > details > summary { min-height: 44px; }
+@media (max-width: 639px) {
+  .rf-stage { grid-template-columns: minmax(0, 1fr) 4.5rem; }
+  .rf-track { grid-column: 1 / -1; grid-row: 2; }
+}
