@@ -3019,6 +3019,8 @@ FILTER_GROUPS = (
     ("crypto", "Crypto", ("crypto",), "crypto"),
     ("commodity", "Commodities", ("commodity",), "commodities"),
     ("fx", "FX", ("fx",), "FX pairs"),
+    # open paper swing trades: their own group on the book map and the list (no asset class maps here)
+    ("swing", "Swing trades", (), "swing trades"),
 )
 AC_GROUP = {ac: key for key, _, acs, _ in FILTER_GROUPS for ac in acs}
 AC_WORDS = {"stock": "Stock", "etf": "ETF", "index": "Index", "crypto": "Crypto", "commodity": "Commodity",
@@ -3093,6 +3095,126 @@ def _asset(k: str, lines: Lines) -> dict[str, Any]:
 def asset_page(k: str) -> str:
     """A line's page, relative to the site root (line ids are [A-Z0-9_] only)."""
     return f"assets/{k}.html" if LINE_ID.fullmatch(k) else ""
+
+
+def _paper_drawdown(view: JournalView) -> float | None:
+    """The paper book's fall from its peak, in %, over its published returns (books/<n>.json and
+    latest.json, base 100 at the start, after the declared costs)."""
+    series = [b.book.paper_return_pct for b in sorted(view.paper_books.values(), key=lambda b: b.as_of)]
+    if view.paper_latest is not None and view.paper_latest.book is not None:
+        series.append(view.paper_latest.book.paper_return_pct)
+    if not series:
+        return None
+    levels = [100.0 + r for r in series]
+    peak = max([100.0, *levels])
+    return 100.0 * (levels[-1] / peak - 1.0)
+
+
+def paper_holdings(view: JournalView, lines: Lines, geo: Geometry, kill: dict[str, Any],
+                   status: dict[str, Any]) -> dict[str, Any] | None:
+    """`build_holdings` for the PAPER book (journal/paper/latest.json `book`): the core lines and the
+    open paper swing trades at their paper weights, cash, with the reference weight, the 1-day move
+    and the manager's moves from the latest paper decision's core run. Percent of the paper NAV only.
+    None without a paper book (the home page then shows the live book or the rehearsal target)."""
+    pl = view.paper_latest
+    if pl is None or pl.book is None:
+        return None
+    book = pl.book
+    pdoc = view.paper_cycles.get(pl.decision_no)
+    doc = pdoc.core if pdoc is not None else None
+    weights = {h.line: h.weight_pct / 100.0 for h in book.core}
+    refs = {k: r.weight_ref_x for k, r in doc.reference.items()} if doc is not None else {}
+    days = {k: r.day_change_pct for k, r in doc.reference.items() if r.day_change_pct is not None} if doc else {}
+    # the manager's moves: the deviations of its chosen (medoid) attempt; a level that differs only
+    # because the paper book drifted between decisions is not a move
+    medoid = (next((r for r in doc.pm.replicates if r.replicate == doc.pm.medoid), None)
+              if doc is not None and doc.pm is not None else None)
+    dev = {d.line: d.direction for d in medoid.deviations} if medoid is not None else {}
+    keys = lines.sort(set(lines.info) | set(weights) | set(refs))
+    open_ = [t for t in book.swing_trades if t.status == "open" and abs(t.weight_pct) > EPS]
+    swing_w = [abs(t.weight_pct) / 100.0 for t in open_]
+    scale = nice_scale(max([abs(v) for v in list(weights.values()) + list(refs.values())] + swing_w + [0.05]))
+    held, flat = [], []
+    for k in keys:
+        w = weights.get(k, 0.0)
+        ref = refs.get(k)
+        day = days.get(k)
+        moved = k in dev and ref is not None
+        is_held = abs(w) > EPS
+        direction = "long" if w > EPS else "short" if w < -EPS else "flat"
+        row = {**_asset(k, lines), "day": fmt_signed(day), "day_dir": move_dir(day), "day_raw": day,
+               "direction": direction, "position": {"long": "Long", "short": "Short"}.get(direction, "—"),
+               "lev": "", "lev_n": 1, "settlement": "", "pnl": "—", "pnl_dir": "none", "pnl_raw": None,
+               "weight": w, "share1": fmt_share1(w) if is_held else "0.0%",
+               "ref": ref, "ref_share1": fmt_share1(ref) if ref is not None else "—",
+               "ref_above": not is_held and ref is not None and abs(ref) > EPS,
+               "show_bar": is_held or (ref is not None and abs(ref) > EPS),
+               "bar": weight_bar(w, ref, scale, geo),
+               "notes": [f"The manager chose to {dev[k]} it (reference {fmt_share1(ref)})"] if moved else [],
+               "council_moved": moved,
+               "title": f"{lines.name(k)}: {fmt_share(w)} of the paper portfolio"
+                        + (f"; the mechanical reference would hold {fmt_share(ref)}" if ref is not None else "")}
+        (held if is_held else flat).append(row)
+    for t in open_:
+        w = (t.weight_pct if t.side == "long" else -abs(t.weight_pct)) / 100.0
+        setup = SETUP_WORDS.get(t.setup or "", (t.setup or "swing trade").replace("_", " "))
+        held.append({"line": t.ticker, "ticker": ticker(t.ticker), "name": f"Swing · {setup}",
+                     "mono": monogram(t.ticker, "stock"), "ac": "swing", "ac_words": "Paper swing trade",
+                     "group": "swing", "page": "", "session": "", "session_title": "",
+                     "day": "—", "day_dir": "none", "day_raw": None, "direction": t.side,
+                     "position": t.side.capitalize(), "lev": "", "lev_n": 1, "settlement": "",
+                     "pnl": fmt_signed(t.return_net_pct), "pnl_dir": move_dir(t.return_net_pct), "pnl_raw": None,
+                     "weight": w, "share1": fmt_share1(w), "ref": None, "ref_share1": "—", "ref_above": False,
+                     "show_bar": True, "bar": weight_bar(w, None, scale, geo),
+                     "notes": [f"Paper swing trade · stop {t.stop_pct:g}% · target {t.target_pct:g}% · "
+                               f"{plural(t.days_held, 'day')} held · net {fmt_signed(t.return_net_pct)}"],
+                     "council_moved": False,
+                     "title": f"{ticker(t.ticker)}: paper swing trade, {fmt_share(abs(w))} of the paper portfolio"})
+    order = {k: i for i, k in enumerate(keys)}
+    held.sort(key=lambda r: (-abs(r["weight"]), order.get(r["line"], len(order)), r["line"]))
+    flat.sort(key=lambda r: (-(r["ref"] or 0.0), order[r["line"]]))
+    filters, empty_flat, empty_held = _filters(held, flat)
+    known = [(r["weight"], r["day_raw"]) for r in held if r["day_raw"] is not None]
+    book_day = sum(w * d for w, d in known) if known else None
+    gross = sum(abs(r["weight"]) for r in held)
+    net = sum(r["weight"] for r in held)
+    cash = max(book.cash_pct, 0.0) / 100.0
+
+    halt_dd = (1 - float(kill.get("halt_at", 0.75))) * 100
+    warn_dd = (1 - float(kill.get("warn_at", 0.80))) * 100
+    dd = _paper_drawdown(view)
+    depth = abs(min(dd or 0.0, 0.0))
+    mstate = "halted" if depth >= halt_dd - EPS else "warn" if depth >= warn_dd - EPS else "ok"
+    value = f"−{depth:.1f}%" if depth >= 0.05 else "0%"
+    meter = {"value": value, "fill": geo.cls("width", 100.0 * min(depth, halt_dd) / halt_dd), "state": mstate,
+             "sub": "below the paper book's best value so far", "aria": f"Paper fall from peak {value}",
+             "warn_at": geo.cls("left", 100.0 * warn_dd / halt_dd), "warn_label": f"−{warn_dd:.0f}%",
+             "halt_label": f"−{halt_dd:.0f}%"}
+    cost = book.cost_pct
+    paper = {"no": pl.decision_no, "href": paper_href(pl.decision_no), "when": fmt_when(pl.as_of),
+             "ret": fmt_signed(book.paper_return_pct), "ret_dir": move_dir(book.paper_return_pct),
+             "since": fmt_day(book.started) if book.started else "",
+             "market": fmt_signed(book.paper_return_pct + cost) if cost is not None else "",
+             "cost": fmt_signed(-cost) if cost is not None else "",
+             "swing": fmt_pct1(book.swing_pct), "core": fmt_pct1(book.core_pct),
+             "budget": fmt_pct1(pl.swing_budget_pct) if pl.swing_budget_pct is not None else "",
+             "open": len(open_)}
+    return {
+        "basis": "paper", "label": f"Paper book after decision #{pl.decision_no}", "when": fmt_when(pl.as_of),
+        "run_id": "", "held": held, "flat": flat, "filters": filters, "empty_flat": empty_flat,
+        "empty_held": empty_held, "paper": paper,
+        "strip": {
+            "account": {"label": "PAPER", "css": "rehearsal", "sub": "nothing traded"},
+            "gross": fmt_x(gross), "gross_share": fmt_share(gross), "net": fmt_x(net), "net_share": fmt_share(net),
+            "cash": fmt_share(cash), "held": len(held), "lines": len(held) + len(flat),
+            "day": fmt_signed(book_day), "day_dir": move_dir(book_day), "day_known": len(known),
+            "day_label": "Book, last day", "day_sub": "", "pnl": "—", "pnl_dir": "none", "pnl_known": 0,
+            "kill": chip(KILL_CHIP, status["kill"]), "meter": meter,
+            "all_long": not any(r["weight"] < -EPS for r in held),
+        },
+        "scale": fmt_share(scale), "target": False, "show_pnl": False,
+        "show_day": any(r["day_raw"] is not None for r in held + flat), "cash_x": cash,
+    }
 
 
 def build_holdings(view: JournalView, lines: Lines, geo: Geometry, kill: dict[str, Any],
@@ -3285,7 +3407,7 @@ DAY_EDGES = (0.25, 1.0, 2.5)   # the instrument's last daily market move
 PNL_EDGES = (1.0, 5.0, 15.0)   # the position's own P/L since open
 BIN_ORDER = ("d3", "d2", "d1", "n", "u1", "u2", "u3")
 MAP_CLASS_WORD = {"stock": "Stock", "etf": "ETF", "index": "Index", "crypto": "Crypto", "commodity": "Commodity",
-                  "fx": "FX"}
+                  "fx": "FX", "swing": "Swing"}
 MAP_CLASS_ORDER = {key: i for i, (key, *_rest) in enumerate(FILTER_GROUPS)}
 
 
@@ -6652,15 +6774,18 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     env.globals["swing_page"] = lambda k: asset_page(k) if k in asset_pages else ""
     roster = build_roster(latest, runs[latest.doc.cycle_id] if latest else None,
                           transcripts[latest.doc.cycle_id] if latest else None, lines)
-    render("index.html.j2", "index.html", "", "portfolio", latest=latest, bmap=book_map(holdings, geo),
-           paper=paper_home(view, lines, geo),
-           split=book_split(latest),
+    # the home book: the PAPER book while paper runs lead, else the live book / rehearsal target
+    home_book = paper_holdings(view, lines, geo, risk.get("killswitch", {}), status) or holdings
+    home_decisions = [x for x in meeting_cards(view, lines, runs) if x["kind"] == "paper"][:3]
+    render("index.html.j2", "index.html", "", "portfolio", latest=latest, bmap=book_map(home_book, geo),
+           decisions_recent=home_decisions,
+           split=None if home_book.get("basis") == "paper" else book_split(latest),
            roster=roster,
            pending=[dict(x, chip=chip(DECISION_CHIP, x["state"] or "awaiting_publication")) for x in sealed if x["state"] in PENDING_STATES],
            executing=[x for x in sealed if x["state"] in EXECUTING_STATES],
            run=runs[latest.doc.cycle_id] if latest else None,
            tr_latest=transcripts[latest.doc.cycle_id] if latest else None,
-           holdings=holdings,
+           holdings=home_book,
            recent=[(cv, runs[cv.doc.cycle_id], transcripts[cv.doc.cycle_id]) for cv in view.cycles[:5]],
            cycles_count=len(view.cycles), ops_count=len(view.ops), ops_on_time=ops_on_time,
            chart=chart, chart_narrow=chart_narrow, points=view.performance[-10:][::-1],

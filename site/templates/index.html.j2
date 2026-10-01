@@ -9,17 +9,16 @@
 {% block main %}
 {% set h = holdings %}
 {% set st = h.strip %}
-
-{% if paper %}{{ pm.panel(paper, "") }}{% endif %}
+{% set pp = h.paper if h.basis == "paper" else none %}
 
 {# ================================================================== THE BOOK #}
 {% set n_seats = roster | sum(attribute="members", start=[]) | length %}
 <section class="book" id="holdings" aria-labelledby="holdings-h">
 <header class="book-head">
   <div class="book-title">
-    <p class="eyebrow">{% if st %}<span class="chip state-{{ 'executed' if not h.target else 'rehearsal' }}">{{ "LIVE BOOK" if not h.target else "TARGET" }}</span>{% if st.account.label != "LIVE" %} <span class="chip state-{{ st.account.css }}">{{ st.account.label }}</span>{% endif %}{% else %}<span class="chip state-{{ status.css }}">{{ status.label }}</span>{% endif %}{% if status.last_when %}<span class="lastrun">Last run {{ status.last_when }}{% if status.last_late %} ({{ status.last_late }}){% endif %} · page built {{ status.built_clock }}</span>{% endif %}</p>
+    <p class="eyebrow">{% if pp %}{{ pm.badge() }}<span class="lastrun">as of <a href="{{ pp.href }}">decision #{{ pp.no }}</a> · {{ pp.when }} · page built {{ status.built_clock }}</span>{% elif st %}<span class="chip state-{{ 'executed' if not h.target else 'rehearsal' }}">{{ "LIVE BOOK" if not h.target else "TARGET" }}</span>{% if st.account.label != "LIVE" %} <span class="chip state-{{ st.account.css }}">{{ st.account.label }}</span>{% endif %}{% else %}<span class="chip state-{{ status.css }}">{{ status.label }}</span>{% endif %}{% if status.last_when and not pp %}<span class="lastrun">Last run {{ status.last_when }}{% if status.last_late %} ({{ status.last_late }}){% endif %} · page built {{ status.built_clock }}</span>{% endif %}</p>
     <h1 id="holdings-h">The book</h1>
-    <p class="lede">What the council holds, as shares of the portfolio. Each tile is one line, sized by its weight; open a tile or a row for everything the agents said and did about it.</p>
+    <p class="lede">What the council holds{% if pp %} on paper{% endif %}, as shares of the portfolio. Each tile is one line, sized by its weight; open a tile or a row for everything the agents said and did about it.</p>
   </div>
   <aside class="teaser" aria-labelledby="teaser-h">
     <div class="teaser-chamber">{{ m.hemicycle(teaser_seats, "", "hemi-teaser") }}</div>
@@ -32,7 +31,9 @@
   </aside>
 </header>
 
-{% if latest and latest.rehearsal %}
+{% if pp %}
+{% call m.alert("rehearsal", "flask-conical", "Paper for now: real data, real agents, nothing traded") %}<p>Every figure is a share of the paper portfolio; each paper decision is published at once, no approval needed.</p>{% endcall %}
+{% elif latest and latest.rehearsal %}
 {{ m.rehearsal_banner("The map and the list show the weights the council would hold; nothing has been traded.") }}
 {% endif %}
 {% if pending %}
@@ -115,8 +116,20 @@
 {% endif %}
 
 {% if st %}
-<p class="basis">{% if h.target %}<strong>{{ h.label }}.</strong><span class="basis-more"> The weights the latest run{% if h.run_id %} (<a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>){% endif %} would hold; no P/L exists until something is traded.</span>{% else %}Positions after the run of <a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>.<span class="basis-more"> Lagged until that run is revealed; P/L is the book's own, in % of the amount invested.</span>{% endif %}</p>
+<p class="basis">{% if pp %}<strong>{{ h.label }}.</strong><span class="basis-more"> The paper fills of <a href="{{ pp.href }}">#{{ pp.no }}</a> marked to market; the reference column is the mechanical reference of that decision.</span>{% elif h.target %}<strong>{{ h.label }}.</strong><span class="basis-more"> The weights the latest run{% if h.run_id %} (<a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>){% endif %} would hold; no P/L exists until something is traded.</span>{% else %}Positions after the run of <a href="cycles/{{ h.run_id }}.html">{{ h.when }}</a>.<span class="basis-more"> Lagged until that run is revealed; P/L is the book's own, in % of the amount invested.</span>{% endif %}</p>
 {% set mt = st.meter %}
+{% if pp %}
+<dl class="ledger lg-n5">
+  <div class="lg lg-inv"><dt>Invested</dt><dd class="lg-v">{{ st.gross_share }}</dd><dd class="lg-s">{{ st.held }} line{{ "" if st.held == 1 else "s" }} held{% if st.all_long %}, all long{% endif %}</dd></div>
+  <div class="lg lg-cash"><dt>Cash</dt><dd class="lg-v">{{ st.cash }}</dd><dd class="lg-s">not invested</dd></div>
+  <div class="lg lg-split"><dt>Swing / core</dt><dd class="lg-v lg-v-sm">{{ pp.swing }} / {{ pp.core }}</dd><dd class="lg-s">{% if pp.budget %}swing budget {{ pp.budget }}, set by the council{% else %}no swing budget published{% endif %} · {{ pp.open }} open swing trade{{ "" if pp.open == 1 else "s" }}</dd></div>
+  <div class="lg lg-pnl"><dt>Paper return</dt><dd class="lg-v">{{ m.move(pp.ret, pp.ret_dir) }}</dd><dd class="lg-s">{% if pp.since %}since {{ pp.since }}{% endif %}{% if pp.market %} · market {{ pp.market }} · costs {{ pp.cost }}{% else %} · after the declared costs{% endif %}</dd></div>
+  <div class="lg lg-kill"><dt>Kill switch</dt><dd class="lg-v lg-v-sm"><span class="kill-state kill-{{ st.kill.css }}"><span aria-hidden="true">{{ "✓ " if st.kill.label == "NORMAL" else "! " }}</span>{{ st.kill.label | lower }}</span></dd>
+    <dd class="lg-s">paper fall from peak <strong>{{ mt.value }}</strong></dd>
+    <dd class="meter" role="img" aria-label="{{ mt.aria }}; no new risk at {{ mt.warn_label }}, stop at {{ mt.halt_label }}"><span class="meter-fill meter-{{ mt.state }} {{ mt.fill }}"></span><span class="meter-tick {{ mt.warn_at }}"></span></dd>
+    <dd class="lg-s">no new risk at {{ mt.warn_label }} · stop at {{ mt.halt_label }}</dd></div>
+</dl>
+{% else %}
 <dl class="ledger lg-n{{ 4 + (1 if st.day_known else 0) + (1 if h.show_pnl else 0) }}">
   <div class="lg lg-inv"><dt>Invested{% if h.target %} · target{% endif %}</dt><dd class="lg-v">{{ st.gross_share }}</dd><dd class="lg-s">gross {{ st.gross }} · net {{ st.net_share }}{% if st.all_long %}, all long{% endif %}</dd></div>
   <div class="lg lg-cash"><dt>Cash{% if h.target %} · target{% endif %}</dt><dd class="lg-v">{{ st.cash }}</dd><dd class="lg-s">not invested</dd></div>
@@ -128,6 +141,18 @@
     <dd class="meter" role="img" aria-label="{{ mt.aria }}; no new risk at {{ mt.warn_label }}, stop at {{ mt.halt_label }}"><span class="meter-fill meter-{{ mt.state }} {{ mt.fill }}"></span><span class="meter-tick {{ mt.warn_at }}"></span></dd>
     <dd class="lg-s">no new risk at {{ mt.warn_label }} · stop at {{ mt.halt_label }}</dd></div>
 </dl>
+{% endif %}
+{% endif %}
+
+{% if decisions_recent %}{% set d0 = decisions_recent[0] %}
+<nav class="dpath" aria-label="The latest decisions">
+  <p class="dpath-lead">{{ pm.badge() }} <span class="dpath-k">Latest decision #{{ d0.decision_no }}</span> <span class="dpath-v">{{ d0.verdict }}</span>{% if d0.closest %}{% set c = d0.closest %} · closest to trading: <span class="tkr">{{ c.ticker | ticker }}</span> (stopped at {{ c.where }}){% endif %}</p>
+  <p class="dpath-go"><a class="cta" href="{{ d0.decision_href }}">Open decision #{{ d0.decision_no }} {{ icon("chevron-right") }}</a> <a class="dpath-all" href="decisions/index.html">All decisions</a></p>
+  <ol class="dpath-list">
+  {% for x in decisions_recent %}<li><a href="{{ x.decision_href }}"><span class="dpath-no">#{{ x.decision_no }}</span> <span class="dpath-when">{{ x.slot | short_when }}</span> <span class="dpath-verdict">{{ x.verdict }}</span></a></li>
+  {% endfor %}
+  </ol>
+</nav>
 {% endif %}
 
 <div class="hx{% if not h.show_pnl %} no-pnl{% endif %}{% if not h.show_day %} no-day{% endif %}">
@@ -216,7 +241,7 @@
 {# ================================================================== LOWER: runs and performance #}
 <div class="lower">
 <section class="low-card" id="latest" aria-labelledby="latest-h">
-  <h2 id="latest-h" class="low-h">Latest run</h2>
+  <h2 id="latest-h" class="low-h">{{ "Latest live-pipeline run" if decisions_recent else "Latest run" }}</h2>
   {% if latest %}
   <p class="status-row">{{ m.chip(latest.mode_chip) }} {{ m.chip(latest.chip) }}{% if tr_latest.failed_calls %} <a class="chip state-warn" href="cycles/{{ latest.doc.cycle_id }}.html#calls">{{ plural(tr_latest.failed_calls, "call") }} failed</a>{% endif %}</p>
   <p class="low-lead">{{ run.headline }}</p>

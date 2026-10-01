@@ -368,4 +368,6 @@ def test_the_page_has_no_sideways_scroll_hooks():
 
 
 def test_the_class_order_is_the_list_filters_order(site):
-    assert [k for k, *_ in site.FILTER_GROUPS] == list(CLASSES)
+    # the asset classes in order, then the paper swing trades' own group (no asset class maps to it)
+    assert [k for k, _label, acs, _p in site.FILTER_GROUPS if acs] == list(CLASSES)
+    assert [k for k, *_ in site.FILTER_GROUPS][-1] == "swing"

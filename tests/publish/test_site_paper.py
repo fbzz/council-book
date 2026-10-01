@@ -74,13 +74,16 @@ def test_the_paper_pages_build_with_the_fixed_csp_and_no_script(built):
         assert "PAPER" in html, name
 
 
-def test_home_shows_the_paper_portfolio_and_the_latest_decision(built):
+def test_home_has_a_path_to_the_decisions_and_no_second_portfolio(built):
     _, _, pages = built
-    home = _text(pages["index.html"])
-    assert "The paper portfolio" in home and "Latest decision #2" in home and "what we chose" in home
-    assert "Swing / core" in home and "Open paper swing trades" in home
-    assert 'href="decisions/2/index.html"' in pages["index.html"]
-    assert home.index("The paper portfolio") < home.index("The book")         # the paper portfolio comes first
+    html = pages["index.html"]
+    home = _text(html)
+    assert "Latest decision #2" in home and "Open decision #2" in home and "All decisions" in home
+    assert 'class="dpath"' in html and 'href="decisions/2/index.html"' in html and 'href="decisions/1/index.html"' in html
+    assert html.count('class="dpath-list"') == 1 and "#1" in home and "#2" in home
+    # the old paper panel and its "what we chose" block are gone: the decision page carries them
+    assert "The paper portfolio" not in home and "what we chose" not in home and "paper-panel" not in html
+    assert home.index("The book") < home.index("Latest decision #2") < home.index("The council")
 
 
 def test_the_decisions_table_is_numbered_newest_first(built):
@@ -226,20 +229,40 @@ def built_book(published, tmp_path_factory, _core_policy):  # noqa: F811
     return dest, {p.relative_to(dest).as_posix(): p.read_text() for p in dest.rglob("*.html")}
 
 
-def test_home_renders_the_paper_book_as_the_portfolio(built_book):
+def test_home_renders_the_paper_book_in_the_book_map_and_the_list(built_book):
+    import json
+
     dest, pages = built_book
     html = pages["index.html"]
     home = _text(html)
-    assert "The paper portfolio" in home and "as of" in home and "PAPER" in home
-    assert "paper return since" in home
-    for line in ("NDX", "SEMIS", "BTC", "ACME"):
-        assert line in home, line
-    assert "Core 6" in home or "Core" in home
-    assert "pbook-split" in html and "seg-core" in html and "seg-swing" in html and "seg-cash" in html
-    assert "accent-scout" in html and "accent-pm" in html                    # seat colours
-    assert home.index("The paper portfolio") < home.index("The book")
+    latest = json.loads((dest / "journal" / "paper" / "latest.json").read_text())
+    book = latest["book"]
+    # one book only: the council-chamber map, PAPER badged, as of the latest decision
+    assert "paper-badge" in html.split('id="holdings-h"')[0].split('class="book"')[1]
+    assert f"as of decision #{latest['decision_no']}" in home and "Paper for now" in home
+    assert "Target book" not in home and "REHEARSAL" not in html.split('id="council"')[0].split('class="book"')[1]
+    assert "pbook" not in html and "The paper portfolio" not in home and "paper-panel" not in html
+    # the weights come from the paper book (map tiles and list rows), swing trades in their own group
+    for h in book["core"]:
+        w = f"{h['weight_pct']:.1f}%"
+        assert re.search(rf"{h['line']}.{{0,400}}?{re.escape(w)}", home, re.S), (h["line"], w)
+    assert "Swing trades" in home and "ACME" in home and "tgrp" in html and "bc-swing" in html
+    assert f"{book['cash_pct']:.1f}%" in home                                # the cash tile / Cash stat
+    assert "Swing / core" in home and "swing budget" in home and "Kill switch" in home and "Paper return" in home
+    assert html.count('class="htable"') <= 2                                 # the list (+ its Not held fold) only
     assert f'content="{CSP}"' in html and "<script" not in html.lower() and 'style="' not in html
-    assert "Core lines (target weight)" not in home                          # the book replaces the target list
+
+
+def test_home_falls_back_to_the_target_without_paper(_core_policy, tmp_path):
+    root = tmp_path / "j"
+    journal = F.make_swing_journal(root, _core_policy)
+    site = _load_site()
+    dest = tmp_path / "site"
+    site.build(journal, PROMPTS_DIR, POLICY_DIR, dest, now=NOW)
+    html = (dest / "index.html").read_text()
+    head = html.split('id="council"')[0]
+    assert "paper-badge" not in head and 'class="dpath"' not in head
+    assert ">TARGET<" in head or ">LIVE BOOK<" in head
 
 
 def test_decision_page_shows_the_book_after_it(built_book):
@@ -293,11 +316,11 @@ def test_redaction_markers_render_as_one_chip_outside_tags_only():
 
 
 # ------------------------------------------------------------------ foundation: shared helpers, rules, links
-def test_paper_return_splits_into_market_and_costs(built_book):
+def test_paper_return_splits_into_market_and_costs_once(built_book):
     _, pages = built_book
     home = _text(pages["index.html"])
-    assert "Market" in home and "Costs" in home and "declared trading costs" in home
-    assert re.search(r"Costs −0\.\d+%", home), home
+    assert re.search(r"market [+−]?\d+\.\d+% · costs −\d+\.\d+%", home), home
+    assert home.count("costs −") == 1 and home.count("Paper return") == 1
 
 
 def test_rule_anchor_maps_every_kind_of_code():

@@ -538,6 +538,7 @@ a.tm-in:focus-visible { outline-offset: -3px; outline-color: var(--ink-strong); 
 .bc-crypto { --fc: var(--ac-crypto-fill); --fcm: var(--ac-crypto); }
 .bc-commodity { --fc: var(--ac-commodity-fill); --fcm: var(--ac-commodity); }
 .bc-fx { --fc: var(--ac-fx-fill); --fcm: var(--ac-fx); }
+.bc-swing { --fc: var(--ac-stock-fill); --fcm: var(--seat-scout); }
 .bc-other { --fc: var(--raised); --fcm: var(--line-strong); }
 #cb-day:checked ~ .bmap .tm:not(.cash) .tm-in { background-color: var(--fd); }
 #cb-pnl:checked ~ .bmap .tm:not(.cash) .tm-in { background-color: var(--fp); }
@@ -1743,3 +1744,19 @@ a.rule-link.jc-code { color: var(--link); }
 .sa-text { display: block; margin-top: var(--sp-1); font-size: var(--fs-1); color: var(--ink); max-width: 78ch; }
 .sc-rec { margin: 0; font-size: var(--fs-1); color: var(--ink); }
 .sc-fw { font-weight: 600; }
+
+/* home: the path to the decisions, right under the book's stats (reuses the verdict-banner accent) */
+.dpath { border-left: 4px solid var(--seat-pm); padding: var(--sp-3) var(--sp-4); margin: 0 0 var(--sp-5); background: var(--raised); border-radius: var(--radius); }
+.dpath-lead { margin: 0 0 var(--sp-2); font-size: var(--fs-2); overflow-wrap: break-word; }
+.dpath-lead .chip { vertical-align: middle; }
+.dpath-k { font-weight: 600; color: var(--ink-strong); }
+.dpath-go { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4); margin: 0 0 var(--sp-3); }
+.dpath-go .cta, .dpath-all { min-height: 44px; }
+.dpath-all { display: inline-flex; align-items: center; color: var(--link); }
+.dpath-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.dpath-list li { border-bottom: 1px solid var(--line); }
+.dpath-list a { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-height: 44px; padding: var(--sp-2) 0; text-decoration: none; color: var(--ink); }
+.dpath-list a:hover .dpath-verdict { text-decoration: underline; }
+.dpath-no { font: 600 var(--fs-1)/1.4 var(--font-mono); color: var(--ink-strong); }
+.dpath-when { font-size: var(--fs-1); color: var(--muted); }
+.dpath-verdict { flex: 1 1 14rem; min-width: 0; overflow-wrap: break-word; }
