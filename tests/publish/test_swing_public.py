@@ -200,3 +200,24 @@ def test_trades_are_percent_only_and_net_of_the_declared_cost(record):
 
 def test_the_book_section_of_a_cycle_holds_open_trades_only(record):
     assert [t.trade_id for t in _section(record).trades] == ["trade:open_1"]
+
+
+def test_number_scrub_removes_values_but_keeps_ids_and_names():
+    from council.publish.redact import scrub_numbers
+
+    out = scrub_numbers("idea:2 first; live:3.2% and move +1.5σ, rel -0.4, vol 2.5x, 12bps; ret_20d and an 8-K; S8 holds.")
+    for kept in ("idea:2", "ret_20d", "8-K", "S8"):
+        assert kept in out, kept
+    for gone in ("3.2", "1.5", "0.4", "2.5", "12"):
+        assert gone not in out, gone
+
+
+def test_market_figures_quoted_by_a_model_are_withheld_dates_items_and_ids_stay():
+    from council.publish.redact import scrub_market_numbers
+
+    out = scrub_market_numbers("idea:2: ret_20d -8.23%, vol_ratio 1.82, -4.54 sigma on 4.9x volume, 10.13% of float, "
+                               "a 0.16-beta name; 8-K Item 7.01 filed 15 September, 3 of 3 attempts")
+    for gone in ("8.23", "1.82", "4.54", "4.9", "10.13", "0.16"):
+        assert gone not in out, gone
+    for kept in ("idea:2", "ret_20d", "8-K Item 7.01", "15 September", "3 of 3"):
+        assert kept in out, kept

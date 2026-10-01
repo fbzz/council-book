@@ -478,6 +478,12 @@ PaperGroup = Literal["executed", "pm_passed", "skeptic_rejected", "skeptic_wait"
 SwingText = Annotated[str, Field(max_length=440)]      # thesis (400) + slack
 SwingClaimText = Annotated[str, Field(max_length=135)]  # catalyst claim (120) + slack
 SwingFactValue = bool | FiniteFloat | Annotated[str, Field(max_length=40)]
+# Qualitative buckets of licence-restricted (Alpaca-derived) fact-card fields, derived in code
+# (`redact.swing_fact_buckets`): words only, never the number behind them.
+SwingBucketKey = Literal["reaction", "volume", "vs_sector", "trend", "range_52w"]
+SwingBucketWord = Literal["strongly_against", "against", "flat", "with", "strongly_with",
+                          "normal", "elevated", "climax", "lagging", "in_line", "leading",
+                          "up", "down", "mixed", "near_high", "mid", "near_low"]
 
 
 class PublicSwingCatalyst(PublicModel):
@@ -551,13 +557,15 @@ class PublicSwingVotes(PublicModel):
 class PublicSwingIdea(PublicModel):
     """One Scout idea and how far it got. Distances are % of the entry (never a price); `facts`
     holds completed-bar fields only, `facts_withheld` says why a field shows no value
-    (`broker_data` for the private live layer, `unknown_source` until the Alpaca row is widened).
+    (`broker_data` for the private live layer, `unknown_source` until the Alpaca row is widened);
+    `fact_buckets` publishes those withheld fields as qualitative words only (reaction since the news
+    vs the idea's side, volume, vs sector, trend, 52-week position), never the number.
     `carried_from`: earlier cycles the idea came from (a wait, a missed entry, a re-proposal);
     `text_withheld`: its model text overlapped licensed feed text of one of them (or could not be
     checked) and is not shown."""
 
     OMIT_WHEN_DEFAULT = frozenset({"drop_code", "verdict", "votes", "carried_from", "text_withheld",
-                                   "facts_withheld", "flags"})
+                                   "facts_withheld", "fact_buckets", "flags"})
 
     ref: str = Field(pattern=r"^idea:[0-9]{1,2}$")
     ticker: Line
@@ -572,6 +580,7 @@ class PublicSwingIdea(PublicModel):
     time_stop_days: int = Field(ge=0, le=30)
     facts: dict[Annotated[str, Field(pattern=r"^[a-z0-9_]{1,48}$")], SwingFactValue] = Field(default_factory=dict)
     facts_withheld: dict[Annotated[str, Field(pattern=r"^[a-z0-9_]{1,48}$")], Withheld] = Field(default_factory=dict)
+    fact_buckets: dict[SwingBucketKey, SwingBucketWord] = Field(default_factory=dict)
     stage_reached: SwingStage
     drop_code: Code | None = None
     verdict: PublicSkepticVerdict | None = None

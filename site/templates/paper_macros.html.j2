@@ -14,12 +14,12 @@
   {% if b.rows %}
   <div class="table-wrap" tabindex="0" role="region" aria-label="Paper book holdings"><table class="wide pbook-table"><caption class="sr">Holdings of the paper book</caption>
   <thead><tr><th>Holding</th><th>Book</th><th class="n">Weight</th><th>Detail</th><th class="n">Net return</th></tr></thead><tbody>
-  {% for r in b.rows %}<tr class="accent-{{ r.seat }}"><td><span class="dot accent-{{ r.seat }}" aria-hidden="true"></span> <span class="mono">{{ r.line | ticker }}</span> {{ side(r.side) }}</td><td class="small">{{ r.kind }}</td><td class="n h-weight"><span class="wv">{{ r.weight }}</span><span class="wbar" aria-hidden="true"><span class="wfill {{ r.side }} {{ r.bar }}"></span></span></td><td class="small">{{ r.detail }}</td><td class="n">{{ r.ret or "—" }}</td></tr>{% endfor %}
+  {% for r in b.rows %}<tr class="accent-{{ r.seat }}"><td><span class="dot accent-{{ r.seat }}" aria-hidden="true"></span> <span class="tkr">{{ r.line | ticker }}</span> {{ side(r.side) }}</td><td class="small">{{ r.kind }}</td><td class="n h-weight"><span class="wv">{{ r.weight }}</span><span class="wbar" aria-hidden="true"><span class="wfill {{ r.side }} {{ r.bar }}"></span></span></td><td class="small">{{ r.detail }}</td><td class="n">{{ r.ret or "—" }}</td></tr>{% endfor %}
   </tbody></table></div>
   {% else %}<p class="muted small">The paper book holds nothing yet: all cash.</p>{% endif %}
   {% if b.closed %}
   <h3 class="small">Closed paper swing trades</h3>
-  <ul class="paper-list">{% for t in b.closed %}<li><span class="mono">{{ t.line | ticker }}</span> {{ side(t.side) }} <strong class="n">{{ t.ret }}</strong> <span class="muted small">{{ t.why }} · {{ t.days }} day(s) held</span></li>{% endfor %}</ul>
+  <ul class="paper-list">{% for t in b.closed %}<li><span class="tkr">{{ t.line | ticker }}</span> {{ side(t.side) }} <strong class="n">{{ t.ret }}</strong> <span class="muted small">{{ t.why }} · {{ t.days }} day(s) held</span></li>{% endfor %}</ul>
   {% endif %}
   <p class="small muted">Every figure is a share of the paper portfolio. Core lines carry the policy's cost per side; swing trades a declared cost per leg, never the actual one.</p>
 </div>
@@ -41,11 +41,11 @@
   <div class="paper-cols">
     <div>
       <h3 class="small">Core lines (target weight)</h3>
-      {% if lt.core %}<ul class="paper-list">{% for h in lt.core %}<li><span class="mono">{{ h.line | ticker }}</span> <strong class="n">{{ h.weight_pct | pct1 }}</strong></li>{% endfor %}</ul>{% else %}<p class="muted small">No core weight.</p>{% endif %}
+      {% if lt.core %}<ul class="paper-list">{% for h in lt.core %}<li><span class="tkr">{{ h.line | ticker }}</span> <strong class="n">{{ h.weight_pct | pct1 }}</strong></li>{% endfor %}</ul>{% else %}<p class="muted small">No core weight.</p>{% endif %}
     </div>
     <div>
       <h3 class="small">Open paper swing trades</h3>
-      {% if lt.swing_open %}<ul class="paper-list">{% for t in lt.swing_open %}<li><span class="mono">{{ t.ticker | ticker }}</span> {{ side(t.side) }} <strong class="n">{{ "%g" | format(t.size_nav_pct) }}%</strong> <span class="muted small">stop {{ "—" if t.stop_pct is none else ("%g%%" | format(t.stop_pct)) }} · target {{ "—" if t.target_pct is none else ("%g%%" | format(t.target_pct)) }} · until {{ t.time_stop_date | day }} · <a href="{{ root }}decisions/{{ t.decision_no }}/index.html">#{{ t.decision_no }}</a></span></li>{% endfor %}</ul>{% else %}<p class="muted small">None open: idle swing money stays in the core.</p>{% endif %}
+      {% if lt.swing_open %}<ul class="paper-list">{% for t in lt.swing_open %}<li><span class="tkr">{{ t.ticker | ticker }}</span> {{ side(t.side) }} <strong class="n">{{ "%g" | format(t.size_nav_pct) }}%</strong> <span class="muted small">stop {{ "—" if t.stop_pct is none else ("%g%%" | format(t.stop_pct)) }} · target {{ "—" if t.target_pct is none else ("%g%%" | format(t.target_pct)) }} · until {{ t.time_stop_date | day }} · <a href="{{ root }}decisions/{{ t.decision_no }}/index.html">#{{ t.decision_no }}</a></span></li>{% endfor %}</ul>{% else %}<p class="muted small">None open: idle swing money stays in the core.</p>{% endif %}
     </div>
   </div>
   {% endif %}
@@ -57,11 +57,102 @@
     <p><strong>{{ p.chosen | cap }}</strong>. {{ p.last.why | cap }}.</p>
     {% if p.ideas %}
     <ul class="paper-why">
-      {% for i in p.ideas %}<li><span class="mono">{{ i.ticker | ticker }}</span> {{ side(i.side) }} <span class="chip state-{{ i.out.css }}">{{ "chosen" if i.chosen else "not chosen" }}</span> {{ i.why }}</li>{% endfor %}
+      {% for i in p.ideas %}<li><span class="tkr">{{ i.ticker | ticker }}</span> {{ side(i.side) }} <span class="chip state-{{ i.out.css }}">{{ "chosen" if i.chosen else "not chosen" }}</span> {{ i.why }}</li>{% endfor %}
     </ul>
     {% endif %}
     <p class="small"><a href="{{ root }}{{ p.href }}">The full flow of #{{ p.last.decision_no }}</a> · <a href="{{ root }}decisions/index.html">every decision</a></p>
   </div>
   {% endif %}
 </section>
+{% endmacro %}
+
+{# ---- decision page: the journey cards (no script: <details>/<summary> only) ---- #}
+{% macro ev(e) %}{% if e.href %}<a class="ev ev-{{ e.css }} ev-chip" href="{{ e.href }}" title="{{ e.raw }}">{{ e.label }}</a>{% else %}<span class="ev ev-{{ e.css }} ev-chip" title="{{ e.raw }}">{{ e.label }}</span>{% endif %}{% endmacro %}
+
+{% macro code(c) %}{% if c %}<code class="jc-code" title="the code's own reason code">{{ c }}</code>{% endif %}{% endmacro %}
+
+{% macro step_details(key, label, seat, summary, traced=false) %}
+<details class="jd accent-{{ seat }}">
+  <summary><span class="dot accent-{{ seat }}" aria-hidden="true"></span><strong>{{ label }}</strong> <span class="jd-sum">{{ summary }}</span>{% if traced %} <span class="chip tag" title="This step ran only because this paper run traced every idea through every stage">traced only</span>{% endif %}</summary>
+  <div class="jd-body">{{ caller() }}</div>
+</details>
+{% endmacro %}
+
+{% macro journey(j, root) %}
+{% set i = j.i %}
+<article class="jc{% if j.stop == 6 %} jc-entered{% endif %}" id="{{ j.anchor }}" aria-labelledby="{{ j.anchor }}-h">
+  <header class="jc-head">
+    <h3 id="{{ j.anchor }}-h"><span class="tkr jc-tk">{{ i.ticker | ticker }}</span> {{ side(i.side) }} <span class="jc-setup">{{ j.setup }}</span>{% if j.paper_setup %} <span class="chip state-rehearsal" title="A paper-only setup: tracked on paper, never traded">paper-only setup</span>{% endif %}</h3>
+    <p class="jc-out">{% if j.stop == 6 %}<strong>Entered</strong> on paper{% if j.leg %}: {{ j.leg.size }} of the paper portfolio{% endif %}.{% else %}Stopped at <strong>{{ j.stop_label }}</strong>: {{ j.reason }}. {{ code(j.code) }}{% endif %} <span class="muted small tkr">{{ j.ref }}</span></p>
+  </header>
+  <ol class="jp" aria-label="How far {{ i.ticker | ticker }} got">
+    {% for s in j.steps %}
+    <li class="jp-step jp-{{ s.state }} accent-{{ s.seat }}{% if s.key == 'debate' %} jp-debate{% endif %}"{% if s.state == "stop" %} aria-current="step"{% endif %}>
+      <span class="jp-dot" aria-hidden="true">{{ s.glyph }}</span>
+      <span class="jp-label">{{ s.label }}</span>
+      <span class="jp-word">{{ s.word }}</span>
+      <span class="sr">: {{ s.sr }}</span>
+      {% if s.state == "stop" %}<span class="jp-why">{{ j.reason }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+
+  {% call step_details("scout", "Scout", "scout", "the pitch, the catalyst and the levels") %}
+    {% if i.catalyst_claim %}<p><span class="jd-k">Claim</span> {{ i.catalyst_claim }}</p>{% endif %}
+    {% if i.thesis %}<p><span class="jd-k">Thesis · why it is not priced in yet</span> {{ i.thesis }}</p>{% endif %}
+    {% if j.cats %}<p><span class="jd-k">Catalyst</span> {% for e in j.cats %}{{ ev(e) }} {% endfor %}</p>{% endif %}
+    <p><span class="jd-k">Levels</span> <span class="n">stop {{ "%g" | format(i.stop_pct) }}% · target {{ "%g" | format(i.target_pct) }}% · time stop {{ i.time_stop_days }} sessions</span> <span class="small muted">(distances from the entry)</span></p>
+    {% if j.text_withheld %}<p class="small muted">Part of this idea's text is withheld: it was carried from {{ j.carried | join(", ") }} and overlapped licensed news text.</p>{% elif j.carried %}<p class="small muted">Carried from {{ j.carried | join(", ") }}.</p>{% endif %}
+  {% endcall %}
+
+  {% call step_details("gate", "Gate", "risk", "the fact card the code checked") %}
+    {% if j.buckets or j.facts or j.extra %}
+    <dl class="jfacts">
+      {% for b in j.buckets %}<div><dt>{{ b.label }}</dt><dd><span class="jb jb-{{ b.css }}">{{ b.value }}</span></dd></div>{% endfor %}
+      {% for f in j.facts %}<div><dt>{{ f.label | cap }}</dt><dd class="n">{{ f.value }}</dd></div>{% endfor %}
+      {% for f in j.extra %}<div><dt>{{ f.label | cap }}</dt><dd class="n">{{ f.value }}</dd></div>{% endfor %}
+    </dl>
+    {% if j.buckets %}<p class="small muted">Price and volume readings are shown as words: the exact figures come from a market-data licence that does not allow republishing them.</p>{% endif %}
+    {% else %}<p class="muted small">No fact card.</p>{% endif %}
+    {% if j.stop == 1 %}<p><strong>Stopped here:</strong> {{ j.reason }}. {{ code(j.code) }}</p>{% endif %}
+  {% endcall %}
+
+  {% if j.verdict %}{% set s = j.verdict %}
+  {% call step_details("skeptic", "Skeptic", "skeptic", "the Skeptic " ~ s.plain ~ " · priced in: " ~ s.priced_in) %}
+    <p><span class="chip state-{{ s.css }}">{{ s.word }}</span> <span class="small">priced in: <strong>{{ s.priced_in }}</strong> · news: {{ s.news }} · bigger picture: {{ s.regime }} · crowding: {{ s.crowding }}</span>{% if s.override %} <span class="chip state-warn" title="The code's rule after the model's answer">{% if s.said %}said {{ s.said }} · {% endif %}{{ s.override }}</span>{% endif %}</p>
+    {% if s.reasons %}<ul class="jd-list">{% for r in s.reasons %}<li>{{ r.text }}{% for e in r.ev %} {{ ev(e) }}{% endfor %}</li>{% endfor %}</ul>{% endif %}
+    {% if s.mind %}<p><span class="jd-k">What would change its mind</span> {{ s.mind }}</p>{% endif %}
+  {% endcall %}
+  {% endif %}
+
+  {% if j.debate %}
+  {% call step_details("debate", "Debate", "bull", "the bull's and the bear's case", j.debate_traced) %}
+    {% for d in j.debate %}
+    <div class="paper-case accent-{{ d.seat }}">
+      <p><span class="dot accent-{{ d.seat }}" aria-hidden="true"></span><strong>{{ d.name }}</strong>{% if d.shared %} <span class="small muted">(one argument for the batch {{ d.refs | join(", ") }})</span>{% endif %}</p>
+      {% if d.argument %}<p class="text">{{ d.argument }}</p>{% endif %}
+      {% if d.claims %}<ul class="jd-list">{% for c in d.claims %}<li>{{ c.text }}{% for e in c.ev %} {{ ev(e) }}{% endfor %}</li>{% endfor %}</ul>{% else %}<p class="small muted">No claim about {{ i.ticker | ticker }}.</p>{% endif %}
+    </div>
+    {% endfor %}
+  {% endcall %}
+  {% endif %}
+
+  {% if j.pm %}
+  {% call step_details("pm", "PM", "pm", ("enter votes " ~ j.votes[0] ~ " of " ~ j.votes[1] ~ " (two are needed)") if j.votes else "the manager's attempts", j.pm_traced) %}
+    <ul class="jd-list">{% for a in j.pm %}<li><span class="tkr">#{{ a.n }}</span> <strong>{{ a.action }}</strong>{% if a.levels %} <span class="small n">{{ a.levels }}</span>{% endif %}{% if a.reason %}: {{ a.reason }}{% endif %}</li>{% endfor %}</ul>
+  {% endcall %}
+  {% endif %}
+
+  {% if j.rules %}{% set r = j.rules %}
+  {% call step_details("rules", "Rules", "risk", r.plain, r.traced) %}
+    {% if r.ok %}
+    <p>Every swing rule passed.{% if r.leg %} Would-be paper leg: <strong class="n">{{ r.leg.size }}</strong> of the paper portfolio · stop {{ r.leg.stop }} · target {{ r.leg.target }} · time stop {{ r.leg.time }}.{% endif %}</p>
+    {% else %}
+    <p><strong>{{ r.plain | cap }}.</strong> {{ code((r.rule ~ ":" ~ r.code) if r.rule else r.code) }}</p>
+    {% endif %}
+  {% endcall %}
+  {% endif %}
+
+  {% if j.trace %}<p class="jc-trace small"><span class="dot accent-skeptic" aria-hidden="true"></span>Traced with nothing blocking it, this idea would have ended at <strong>{{ j.trace.where }}</strong>{% if j.trace.votes %} (manager {{ j.trace.votes }}){% endif %}: {{ j.trace.why }}.</p>{% endif %}
+</article>
 {% endmacro %}

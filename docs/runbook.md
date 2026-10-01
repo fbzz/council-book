@@ -255,6 +255,8 @@ git add journal/paper && git commit -m "paper decision #N" && git push origin ma
 - The site shows it on the home page (paper portfolio + "Latest decision #N"), on `/decisions/`
   and on `/decisions/<N>/` (the whole flow). The private, licensed-text view stays
   `council paper report <cycle>` (local only, never commit it).
+  After a public-schema or redaction change, `council paper republish <cycle>...` (oldest first)
+  re-derives existing paper decisions' public files with the same numbers; review and commit them.
 - Paper P&L: closed paper swing legs only (size x net return after the declared 1.25% per leg), in %
   of the paper NAV since the first published decision. The core shows weights only (no paper fills).
 

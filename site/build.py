@@ -4551,6 +4551,9 @@ def swing_assets(view: JournalView, now: datetime) -> dict[str, dict[str, Any]]:
 
 # ------------------------------------------------------------------------------ rendering
 # ------------------------------------------------------------------------------ paper decisions
+SCREEN_MOVE_WORDS = {"down_3s": "down sharply (3σ or more)", "down_2s": "down (2–3σ)", "down": "down (under 2σ)",
+                     "flat": "flat (under 0.5σ)", "up": "up (under 2σ)", "up_2s": "up (2–3σ)", "up_3s": "up sharply (3σ or more)"}
+PAPER_STATUS = ("PAPER · NO BROKER", "rehearsal")     # the header chip on paper pages (and site-wide while paper runs lead)
 DECISIONS_NAV = {"key": "decisions", "href": "decisions/index.html", "label": "Decisions"}
 PAPER_STAGE = {"scout": "Scout check", "gate": "code gate", "skeptic": "Skeptic", "pm": "manager",
                "rules": "S-rules", "leg": "paper leg", "unknown": "not recorded"}
@@ -4612,17 +4615,29 @@ def decision_rows(view: JournalView) -> list[dict[str, Any]]:
     return rows
 
 
+def _hold_words(h: str) -> dict[str, str]:
+    m = HOLD_LINE.match(h)
+    line, rest = (m.group(1), m.group(2)) if m else ("", h)
+    text = SKIP_WORDS.get(rest.strip()) or plain_hold(rest)
+    if re.fullmatch(r"R\d+[a-z]?", text):
+        text = "held by the risk engine's rule " + text
+    return {"line": line, "text": text, "raw": h}
+
+
 def paper_core_view(c: PublicCycleV1, lines: Lines) -> dict[str, Any]:
     r = c.risk
     moves = []
     if r is not None:
         for k in lines.sort(set(r.final_x) | set(r.base_x)):
             before, after = r.base_x.get(k, 0.0), r.final_x.get(k, 0.0)
+            prop = r.proposed_x.get(k)
             moves.append({"line": k, "before": fmt_pct1(before * 100.0), "after": fmt_pct1(after * 100.0),
+                          "proposed": fmt_pct1(prop * 100.0) if prop is not None else "—",
                           "moved": abs(after - before) > EPS})
     pm = c.pm
     return {"basis": BASIS_WORDS.get(c.basis or "", (c.basis or "—").replace("_", " ")), "moves": moves,
             "moved": sum(1 for m in moves if m["moved"]), "hold": list(r.hold_reasons) if r else [],
+            "holds": [_hold_words(h) for h in (r.hold_reasons if r else [])],
             "macro": c.macro.regime.replace("_", " ") if c.macro else None,
             "bull": c.debate.bull.argument if c.debate.bull else "", "bear": c.debate.bear.argument if c.debate.bear else "",
             "reps": [{"n": x.replicate, "valid": x.valid, "sided": x.sided_with or "—",
@@ -4706,11 +4721,303 @@ def decision_view(doc: PublicPaperCycle, verified: bool, lines: Lines) -> dict[s
         reading.append({"label": label, "note": note, "href": it.link or "", "age": f"{r.age_h:g} h",
                         "tickers": ", ".join(t.replace("_", ".") for t in r.tickers) or "market-wide",
                         "licensed": it.kind in ("licensed_news", "broker_feed")})
-    gate = [{"ref": x["p"].idea.ref, "ticker": x["p"].idea.ticker, "side": x["p"].idea.side,
-             "stopped": x["p"].real_outcome.stage in ("scout", "gate"), "out": x["real"]} for x in ideas]
-    return {"doc": doc, "sw": sw, "ideas": ideas, "chosen": chosen, "reading": reading, "gate": gate,
-            "core": paper_core_view(doc.core, lines), "verified": verified,
+    catalog = _catalog(sw) if sw else {}
+    journeys = [journey_view(x["p"], sw, catalog, lines) for x in ideas]
+    journeys.sort(key=lambda j: (-j["stop"], -(j["votes"][0] if j["votes"] else -1)))
+    cited = {c.id for x in ideas for c in x["p"].idea.catalysts}
+    cited |= {e for x in ideas if x["p"].idea.verdict for r in x["p"].idea.verdict.reasons for e in r.evidence}
+    cited |= {e for b in (sw.batches if sw else []) for case in (b.bull, b.bear) if case for c in case.claims
+              for e in c.evidence}
+    for r, src in zip(reading, (sw.inputs.reading if sw else []), strict=True):
+        r["cited"] = src.item.id in cited
+        r["id"] = src.item.id
+        r["source"] = src.item.source or ("broker feed" if src.item.kind == "broker_feed" else "")
+    reading.sort(key=lambda r: not r["cited"])
+    counts: dict[str, int] = {}
+    for r in reading:
+        key = ("licensed headline" if r["licensed"] else "SEC filing" if r["id"].startswith("S:")
+               else r["source"] or "public item")
+        counts[key] = counts.get(key, 0) + 1
+    core = paper_core_view(doc.core, lines)
+    cl = core_line(doc.core, lines)
+    return {"doc": doc, "sw": sw, "ideas": ideas, "chosen": chosen, "reading": reading,
+            "core": core, "core_line": cl, "verified": verified, "journeys": journeys,
+            "banner": verdict_banner(journeys, cl, sw),
+            "inputs": {"counts": sorted(counts.items(), key=lambda t: -t[1]),
+                       "licensed": sum(1 for r in reading if r["licensed"]),
+                       "cited": sum(1 for r in reading if r["cited"]), "total": len(reading)},
             "differ": sum(1 for x in ideas if not x["p"].same)}
+
+
+# ---------------------------------------------------------------- decision page: journey cards
+# Each idea's way through the swing pipeline as six seat-coloured steps (Scout -> Gate -> Skeptic ->
+# Debate -> PM -> Rules); the step where it stopped carries its plain reason. Stage order for "the
+# idea that got furthest": Scout < Gate < Skeptic < Debate < PM < Rules < Entered (ties by PM votes).
+JOURNEY_STEPS = (   # (key, label, seat)
+    ("scout", "Scout", "scout"), ("gate", "Gate", "risk"), ("skeptic", "Skeptic", "skeptic"),
+    ("debate", "Debate", "bull"), ("pm", "PM", "pm"), ("rules", "Rules", "risk"),
+)
+JOURNEY_NAMES = {"scout": "the Scout check", "gate": "the code gate", "skeptic": "the Skeptic", "debate": "the debate",
+                 "pm": "the manager", "rules": "the swing rules", "entered": "entered"}
+_OUTCOME_STOP = {"scout": 0, "gate": 1, "skeptic": 2, "pm": 4, "rules": 5, "leg": 6}
+_STAGE_STOP = {"dropped_by_code": 1, "skeptic": 2, "waiting": 2, "debate": 3, "pm": 4, "risk": 5, "planned": 6,
+               "approved": 6, "executed": 6, "missed": 5, "expired": 5}
+RULE_CODE_WORDS = {   # swing rule codes (`council.swing.rules.RULE_OF`) in plain words
+    "stop_too_wide_for_size": "the stop is too wide for the position size",
+    "max_open": "the book already holds the most swing trades allowed", "max_short": "the book holds the most shorts allowed",
+    "already_open": "a swing trade on this stock is already open", "weekly_cap": "the weekly cap on new swing trades is reached",
+    "open_risk": "the open risk across swing trades is at its limit", "stop_missing": "no stop level",
+    "stop_out_of_range": "the stop is outside the allowed range", "stop_inside_atr": "the stop sits inside one day's normal range",
+    "atr_unknown": "the stock's normal daily range is unknown, so the stop cannot be checked",
+    "target_missing": "no target level", "vol_unknown": "the stock's volatility is unknown",
+    "vol_too_high": "the stock is too volatile", "target_too_small": "the target is too small",
+    "target_beyond_vol": "the target is further than the stock usually moves in the time allowed",
+    "cost_unavailable": "the trading cost could not be priced", "time_stop_out_of_range": "the time stop is out of range",
+    "illiquid": "too little trading volume", "price_too_low": "the share price is too low",
+    "earnings_window": "earnings fall inside the trade's window", "earnings_window_estimated": "estimated earnings fall inside the trade's window",
+    "post_earnings_wait": "too soon after earnings", "bucket_full": "the book is already full of similar trades",
+    "swing_net_beta": "the swing book's market exposure is at its limit", "fee_budget": "over the fee budget",
+    "short_new_listing": "a recent listing cannot be shorted", "short_crowded": "too crowded a short",
+    "short_takeover_target": "a takeover target cannot be shorted", "short_into_flush": "a short into a flush is not allowed",
+    "short_squeeze_risk": "squeeze risk on a short", "cooloff": "a cool-off after a recent loss on this stock",
+    "swing_entry_ran": "the price ran past the entry", "swing_entry_stopped": "the price hit the stop before entry",
+    "expired": "the approval expired", "kill_state": "the risk engine's kill switch blocks new entries",
+    "drawdown_unknown": "the drawdown could not be checked", "swing_blocker": "a blocker is open",
+    "vehicle_owned_by_core": "the core council already holds this stock",
+    "enter": "the manager entered, but no paper leg was built", "paper_leg": "a paper leg was built",
+}
+SWING_FIELD_WORDS = {   # fact-card fields not in REACTION_FACTS
+    "move_since_news_close_pct": "move since the news", "move_since_news_close_sigma": "move since the news (σ)",
+    "move_since_news_live_pct": "live move since the news", "move_since_news_live_sigma": "live move since the news (σ)",
+    "move_today_live_sigma": "move today (live, σ)", "vol_ratio_since": "volume since the news vs normal",
+    "rel_move_since_pct": "move vs sector and beta", "sector_move_since_pct": "sector move since the news",
+    "news_age_sessions": "news age (sessions)", "filing_age_d": "filing age (days)", "fundamentals_age_d": "latest results age (days)",
+    "earnings_confirmed": "earnings date confirmed", "earnings_last_sessions_ago": "sessions since last earnings",
+    "earnings_next": "next earnings", "crowding": "crowding", "sector_etf": "sector fund", "rev_yoy": "revenue vs a year ago",
+    "rev_accel": "revenue growth change", "gm_chg": "gross margin change", "om_chg": "operating margin change",
+    "short_interest_pct_float": "short interest", "days_to_cover": "days to cover", "beta_60d": "beta (60 days)",
+    "ret_5d": "5-day return", "ret_20d": "20-day return", "ret_60d": "60-day return", "sigma_daily": "daily volatility",
+    "vol_ratio_last": "last day's volume vs normal", "spx_move_since_pct": "S&P 500 since the news",
+    "ndx_move_since_pct": "Nasdaq 100 since the news", "dist_52w_low_pct": "from 52-week low",
+    "move_today_live_pct": "move today (live)",
+    "adv_bucket": "trading volume bucket", "px_ge_10": "share price at least 10", "corr_60d_max": "highest correlation",
+}
+SWING_F_WORDS = {"ret1d_sigma": "1-day move", "mom10d": "10-day change", "mom63d": "3-month change",
+                 "dd52": "drop from 1-year high", "dist_sma50": "vs 50-day average", "dist_sma200": "vs 200-day average",
+                 "trend": "trend", "data_age_h": "data age", "market_open": "market open"}
+BUCKET_ROWS = (   # (key, label, {word: (plain, css)})
+    ("reaction", "Reaction since the news", {"strongly_against": ("strongly against the idea (≤ −2σ)", "down"),
+                                             "against": ("against the idea", "down"),
+                                             "flat": ("flat (under 0.5σ either way)", "flat"),
+                                             "with": ("with the idea", "up"),
+                                             "strongly_with": ("strongly with the idea (≥ 2σ)", "up")}),
+    ("volume", "Volume since the news", {"normal": ("normal", "flat"), "elevated": ("elevated (≥ 1.5× normal)", "warn"),
+                                         "climax": ("climax (≥ 3× normal)", "warn")}),
+    ("vs_sector", "Versus its sector", {"lagging": ("lagging", "down"), "in_line": ("in line", "flat"),
+                                        "leading": ("leading", "up")}),
+    ("trend", "Trend", {"up": ("up", "up"), "down": ("down", "down"), "mixed": ("mixed", "flat")}),
+    ("range_52w", "52-week position", {"near_high": ("near the high", "up"), "mid": ("mid-range", "flat"),
+                                       "near_low": ("near the low", "down")}),
+)
+VERDICT_WORDS = {"pass": "passed it", "wait": "said wait", "reject": "rejected it", "failed": "reply unusable"}
+
+
+def code_words(code: str | None) -> str:
+    """A drop / rule / outcome code in plain words (`S8:illiquid` -> "too little trading volume")."""
+    if not code:
+        return ""
+    bare = code.split(":", 1)[1] if re.match(r"^S?[A-Z]*\d+[a-z]?:", code) else code
+    return (DROP_WORDS.get(code) or DROP_WORDS.get(bare) or RULE_CODE_WORDS.get(bare)
+            or bare.replace("_", " "))
+
+
+def swing_ev(eid: str, catalog: dict[str, dict[str, str]], lines: Lines) -> dict[str, str]:
+    """A swing evidence id as a readable chip: {label, raw (title attribute), href, css}."""
+    parts = eid.split(":")
+    prefix = parts[0]
+    if prefix == "X" and len(parts) >= 3:
+        field_ = parts[2]
+        label = SWING_FIELD_WORDS.get(field_) or next((lab + (f" ({u})" if u in ("sessions",) else "")
+                                                       for k, lab, u in REACTION_FACTS if k == field_), field_.replace("_", " "))
+        return {"label": label, "raw": eid, "href": "", "css": "market"}
+    if prefix == "F" and len(parts) >= 3:
+        what = SWING_F_WORDS.get(parts[2]) or MARKET_FIELDS.get(parts[2], parts[2].replace("_", " "))
+        return {"label": f"{ticker(parts[1])} {what}", "raw": eid, "href": "", "css": "market"}
+    if prefix in ("P", "S"):
+        c = catalog.get(eid)
+        if c:
+            return {"label": c["label"], "raw": eid, "href": c.get("href", ""), "css": "event"}
+        return {"label": "public filing" if prefix == "S" else "public news item", "raw": eid, "href": "", "css": "event"}
+    if prefix == "N":
+        src = (catalog.get(eid) or {}).get("source", "")
+        return {"label": "licensed headline" + (f" · {src}" if src else ""), "raw": f"{eid} · licensed: id and source only",
+                "href": "", "css": "feed"}
+    if prefix == "M":
+        return {"label": "movers screen row", "raw": eid, "href": "", "css": "market"}
+    lab = evidence_label(SimpleNamespace(id=eid, kind=""), lines)
+    return {"label": lab["label"], "raw": lab["raw"], "href": "", "css": lab["css"]}
+
+
+def _catalog(sw: Any) -> dict[str, dict[str, str]]:
+    """{evidence id: label/href/source} from the reading list and every idea's catalysts."""
+    out: dict[str, dict[str, str]] = {}
+    items = [r.item for r in sw.inputs.reading] + [c for i in sw.ideas for c in i.idea.catalysts]
+    for it in items:
+        if it.kind in ("licensed_news", "broker_feed"):
+            out.setdefault(it.id, {"label": "licensed headline", "source": it.source or "broker feed"})
+        elif it.kind == "filing":
+            out.setdefault(it.id, {"label": " ".join(x for x in (it.form or "filing", ", ".join(it.items)) if x)})
+        elif it.kind == "public_news":
+            out.setdefault(it.id, {"label": it.title or "public news item", "href": it.link or ""})
+    return out
+
+
+def _pm_votes(ref: str, batches: list[Any]) -> tuple[int, int] | None:
+    for b in batches:
+        for t in b.tally:
+            if t.ref == ref and t.action == "enter":
+                return t.votes_for, t.replicates
+    for b in batches:
+        if any(t.ref == ref for t in b.tally):
+            n = next(t.replicates for t in b.tally if t.ref == ref)
+            return 0, n
+    return None
+
+
+def _stop_index(p: Any) -> int:
+    if p.leg is not None and p.leg.ok:
+        return 6
+    o = p.real_outcome
+    if o is not None and o.stage in _OUTCOME_STOP:
+        if o.stage == "pm" and o.code == "enter":
+            return 5
+        return _OUTCOME_STOP[o.stage]
+    return _STAGE_STOP.get(p.idea.stage_reached, 1)
+
+
+def journey_view(p: Any, sw: Any, catalog: dict[str, dict[str, str]], lines: Lines) -> dict[str, Any]:
+    """One idea's journey card: the six steps with their state and the content behind each."""
+    i = p.idea
+    ref = i.ref
+    stop = _stop_index(p)
+    o = p.real_outcome
+    votes = _pm_votes(ref, sw.batches)
+    code = (o.code if o is not None else None) or i.drop_code
+    if stop == 5 and p.leg is not None and not p.leg.ok:
+        code = f"{p.leg.rule}:{p.leg.code}" if p.leg.rule and p.leg.code else (p.leg.code or code)
+    reason = code_words(code) if stop < 6 else ""
+    if stop == 2 and i.verdict is not None and (code or "").split(":")[-1] in ("", "skeptic_reject", "skeptic_wait",
+                                                                                "skeptic_failed"):
+        reason = f"the Skeptic {VERDICT_WORDS.get(i.verdict.verdict, i.verdict.verdict)}"
+    ev = lambda e: swing_ev(e, catalog, lines)                              # noqa: E731
+    sub = {"scout": "pitched", "gate": "passed", "skeptic": (i.verdict.verdict if i.verdict else "—"),
+           "debate": "argued", "pm": (f"{votes[0]}/{votes[1]}" if votes else "—"), "rules": "pass"}
+    steps = []
+    for n, (key, label, seat) in enumerate(JOURNEY_STEPS):
+        state = "ok" if n < stop else "stop" if n == stop else "skip"
+        word = sub[key] if state != "skip" else "not reached"
+        if state == "stop":
+            rule = (p.leg.rule if p.leg is not None and p.leg.rule else
+                    code.split(":", 1)[0] if code and re.match(r"^S\d+:", code) else "stopped")
+            word = {"gate": "stopped", "rules": rule, "debate": "stopped"}.get(key, word)
+        steps.append({"key": key, "label": label, "seat": seat, "state": state, "word": word,
+                      "glyph": {"ok": "✓", "stop": "✗", "skip": "—"}[state],
+                      "sr": {"ok": "passed", "stop": "stopped here", "skip": "not reached"}[state]})
+    # the content behind each step
+    v = paper_idea_view(p)
+    facts = list(v["facts"])
+    buckets = []
+    for key, label, words in BUCKET_ROWS:
+        w = i.fact_buckets.get(key) if i.fact_buckets else None
+        if w:
+            text, css = words.get(w, (w.replace("_", " "), "flat"))
+            buckets.append({"label": label, "value": text, "css": css})
+    extra = [{"label": SWING_FIELD_WORDS.get(k, k.replace("_", " ")),
+              "value": (f"{val:g}" if isinstance(val, float) else _fact_value(k, val, ""))}
+             for k, val in sorted(i.facts.items()) if k not in {f for f, _, _ in REACTION_FACTS} and k in SWING_FIELD_WORDS]
+    verdict = None
+    if i.verdict is not None:
+        s = i.verdict
+        verdict = {"word": s.verdict, "plain": VERDICT_WORDS.get(s.verdict, s.verdict), "css": VERDICT_CSS.get(s.verdict, "stone"),
+                   "priced_in": s.discounted, "news": s.news_status.replace("_", " "), "regime": s.regime,
+                   "crowding": s.crowding, "mind": s.what_would_change_my_mind,
+                   "override": v["verdict"]["override"] if v["verdict"] else "", "said": s.said,
+                   "reasons": [{"text": r.text, "ev": [ev(e) for e in r.evidence]} for r in s.reasons]}
+    batch = sw.batches[p.batch] if p.batch is not None and p.batch < len(sw.batches) else None
+    if batch is None:
+        batch = next((b for b in sw.batches if ref in b.refs), None)
+    debate = []
+    if batch is not None:
+        for case, seat, name in ((batch.bull, "bull", "Bull"), (batch.bear, "bear", "Bear")):
+            if case is None:
+                continue
+            claims = [{"id": c.claim_id, "text": c.text, "ev": [ev(e) for e in c.evidence]} for c in case.claims if c.ref == ref]
+            debate.append({"seat": seat, "name": name, "argument": case.argument, "claims": claims,
+                           "shared": len(batch.refs) > 1, "refs": batch.refs})
+    pm = []
+    if batch is not None:
+        for rp in batch.replicates:
+            acts = [a for a in rp.actions if a.ref == ref]
+            if not rp.valid:
+                pm.append({"n": rp.replicate + 1, "action": "unusable", "levels": "", "reason": "reply unusable (counts as a pass)"})
+            for a in acts:
+                levels = ""
+                if a.action == "enter":
+                    levels = " · ".join(x for x in (
+                        f"stop {a.stop_pct:g}%" if a.stop_pct is not None else "",
+                        f"target {a.target_pct:g}%" if a.target_pct is not None else "",
+                        f"{a.time_stop_days} sessions" if a.time_stop_days is not None else "") if x)
+                pm.append({"n": rp.replicate + 1, "action": a.action, "levels": levels, "reason": a.reason})
+    leg = p.leg if p.leg is not None else None
+    tleg = p.traced_leg
+    rules = None
+    shown = leg if leg is not None else tleg
+    if shown is not None:
+        rules = {"ok": shown.ok, "rule": shown.rule or "", "code": shown.code or "",
+                 "plain": code_words(shown.code) if not shown.ok else "every swing rule passed",
+                 "leg": leg_view(shown) if shown.ok else None, "traced": leg is None and stop < 5}
+    trace = None
+    to = p.traced_outcome
+    same_end = (to is not None and o is not None and _OUTCOME_STOP.get(to.stage) == _OUTCOME_STOP.get(o.stage)
+                and (to.code or "").split(":")[-1] == (o.code or "").split(":")[-1])
+    if sw.trace_all and not p.same and to is not None and not same_end:
+        where = JOURNEY_NAMES.get({"leg": "entered"}.get(to.stage, to.stage), to.stage)
+        tv = _pm_votes(ref, sw.batches)
+        trace = {"where": where, "why": code_words(to.code) if to.stage != "leg" else "a paper leg would have been built",
+                 "votes": f"{tv[0]}/{tv[1]}" if tv and to.stage in ("pm", "rules", "leg") else "", "note": to.note}
+    stop_key = "entered" if stop == 6 else JOURNEY_STEPS[stop][0]
+    return {"p": p, "i": i, "ref": ref, "anchor": "sw-" + ref.replace(":", "-"), "stop": stop, "stop_key": stop_key,
+            "stop_name": JOURNEY_NAMES[stop_key], "stop_label": "Entered" if stop == 6 else JOURNEY_STEPS[stop][1],
+            "reason": reason, "code": code if stop < 6 else "", "votes": votes, "steps": steps,
+            "setup": v["setup"], "cats": [ev(c.id) for c in i.catalysts], "facts": facts, "buckets": buckets, "extra": extra,
+            "withheld_n": sum(1 for _ in i.facts_withheld), "verdict": verdict, "debate": debate, "pm": pm,
+            "rules": rules, "trace": trace, "chosen": p.chosen, "debate_traced": stop < 3, "pm_traced": stop < 4, "leg": leg_view(leg) if leg is not None and leg.ok else None,
+            "paper_setup": v["paper"], "carried": i.carried_from, "text_withheld": i.text_withheld}
+
+
+def verdict_banner(journeys: list[dict[str, Any]], core: dict[str, Any], sw: Any) -> dict[str, Any]:
+    """The banner: the entries (or "No trade"), the idea that got closest, the core line, the budget."""
+    entered = [j for j in journeys if j["stop"] == 6]
+    closest = journeys[0] if journeys and not entered else None
+    budget = None
+    if sw is not None and sw.budget is not None:
+        budget = {"swing": f"{sw.budget.swing_pct:g}%", "core": f"{sw.budget.core_pct:g}%", "votes": sw.budget.votes,
+                  "fallback": sw.budget.fallback}
+    return {"entered": entered, "closest": closest, "core": core, "budget": budget}
+
+
+def core_line(c: PublicCycleV1, lines: Lines) -> dict[str, Any]:
+    """"Core: built / held / changed …" with the final weights in %."""
+    r = c.risk
+    if r is None:
+        return {"verb": "no risk decision", "weights": [], "moved": 0}
+    keys = lines.sort(set(r.final_x) | set(r.base_x))
+    moved = [k for k in keys if abs(r.final_x.get(k, 0.0) - r.base_x.get(k, 0.0)) > EPS]
+    built = not any(abs(v) > EPS for v in r.base_x.values()) and any(abs(v) > EPS for v in r.final_x.values())
+    verb = "built" if built else "held" if not moved else f"changed {plural(len(moved), 'line')}"
+    weights = sorted(((k, r.final_x.get(k, 0.0)) for k in keys if abs(r.final_x.get(k, 0.0)) > EPS), key=lambda t: -abs(t[1]))
+    return {"verb": verb, "weights": [{"line": k, "w": fmt_pct1(x * 100.0)} for k, x in weights[:6]],
+            "more": max(0, len(weights) - 6), "moved": len(moved)}
 
 
 def paper_home(view: JournalView, lines: Lines, geo: Geometry | None = None) -> dict[str, Any] | None:
@@ -4758,6 +5065,7 @@ def make_env(lines: Lines | list[str] | None = None) -> Environment:
         asset=lambda k: asset_page(k) if k in line_set.info else "",
         flag_words=flag_words,
     )
+    env.globals["move_words"] = lambda b: SCREEN_MOVE_WORDS.get(b or "", "—")
     env.globals.update(
         decision_chip=lambda state: chip(DECISION_CHIP, state),
         kill_chip=lambda state: chip(KILL_CHIP, state),
@@ -4800,7 +5108,13 @@ def _status_context(view: JournalView, now: datetime) -> dict[str, Any]:
         mode = latest.doc.mode
     else:
         mode = "live" if st.state != "AWAITING_ACCOUNT" else None
-    if mode == "rehearsal" and st.state == "AWAITING_ACCOUNT":
+    # paper runs newer than the last live/rehearsal cycle: the project is running on paper
+    last_paper = view.paper_rows[-1].slot if view.paper_rows else None
+    paper_now = (st.state == "AWAITING_ACCOUNT" and last_paper is not None
+                 and (latest is None or last_paper >= latest.doc.slot))
+    if paper_now:
+        label, css = PAPER_STATUS
+    elif mode == "rehearsal" and st.state == "AWAITING_ACCOUNT":
         label, css = "REHEARSAL · NO ACCOUNT", "rehearsal"
     return {
         "state": st.state, "label": label, "css": css, "note": st.note, "kill": st.kill_state,
@@ -4811,7 +5125,7 @@ def _status_context(view: JournalView, now: datetime) -> dict[str, Any]:
         "last_late": f"{fmt_late(late)} after its {fmt_clock(slot)} slot" if ran and late else "",
         "last_cycle_revealed": last_view is not None,
         "last_decision": last_decision,
-        "mode": mode, "mode_chip": chip(MODE_CHIP, mode),
+        "mode": mode, "mode_chip": chip(MODE_CHIP, mode), "paper": paper_now,
         "prelive": st.state == "AWAITING_ACCOUNT" or mode in (None, "rehearsal"),
         "built": fmt_when(now), "built_clock": fmt_clock(now),
     }

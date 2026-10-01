@@ -1491,7 +1491,10 @@ _SWING_NEVER = frozenset({"adv_usd_20d", "short_interest_pct_float", "short_inte
                           "short_interest_settlement", "catalyst_items_feed", "corr_60d_with"})
 _SWING_ID = re.compile(r"^(?:X:[A-Z0-9](?:[A-Z0-9_]{0,10}[A-Z0-9])?:[a-z0-9_]{1,48}|N:[0-9a-f]{8}|P:[0-9a-f]{8}"
                        r"|S:[A-Za-z0-9_.:@#+-]{1,80}|M:[A-Za-z0-9_.:@-]{1,60}|[FVCEK]:[A-Za-z0-9_.:@#+-]{1,80})$")
-_NUMBER = re.compile(r"[-+±]?\d[\d,]*(?:\.\d+)?\s?(?:%|σ|sigma\b|pct\b|percent\b|bps?\b|x\b)?")
+# a number with its unit, never a digit inside an id or a word (`idea:2`, `ret_20d`, `8-K`, `S8`)
+_NUMBER = re.compile(r"(?<![A-Za-z_\d])(?<!idea:)(?<![A-Za-z\d][.,])[-+±]?\d[\d,]*(?:\.\d+)?(?!\d|[.,]\d|-[A-Za-z])"
+                     r"(?:\s?(?:%|σ|sigma\b|pct\b|percent\b|bps?\b|x\b))?")
+_ISO_DATE = re.compile(r"(\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?Z?)?\b)")
 _GOV_LINK = re.compile(r"^https://[A-Za-z0-9.-]+\.gov/\S*$")
 _SETUP_RE = re.compile(r"^[a-z][a-z_]{0,31}$")
 _FACT_KEY = re.compile(r"^[a-z0-9_]{1,48}$")
@@ -1507,7 +1510,32 @@ _EXIT_KIND = {"closed_stop": "stop", "closed_target": "target", "closed_time": "
 
 def scrub_numbers(text: str) -> str:
     """Remove every number (with its %, σ or bp) from a text that cites a live-layer value."""
-    return _NUMBER.sub("[value removed]", text)
+    return "".join(p if k % 2 else _NUMBER.sub("[value removed]", p) for k, p in enumerate(_ISO_DATE.split(text)))
+
+
+# A market figure in model text: a number with a market unit, or a number right after a fact-card
+# field name. The swing fact card's price / volume / short-interest figures come from licensed data
+# (Alpaca, FINRA) and are withheld as numbers, so a model quoting them must not republish them.
+_MARKET_FIELD = (r"(?:ret_\d+d|vol_ratio\w*|dist_52w_\w+|rel_move\w*|sigma_daily|atr14\w*|beta\w*|gap\w*"
+                 r"|move_since\w*|sector_move\w*|spx_move\w*|ndx_move\w*|short_interest\w*|days_to_cover"
+                 r"|volume ratio|ratio)")
+_MARKET_NUMBER = re.compile(
+    r"(?<![A-Za-z_\d])(?<!idea:)(?<![A-Za-z\d][.,])[-+±]?\d[\d,]*(?:\.\d+)?(?!\d|[.,]\d|-[A-Za-z])"
+    r"(?:\s?(?:%|σ|sigma\b|pct\b|percent\b|bps?\b|x\b|days to cover\b)|(?=\s?(?:% )?(?:of float|short)\b))")
+_FIELD_NUMBER = re.compile(r"(\b" + _MARKET_FIELD + r"\b\s*[:=]?\s*)[-+±]?\d[\d,]*(?:\.\d+)?\s?(?:%|σ|x\b)?", re.I)
+
+
+_BETA_NUMBER = re.compile(r"(?<![A-Za-z_\d.])[-+]?\d+(?:\.\d+)?(?=-beta\b)-beta\b", re.I)
+
+
+def scrub_market_numbers(text: str) -> str:
+    """Remove market figures (a number with %, σ, x, bp or "of float", or right after a fact-card
+    field name) from model text; dates, counts, item numbers and ids stay."""
+    def one(part: str) -> str:
+        part = _BETA_NUMBER.sub("[figure withheld]-beta", _FIELD_NUMBER.sub(r"\1[figure withheld]", part))
+        return _MARKET_NUMBER.sub("[figure withheld]", part)
+
+    return "".join(p if k % 2 else one(p) for k, p in enumerate(_ISO_DATE.split(text)))
 
 
 def swing_line(ticker: str) -> str | None:
@@ -1525,8 +1553,8 @@ class _SwingText:
     feed text that applies (this cycle's and the idea's origin cycles'), then (when the text cites
     a live-layer id) the number scrub. `blocked` withholds every text (unverifiable origin)."""
 
-    def __init__(self, matcher: leakscan.LicensedMatcher, blocked: bool = False):
-        self.matcher, self.blocked = matcher, blocked
+    def __init__(self, matcher: leakscan.LicensedMatcher, blocked: bool = False, market: bool = True):
+        self.matcher, self.blocked, self.market = matcher, blocked, market
         self.withheld = 0
 
     def __call__(self, value: Any, max_len: int, *, live: bool = False) -> str:
@@ -1539,7 +1567,9 @@ class _SwingText:
         if self.matcher and self.matcher.hits(text):
             self.withheld += 1
             return WITHHELD_LICENSED[:max_len]
-        return _clip(scrub_numbers(text), max_len) if live else text
+        if live:
+            return _clip(scrub_numbers(text), max_len)
+        return _clip(scrub_market_numbers(text), max_len) if self.market else text
 
 
 def _swing_ids(ids: Iterable[Any], dropped: list[int]) -> list[str]:
@@ -1603,6 +1633,49 @@ def _swing_facts(fields: Mapping[str, Any], *, alpaca_public: bool) -> tuple[dic
         elif isinstance(value, str) and value and len(value) <= 40 and literal_ok(value):
             facts[key] = value
     return facts, withheld
+
+
+def _num(v: Any) -> float | None:
+    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(float(v)) else None
+
+
+def swing_fact_buckets(fields: Mapping[str, Any], side: str) -> dict[str, str]:
+    """Qualitative public buckets of the licence-restricted fact-card fields (words only; the
+    numbers stay withheld while `alpaca_public` is off):
+    - reaction: the move since the news in sigma, signed by the idea's side (a fall is "with" a short):
+      <= -2 strongly_against, <= -0.5 against, |s| < 0.5 flat, < 2 with, >= 2 strongly_with;
+    - volume: mean volume since the news vs normal: < 1.5x normal, < 3x elevated, else climax;
+    - vs_sector: the move vs sector and beta, within half a daily sigma x sqrt(sessions) (1 point
+      without a sigma) in_line, else lagging / leading;
+    - trend: SMA50/200 up / down / mixed (unknown: no bucket);
+    - range_52w: the close's position in its 52-week range: top fifth near_high, bottom fifth
+      near_low, else mid (only the distance from the high known: within 5% near_high)."""
+    out: dict[str, str] = {}
+    sigma = _num(fields.get("move_since_news_close_sigma"))
+    if sigma is not None and side in ("long", "short"):
+        s = sigma if side == "long" else -sigma
+        out["reaction"] = ("strongly_against" if s <= -2 else "against" if s <= -0.5 else "flat" if s < 0.5
+                           else "with" if s < 2 else "strongly_with")
+    vol = _num(fields.get("vol_ratio_since"))
+    if vol is not None and vol >= 0:
+        out["volume"] = "normal" if vol < 1.5 else "elevated" if vol < 3 else "climax"
+    rel = _num(fields.get("rel_move_since_pct"))
+    if rel is not None:
+        sd, age = _num(fields.get("sigma_daily")), _num(fields.get("news_age_sessions"))
+        band = 0.5 * sd * math.sqrt(max(age or 1.0, 1.0)) if sd is not None and sd > 0 else 1.0
+        out["vs_sector"] = "in_line" if abs(rel) < band else "leading" if rel > 0 else "lagging"
+    trend = fields.get("trend")
+    if trend in ("up", "down", "mixed"):
+        out["trend"] = str(trend)
+    hi, lo = _num(fields.get("dist_52w_high_pct")), _num(fields.get("dist_52w_low_pct"))
+    if hi is not None and lo is not None and hi > -100 and lo > -100:
+        top, bottom = 1.0 / (1.0 + hi / 100.0), 1.0 / (1.0 + lo / 100.0)     # in units of the last close
+        if top - bottom > 1e-12:
+            pos = (1.0 - bottom) / (top - bottom)
+            out["range_52w"] = "near_high" if pos >= 0.8 else "near_low" if pos <= 0.2 else "mid"
+    elif hi is not None:
+        out["range_52w"] = "near_high" if hi >= -5 else "mid"
+    return out
 
 
 def _skeptic_public(ref: str, v: Mapping[str, Any] | None, text: _SwingText, dropped: list[int]) -> Any:
@@ -1692,7 +1765,8 @@ def public_swing_section(
     as the book at seal time (percent-only)."""
     from council.publish.public_models import PublicSwingIdea, PublicSwingSection, PublicSwingVotes
 
-    origin_texts = dict(origin_texts or {})
+    # captured texts are whole prompt sections: only their licensed `N:` lines guard model text
+    origin_texts = {c: (leakscan.licensed_lines(v) if v is not None else None) for c, v in (origin_texts or {}).items()}
     flags: list[str] = []
     dropped = [0]
     own = origin_texts.get(cycle_id)
@@ -1722,7 +1796,7 @@ def public_swing_section(
             except leakscan.OriginTextsUnavailable:
                 blocked = True
         matcher = leakscan.LicensedMatcher(base_texts + [t for c in origins for t in (origin_texts.get(c) or [])])
-        text = _SwingText(matcher, blocked=blocked)
+        text = _SwingText(matcher, blocked=blocked, market=not alpaca_public)
         claim = text(row.get("catalyst_claim"), 135)
         thesis = text(row.get("thesis"), 440)
         verdict = _skeptic_public(ref, row.get("verdict"), text, dropped)
@@ -1741,6 +1815,7 @@ def public_swing_section(
             stop_pct=_pct(row.get("stop_pct")), target_pct=_pct(row.get("target_pct")),
             time_stop_days=int(row.get("time_stop_days") or 0),
             facts=facts, facts_withheld=withheld, stage_reached=stage,
+            fact_buckets=swing_fact_buckets(row.get("facts") or {}, side) if not alpaca_public else {},
             drop_code=_code(str(row["drop_code"])) if row.get("drop_code") else None,
             verdict=verdict,
             votes=PublicSwingVotes(enter=int(votes["enter"]), replicates=int(votes["replicates"]),
@@ -1757,9 +1832,9 @@ def public_swing_section(
             base_texts + [t for c in dict.fromkeys(all_origins) for t in (origin_texts.get(c) or [])])
         if all_origins:
             leakscan.origin_matcher(origin_texts, all_origins)
-        debate_text = _SwingText(debate_matcher, blocked=own is None)
+        debate_text = _SwingText(debate_matcher, blocked=own is None, market=not alpaca_public)
     except leakscan.OriginTextsUnavailable:
-        debate_text = _SwingText(leakscan.LicensedMatcher(base_texts), blocked=True)
+        debate_text = _SwingText(leakscan.LicensedMatcher(base_texts), blocked=True, market=not alpaca_public)
     bull = _swing_case(record.get("bull"), debate_text, dropped, refs)
     bear = _swing_case(record.get("bear"), debate_text, dropped, refs)
     counter[0] += debate_text.withheld

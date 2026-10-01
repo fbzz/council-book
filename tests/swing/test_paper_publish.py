@@ -197,3 +197,113 @@ def test_publish_is_refused_off_paper(tmp_path, monkeypatch):
                  ["cycle", "--paper", "--stub-llm", "--publish-dir", str(tmp_path)]):
         res = CliRunner().invoke(app, args)
         assert res.exit_code == 2, (args, res.output)
+
+
+# ------------------------------------------------------------- overlap check, buckets, republish
+PUBLIC_TITLE = "8-K: Item 7.01 Regulation FD Disclosure and the regulator approved the device for adults"
+SECTION = ("CATALYST ITEMS (metadata attached by code)\n"
+           f"- P:4411e8ca: {PUBLIC_TITLE} (available 5h before the slot)\n"
+           f"- N:0a1b2c3d: {SYNTH_RSS} (rss, 3h before the slot)\n"
+           "- X:ACME:news_age_sessions: 0 completed sessions since the news, the reaction is not yet priced\n"
+           "CLAIM (one factual line from the proposer):\nAcme will hold an analyst event next month with new targets\n")
+
+
+def test_overlap_withholds_licensed_lines_only_never_public_titles_code_facts_or_own_words(published):
+    """A captured prompt section is one licensed item; only its `N:` lines are licensed news."""
+    ctx, out, _ = published
+    sw = copy.deepcopy(_record(ctx, out.cycle_id).extras["swing"])
+    ideas = sw["ideas"]
+    ideas[0]["thesis"] = "The filing says " + PUBLIC_TITLE.lower() + ", a durable catalyst"
+    ideas[0]["catalyst_claim"] = "Acme will hold an analyst event next month with new targets"
+    part = P.paper_swing(sw, cycle_id=out.cycle_id, licensed_texts=[], own_texts=[SECTION])
+    pub = next(i.idea for i in part.ideas if i.idea.ref == ideas[0]["ref"])
+    assert "regulator approved the device" in pub.thesis and "overlaps licensed" not in pub.thesis
+    assert pub.catalyst_claim.startswith("Acme will hold an analyst event")
+    ideas[0]["thesis"] = "As the release said, " + SYNTH_RSS.lower() + " next month in town"
+    part = P.paper_swing(sw, cycle_id=out.cycle_id, licensed_texts=[], own_texts=[SECTION])
+    blob = part.model_dump_json()
+    assert "investor day" not in blob and "overlaps licensed" in blob        # the licensed N: line still guards
+    assert P.feed_lines([SECTION]) == [x for x in SECTION.splitlines() if x.startswith("- N:")]
+    files = {"x.json": blob.encode()}
+    P.scan_files(files, licensed_texts=P.feed_lines([SECTION]))               # the final scan stays clean
+
+
+def test_licence_restricted_facts_publish_as_buckets_only(published):
+    ctx, out, _ = published
+    sw = copy.deepcopy(_record(ctx, out.cycle_id).extras["swing"])
+    idea = sw["ideas"][0]
+    idea["facts"] = {**(idea.get("facts") or {}), "move_since_news_close_sigma": -2.37, "vol_ratio_since": 3.41,
+                     "rel_move_since_pct": -6.83, "sigma_daily": 2.11, "news_age_sessions": 1, "trend": "down",
+                     "dist_52w_high_pct": -41.27, "dist_52w_low_pct": 3.19}
+    part = P.paper_swing(sw, cycle_id=out.cycle_id, licensed_texts=[], own_texts=[])
+    pub = next(i.idea for i in part.ideas if i.idea.ref == idea["ref"])
+    side = idea["side"]
+    assert pub.fact_buckets["reaction"] == ("strongly_against" if side == "long" else "strongly_with")
+    assert pub.fact_buckets["volume"] == "climax" and pub.fact_buckets["vs_sector"] == "lagging"
+    assert pub.fact_buckets["trend"] == "down" and pub.fact_buckets["range_52w"] == "near_low"
+    assert pub.facts_withheld["move_since_news_close_sigma"] == "unknown_source"
+    blob = part.model_dump_json()
+    for raw in ("2.37", "3.41", "6.83", "41.27", "3.19", "2.11"):
+        assert raw not in blob, raw
+    idea["thesis"] = "The stock fell -2.37 sigma on 3.41x volume, ret_20d -6.83%, after the 8-K Item 7.01"
+    pub = next(i.idea for i in P.paper_swing(sw, cycle_id=out.cycle_id, licensed_texts=[], own_texts=[]).ideas
+               if i.idea.ref == idea["ref"])
+    assert "2.37" not in pub.thesis and "3.41" not in pub.thesis and "6.83" not in pub.thesis
+    assert "figure withheld" in pub.thesis and "8-K Item 7.01" in pub.thesis
+
+
+def test_screen_and_market_context_publish_bands_not_figures(published):
+    ctx, out, _ = published
+    sw = copy.deepcopy(_record(ctx, out.cycle_id).extras["swing"])
+    inp = sw["trace"]["inputs"]
+    inp["screen"] = [{"id": "M:ACME:movers", "line_id": "ACME", "move_pct": -10.03, "move_sigma": -4.54,
+                      "vol_ratio": 5.1, "sector": "BusEq"}]
+    inp["context"] = [{"id": "F:SPY:ret1d_sigma",
+                       "text": "SPY (S&P 500 ETF) moved -0.21% (-0.29 sigma of 20 sessions) in the 2026-09-30 session"}]
+    part = P.paper_swing(sw, cycle_id=out.cycle_id, licensed_texts=[], own_texts=[])
+    row = part.inputs.screen[0]
+    assert row.move == "down_3s" and row.move_pct is None and row.move_sigma is None and row.volume == ">4"
+    assert part.inputs.context[0].text == "SPY (S&P 500 ETF) was flat (under 0.5σ) in the 2026-09-30 session"
+    blob = part.model_dump_json()
+    assert "10.03" not in blob and "4.54" not in blob and "0.21" not in blob and "0.29" not in blob
+
+
+def test_republish_keeps_the_number_and_rewrites_only_its_own_files(published, tmp_path):
+    import shutil
+
+    ctx, out, repo = published
+    root = tmp_path / "repo"
+    shutil.copytree(repo / "journal", root / "journal")
+    rows_before = (root / P.DECISIONS_PATH).read_bytes()
+    no, written = P.republish_paper(out.cycle_id, record=ctx.ledger.get_cycle(out.cycle_id), state_dir=ctx.state_dir,
+                                    root=root, paper_rows=ctx.ledger.paper_trades(), now=datetime(2026, 10, 2, tzinfo=UTC))
+    assert no == 1 and len((root / P.DECISIONS_PATH).read_bytes().splitlines()) == len(rows_before.splitlines())
+    doc = P.PublicPaperCycle.model_validate_json((root / P.cycle_file(out.cycle_id)).read_bytes())
+    rev = json.loads((root / P.reveal_file(out.cycle_id)).read_text())
+    assert commit_reveal.verify_bytes((root / P.cycle_file(out.cycle_id)).read_bytes(), rev["salt"], rev["commitment_sha256"])
+    assert doc.decision_no == 1 and doc.swing is not None and doc.core == P.PublicPaperCycle.model_validate_json(
+        (repo / P.cycle_file(out.cycle_id)).read_bytes()).core                  # the published core is kept
+    for p in written:
+        assert leakscan.scan_bytes(p.name, p.read_bytes(), licensed_texts=[SYNTH_RSS]) == [], p
+    with pytest.raises(P.PaperPublishError):
+        P.republish_paper("2030-01-01T0000Z", record=None, state_dir=ctx.state_dir, root=root)
+
+
+def test_republishing_an_older_decision_leaves_latest_alone(published, tmp_path):
+    import shutil
+
+    ctx, out, repo = published
+    root = tmp_path / "repo"
+    shutil.copytree(repo / "journal", root / "journal")
+    rec = _record(ctx, out.cycle_id)
+    slot = rec.slot + timedelta(hours=4)
+    cid = slot.strftime("%Y-%m-%dT%H%MZ")
+    r = rec.model_copy(update={"cycle_id": cid, "slot": slot})
+    files, _ = P.paper_files(lambda no: P.build_paper_cycle(r, None, lines=ctx.policy.universe, decision_no=no,
+                                                            own_texts=[]), root, cid, sealed_at=datetime(2026, 10, 1, tzinfo=UTC))
+    P.write(root, files)
+    latest = (root / P.LATEST_PATH).read_bytes()
+    _, written = P.republish_paper(out.cycle_id, record=ctx.ledger.get_cycle(out.cycle_id), state_dir=ctx.state_dir,
+                                   root=root)
+    assert (root / P.LATEST_PATH).read_bytes() == latest
+    assert all("latest" not in p.name and "books" not in p.parts for p in written)

@@ -1,5 +1,33 @@
 # Changelog
 
+## Decision pages as journey cards; public text and licence fixes (2026-10-01)
+- **Site** (`/decisions/<n>/`, user-approved design): a verdict banner (the entries or "No trade",
+  "Closest to trading: <ticker> — stopped at <stage> (<plain reason>)" for the idea that got furthest:
+  Scout < Gate < Skeptic < Debate < PM < Rules < Entered, ties by PM votes; the core line with its
+  weights; the swing budget), one journey card per idea (six seat-coloured steps with ✓ / ✗ / — and
+  the stop step's reason; a `<details>` per step with that agent's content), the core council
+  (proposed vs final weights, holds in plain words) and the inputs collapsed at the bottom (cited items
+  first). No script; the CSP is unchanged. Evidence ids render as readable chips (raw id in the title);
+  codes appear once as a small chip next to plain words. Paper pages show `PAPER · NO BROKER`; the
+  site-wide chip says so too while paper decisions are newer than the last rehearsal cycle.
+- **Over-redaction fix**: a captured swing prompt is held as ONE licensed item, so agent text was
+  withheld on any 8-word overlap with public `P:` titles, code-written facts or the agents' own claim.
+  The overlap check (paper and live swing sections) now compares only licensed lines
+  (`leakscan.licensed_lines`: the `N:` lines of a section, other licensed texts whole); the final leak
+  scan is unchanged. The live-number scrub no longer eats digits inside ids (`idea:2`, `ret_20d`, `8-K`).
+- **Licence buckets** (`PublicSwingIdea.fact_buckets`, `redact.swing_fact_buckets`): the withheld
+  Alpaca-derived fact-card fields publish as words only (reaction since the news vs the idea's side,
+  volume, vs sector, trend, 52-week position). The paper movers screen and market-context lines,
+  also Alpaca-derived, now publish a sigma band (`PaperScreenRow.move`, `context_words`) instead of
+  the % and sigma figures. Swing model text now loses market figures (a number with %, σ, x, bp or
+  "of float", or after a fact-card field name: `redact.scrub_market_numbers`, shown as
+  "[figure withheld]"): with the narrower overlap check, quoted licensed price, volume and
+  short-interest figures would otherwise reach the public record. Dates, counts and item numbers stay.
+- **`council paper republish <cycle>...`**: re-derives an existing paper decision's public files
+  (same number; the published core part kept; the swing part rebuilt from the paper ledger and the
+  capture; re-sealed and leak-scanned; latest.json / books only for the newest decision). Run for
+  2026-10-01T1440Z and 2026-10-01T1840Z.
+
 ## Initial build across market sessions: the build phase — policy change (2026-10-01)
 - **Problem**: the initial funding allowance applied only to an EMPTY book. Core ETFs trade in the
   London session (frozen `market_closed` at the 18:40 UTC slot) while crypto trades 24/7, so a first

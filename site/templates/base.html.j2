@@ -52,7 +52,7 @@
     <ul class="foot-list">
       <li>Not investment advice.</li>
       {% if status.prelive %}
-      <li>No money is at risk yet: {{ "this is a rehearsal with no broker account" if status.mode == "rehearsal" else "no broker account is connected" }}. Once live, real money is at risk and the author holds the positions shown.</li>
+      <li>No money is at risk yet: {{ "these are paper runs with no broker connected" if status.paper else "this is a rehearsal with no broker account" if status.mode == "rehearsal" else "no broker account is connected" }}. Once live, real money is at risk and the author holds the positions shown.</li>
       {% else %}
       <li>Real money is at risk; the author holds the positions shown.</li>
       {% endif %}

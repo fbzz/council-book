@@ -1,23 +1,16 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
-{% import "swing_macros.html.j2" as swm %}
 {% import "paper_macros.html.j2" as pm %}
 {% set doc = d.doc %}
 {% set sw = d.sw %}
+{% set bn = d.banner %}
 {% block title %}Decision #{{ doc.decision_no }}{% endblock %}
+{% block status_chip %}<span class="chip state-rehearsal" title="A paper run: real data and models, no broker connected, nothing traded">PAPER · NO BROKER</span>{% endblock %}
 {% block toc %}
-{{ m.toc_item("d-chose", "What we chose", "pm") }}
-{% if sw %}
-{{ m.toc_item("d-inputs", "Inputs", "news") }}
-{{ m.toc_item("d-scout", "Scout ideas and fact cards", "scout") }}
-{{ m.toc_item("d-gate", "Code gate", "risk") }}
-{{ m.toc_item("d-skeptic", "Skeptic", "skeptic") }}
-{{ m.toc_item("d-debate", "Bull and bear", "bull") }}
-{{ m.toc_item("d-pm", "Manager attempts", "pm") }}
-{{ m.toc_item("d-rules", "S-rules and paper legs", "risk") }}
-{{ m.toc_item("d-trace", "Real vs traced", "skeptic") }}
-{% endif %}
+{{ m.toc_item("d-verdict", "The verdict", "pm") }}
+{% if sw %}{{ m.toc_item("d-ideas", "Every idea's journey", "scout") }}{% endif %}
 {{ m.toc_item("d-core", "Core council", "macro") }}
+{% if sw %}{{ m.toc_item("d-inputs", "Inputs", "news") }}{% endif %}
 {% if book %}{{ m.toc_item("d-book", "The book after this decision", "pm") }}{% endif %}
 {% endblock %}
 {% block hero %}
@@ -29,146 +22,90 @@
 {% endblock %}
 {% block main %}
 
+<section class="card accent-pm vb" id="d-verdict" aria-labelledby="d-verdict-h">
+  <h2 id="d-verdict-h" class="vb-title">{% if bn.entered %}Entered: {% for j in bn.entered %}<span class="tkr">{{ j.i.ticker | ticker }}</span> {{ j.i.side }}{% if j.leg %} {{ j.leg.size }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}No trade{% endif %}</h2>
+  {% if bn.closest %}{% set c = bn.closest %}
+  <p class="vb-closest">Closest to trading: <a href="#{{ c.anchor }}" class="tkr">{{ c.i.ticker | ticker }}</a> {{ pm.side(c.i.side) }} — stopped at <strong>{{ c.stop_label }}</strong> ({{ c.reason }}){% if c.votes and c.stop >= 4 %}, after the manager voted {{ c.votes[0] }} of {{ c.votes[1] }} to enter{% endif %}.</p>
+  {% elif sw and not d.journeys %}<p class="vb-closest">The Scout pitched no swing idea this slot.</p>{% endif %}
+  <dl class="vb-rows">
+    <div><dt><span class="dot accent-macro" aria-hidden="true"></span>Core</dt><dd>{{ d.core_line.verb | cap }}{% if d.core_line.weights %}: {% for w in d.core_line.weights %}<span class="tkr">{{ w.line | ticker }}</span> <strong class="n">{{ w.w }}</strong>{% if not loop.last %} · {% endif %}{% endfor %}{% if d.core_line.more %} · {{ d.core_line.more }} more{% endif %}{% endif %}</dd></div>
+    {% if bn.budget %}<div><dt><span class="dot accent-pm" aria-hidden="true"></span>Swing budget</dt><dd><strong class="n">{{ bn.budget.swing }}</strong> swing / <strong class="n">{{ bn.budget.core }}</strong> core, set by the council ({{ plural(bn.budget.votes, "valid vote") }}){% if bn.budget.fallback %}; no usable vote, so the last budget was kept{% endif %}. Idle swing money is invested in the core.</dd></div>{% endif %}
+  </dl>
+  <p class="small muted">Sizes are shares of the paper portfolio; swing results are after a declared cost of {{ "%g" | format(sw.declared_cost_pct_per_leg if sw else 1.25) }}% per leg, never the actual one.</p>
+</section>
+
+{% if sw %}
+{% call m.section("d-ideas", 1, "Every idea's journey", "scout") %}
+<p class="small">Each idea the Scout pitched, furthest first, through the six steps: <span class="nowrap"><span class="dot accent-scout" aria-hidden="true"></span>Scout</span> → <span class="nowrap"><span class="dot accent-risk" aria-hidden="true"></span>code gate</span> → <span class="nowrap"><span class="dot accent-skeptic" aria-hidden="true"></span>Skeptic</span> (blind to the pitch{% if sw.skeptic_model_family %}, {{ sw.skeptic_model_family }} model family{% endif %}) → <span class="nowrap"><span class="dot accent-bull" aria-hidden="true"></span>bull and <span class="dot accent-bear" aria-hidden="true"></span>bear</span> → <span class="nowrap"><span class="dot accent-pm" aria-hidden="true"></span>manager</span> (two of three attempts must enter) → <span class="nowrap"><span class="dot accent-risk" aria-hidden="true"></span>swing rules</span>. ✓ passed · ✗ stopped here · — not reached. Open a step for what that agent said; "[figure withheld]" marks a licensed market figure an agent quoted.</p>
+{% if d.journeys %}
+{% for j in d.journeys %}{{ pm.journey(j, "../../") }}{% endfor %}
+{% else %}{{ m.empty("The Scout pitched no idea", "Nothing on the reading list or the screen made a swing idea this slot.") }}{% endif %}
+{% if sw.scout_passed %}<p class="small">The Scout looked at and passed on: {% for t in sw.scout_passed %}<span class="tkr">{{ t | ticker }}</span>{% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
+{% if sw.trace_all %}<p class="small muted">This run traced every idea through every stage, so later steps also ran for ideas the real pipeline had stopped (marked "traced only"); {{ d.differ }} idea(s) would have ended elsewhere.{% if sw.real_budget_flags %} The real slot's call budget would have applied: {{ sw.real_budget_flags | join(", ") }}.{% endif %}</p>{% endif %}
+{% endcall %}
+{% endif %}
+
+{% call m.section("d-core", 2 if sw else 1, "Core council", "macro") %}
+{% set co = d.core %}
+<details class="jd accent-macro">
+  <summary><span class="dot accent-macro" aria-hidden="true"></span><strong>{{ d.core_line.verb | cap }}</strong> <span class="jd-sum">basis {{ co.basis }} · {{ plural(co.moved, "line") }} re-weighted{% if co.macro %} · macro regime {{ co.macro }}{% endif %} · {{ plural(co.valid, "valid manager attempt") }}</span></summary>
+  <div class="jd-body">
+  {% if co.moves %}
+  {{ m.wrap_open("Core weights") }}
+  <table class="wide"><thead><tr><th>Line</th><th class="n">Before</th><th class="n">Manager proposed</th><th class="n">Final, after the risk engine</th></tr></thead><tbody>
+  {% for mv in co.moves %}<tr{% if mv.moved %} class="paper-diff"{% endif %}><td>{{ mv.line | ticker }}</td><td class="n">{{ mv.before }}</td><td class="n">{{ mv.proposed }}</td><td class="n">{{ mv.after }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  {% if co.holds %}<h3 class="small">Held by the risk engine</h3><ul class="jd-list">{% for h in co.holds %}<li>{% if h.line %}<span class="tkr">{{ h.line | ticker }}</span>: {% endif %}{{ h.text }} <code class="jc-code" title="{{ h.raw }}">{{ h.raw.split(": ", 1)[-1].split(" ")[0] }}</code></li>{% endfor %}</ul>{% endif %}
+  {% if co.reps %}<h3 class="small">Manager attempts</h3><ul class="jd-list">{% for r in co.reps %}<li><span class="dot accent-pm" aria-hidden="true"></span>#{{ r.n + 1 }}: {{ "valid" if r.valid else "invalid" }} · sided with {{ r.sided }}{% if r.fact %}<br><span class="jd-k">Decisive fact</span> {{ r.fact }}{% endif %}{% for dv in r.devs %}<br>{{ dv }}{% endfor %}{% if r.why %}<br>{{ r.why }}{% endif %}</li>{% endfor %}</ul>{% endif %}
+  {% if co.bull or co.bear %}<div class="paper-cols">
+    <div class="paper-case accent-bull"><p><span class="dot accent-bull" aria-hidden="true"></span><strong>Bull</strong></p><p class="text small">{{ co.bull or "—" }}</p></div>
+    <div class="paper-case accent-bear"><p><span class="dot accent-bear" aria-hidden="true"></span><strong>Bear</strong></p><p class="text small">{{ co.bear or "—" }}</p></div>
+  </div>{% endif %}
+  <p class="small">{{ plural(co.cards, "analyst card") | cap }}.</p>
+  </div>
+</details>
+<p class="small"><a href="../../journal/paper/cycles/{{ doc.cycle_id[0:4] }}/{{ doc.cycle_id[5:7] }}/{{ doc.cycle_id }}.json">The sealed record (JSON)</a> · <a href="../index.html">every decision</a></p>
+{% endcall %}
+
+{% if sw %}
+{% call m.section("d-inputs", 3, "Inputs", "news") %}
+{% set inp = d.inputs %}
+<p>{{ plural(inp.total, "item") | cap }} on the reading list{% if inp.counts %}: {% for k, n in inp.counts %}{{ n }} {{ k }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}. {{ inp.licensed }} licensed headline(s) shown by id and source only; {{ inp.cited }} item(s) cited by an agent, listed first.</p>
+<details class="jd accent-news">
+  <summary><span class="dot accent-news" aria-hidden="true"></span><strong>The full reading list</strong> <span class="jd-sum">{{ inp.total }} item(s)</span></summary>
+  <div class="jd-body">
+  {% if d.reading %}
+  {{ m.wrap_open("Reading list") }}
+  <table class="wide"><thead><tr><th>Item</th><th>Source</th><th class="n">Age</th><th>Tickers</th></tr></thead><tbody>
+  {% for r in d.reading %}<tr><td class="text">{% if r.cited %}<span class="chip tag" title="An agent cited this item">cited</span> {% endif %}{% if r.licensed %}<span title="{{ r.id }}">licensed headline</span> <span class="small muted tkr">{{ r.id }}</span>{% elif r.href %}<a href="{{ r.href }}">{{ r.label }}</a>{% else %}{{ r.label }}{% endif %}</td><td class="small">{{ r.source or "—" }}</td><td class="n">{{ r.age }}</td><td>{{ r.tickers }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  <p class="small muted">Licensed headlines (RSS and the broker's feed) are shown by id and source only; public-domain items (SEC, Federal Reserve, BLS, …) with their title and link.</p>
+  {% else %}<p class="muted small">Nothing on the reading list.</p>{% endif %}
+  </div>
+</details>
+<details class="jd accent-news">
+  <summary><span class="dot accent-news" aria-hidden="true"></span><strong>Movers screen and market context</strong> <span class="jd-sum">{{ sw.inputs.screen | length }} mover(s) · {{ sw.inputs.context | length }} context row(s)</span></summary>
+  <div class="jd-body">
+  {% if sw.inputs.screen %}
+  {{ m.wrap_open("Movers screen") }}
+  <table class="wide"><thead><tr><th>Ticker</th><th>Last day's move</th><th>Volume vs normal</th><th>Sector</th></tr></thead><tbody>
+  {% for r in sw.inputs.screen %}<tr><td title="{{ r.id }}">{{ (r.ticker or "—") | ticker }}</td><td>{{ move_words(r.move) }}</td><td>{{ (r.volume ~ "×") if r.volume else "—" }}</td><td>{{ r.sector or "—" }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  <p class="small muted">The screen is built from licensed market data: moves are shown as bands of the stock's normal daily move (σ), never the figure.</p>
+  {% else %}<p class="muted small">No mover passed the screen.</p>{% endif %}
+  {% if sw.inputs.context %}<ul class="jd-list small">{% for c in sw.inputs.context %}<li title="{{ c.id }}">{{ c.text }}</li>{% endfor %}</ul>{% endif %}
+  {% if sw.inputs.open_trades %}<h3 class="small">Open paper swing trades the agents saw</h3>
+  <ul class="jd-list small">{% for t in sw.inputs.open_trades %}<li><span class="tkr">{{ t.ticker | ticker }}</span> {{ pm.side(t.side) }} · {{ t.days_held }} day(s) · to stop {{ "—" if t.to_stop_pct is none else ("%g%%" | format(t.to_stop_pct)) }} · to target {{ "—" if t.to_target_pct is none else ("%g%%" | format(t.to_target_pct)) }}</li>{% endfor %}</ul>{% endif %}
+  {% if sw.inputs.carried %}<p class="small">Carried from an earlier slot (day-2 confirmation): {{ sw.inputs.carried | join(", ") }}.</p>{% endif %}
+  </div>
+</details>
+{% endcall %}
+{% endif %}
+
 {% if book %}
 <section class="card accent-pm paper-panel" id="d-book" aria-label="The book after this decision">
 {{ pm.book(book, "../../", "The book after this decision") }}
 </section>
 {% endif %}
-
-{% call m.section("d-chose", 1, "What we chose", "pm") %}
-{% if d.chosen %}
-{{ m.wrap_open("Chosen paper legs") }}
-<table class="wide"><thead><tr><th>Idea</th><th class="n">Size</th><th class="n">Stop</th><th class="n">Target</th><th>Time stop</th><th>Why</th></tr></thead><tbody>
-{% for x in d.chosen %}{% set l = x.leg %}<tr><td><span class="mono">{{ x.p.idea.ticker | ticker }}</span> {{ pm.side(x.p.idea.side) }}</td><td class="n">{{ l.size }}</td><td class="n">{{ l.stop }}</td><td class="n">{{ l.target }}</td><td>{{ l.time }}</td><td class="text">{{ x.p.why }}</td></tr>{% endfor %}
-</tbody></table></div>
-{% else %}<p><strong>No swing trade.</strong>{% if not d.ideas %} No swing idea this slot.{% endif %}</p>{% endif %}
-{% if d.ideas %}
-<h3>Every idea, one line</h3>
-<ul class="paper-why">{% for x in d.ideas %}<li><a href="#sw-{{ x.p.idea.ref | replace(':', '-') }}" class="mono">{{ x.p.idea.ref }}</a> <span class="mono">{{ x.p.idea.ticker | ticker }}</span> {{ pm.side(x.p.idea.side) }} <span class="chip state-{{ x.real.css }}">{{ x.real.text }}</span> {{ x.p.why }}</li>{% endfor %}</ul>
-{% endif %}
-<p class="small">Core council: {{ d.core.basis }}; {{ d.core.moved }} line(s) re-weighted. Sizes are shares of the paper portfolio; results are after a declared cost of {{ "%g" | format(sw.declared_cost_pct_per_leg if sw else 1.25) }}% per leg, never the actual one.</p>
-{% endcall %}
-
-{% if sw %}
-{% call m.section("d-inputs", 2, "Inputs", "news") %}
-<h3>Reading list</h3>
-{% if d.reading %}
-{{ m.wrap_open("Reading list") }}
-<table class="wide"><thead><tr><th>Item</th><th>Source</th><th class="n">Age</th><th>Tickers</th></tr></thead><tbody>
-{% for r in d.reading %}<tr><td class="text">{% if r.href %}<a href="{{ r.href }}">{{ r.label }}</a>{% else %}{{ r.label }}{% endif %}</td><td class="small">{{ r.note }}</td><td class="n">{{ r.age }}</td><td>{{ r.tickers }}</td></tr>{% endfor %}
-</tbody></table></div>
-<p class="small muted">Licensed headlines (RSS and the broker's feed) are shown by id and source only; public-domain items (SEC, Federal Reserve, BLS, …) with their title and link.</p>
-{% else %}<p class="muted small">Nothing on the reading list.</p>{% endif %}
-<h3>Movers screen</h3>
-{% if sw.inputs.screen %}
-{{ m.wrap_open("Movers screen") }}
-<table class="wide"><thead><tr><th>Row</th><th>Ticker</th><th class="n">Move</th><th class="n">σ</th><th>Volume ×</th><th>Sector</th></tr></thead><tbody>
-{% for r in sw.inputs.screen %}<tr><td class="mono small">{{ r.id }}</td><td>{{ (r.ticker or "—") | ticker }}</td><td class="n">{{ "—" if r.move_pct is none else (r.move_pct | signed) }}</td><td class="n">{{ "—" if r.move_sigma is none else ("%+.2f" | format(r.move_sigma)) }}</td><td>{{ r.volume or "—" }}</td><td>{{ r.sector or "—" }}</td></tr>{% endfor %}
-</tbody></table></div>
-{% else %}<p class="muted small">No mover passed the screen.</p>{% endif %}
-<h3>Market context</h3>
-{% if sw.inputs.context %}<ul class="small">{% for c in sw.inputs.context %}<li><code>{{ c.id }}</code> {{ c.text }}</li>{% endfor %}</ul>{% else %}<p class="muted small">No market context row.</p>{% endif %}
-{% if sw.inputs.open_trades %}
-<h3>Open paper swing trades the agents saw</h3>
-<ul class="small">{% for t in sw.inputs.open_trades %}<li><span class="mono">{{ t.ticker | ticker }}</span> {{ pm.side(t.side) }} · {{ t.days_held }} day(s) · to stop {{ "—" if t.to_stop_pct is none else ("%g%%" | format(t.to_stop_pct)) }} · to target {{ "—" if t.to_target_pct is none else ("%g%%" | format(t.to_target_pct)) }}</li>{% endfor %}</ul>
-{% endif %}
-{% if sw.inputs.carried %}<p class="small">Carried from an earlier slot (day-2 confirmation): {{ sw.inputs.carried | join(", ") }}.</p>{% endif %}
-{% endcall %}
-
-{% call m.section("d-scout", 3, "Scout ideas and fact cards", "scout") %}
-{% if d.ideas %}
-<p class="small">Each idea with its catalyst, the Scout's thesis, the levels it proposed and the fact card (completed bars, % and σ only). The Skeptic's verdict sits under the idea it judged.</p>
-{% for x in d.ideas %}{{ swm.idea(x.v, "../../") }}{% endfor %}
-{% else %}{{ m.empty("The Scout pitched no idea", "Nothing on the reading list or the screen made a swing idea this slot.") }}{% endif %}
-{% if sw.scout_passed %}<p class="small">The Scout passed on: {{ sw.scout_passed | join(", ") }}.</p>{% endif %}
-{% endcall %}
-
-{% call m.section("d-gate", 4, "Code gate", "risk") %}
-<p class="small">The fact card, the chase limit, day-2 confirmation and the net reward/risk check, all in code.</p>
-{% if d.gate %}<ul class="paper-why">{% for g in d.gate %}<li><span class="mono">{{ g.ref }}</span> <span class="mono">{{ g.ticker | ticker }}</span> {{ pm.side(g.side) }} {% if g.stopped %}<span class="chip state-halted">stopped: {{ g.out.text }}</span>{% else %}<span class="chip state-executed">passed</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="muted small">No idea reached the gate.</p>{% endif %}
-{% endcall %}
-
-{% call m.section("d-skeptic", 5, "Skeptic", "skeptic") %}
-<p class="small">The Skeptic judges each idea blind (no thesis, no levels){% if sw.skeptic_model_family %} on the {{ sw.skeptic_model_family }} model family{% endif %}.</p>
-{% set judged = d.ideas | selectattr("v.verdict") | list %}
-{% if judged %}
-{{ m.wrap_open("Skeptic verdicts") }}
-<table class="wide"><thead><tr><th>Idea</th><th>Verdict</th><th>Reasons</th><th>What would change its mind</th></tr></thead><tbody>
-{% for x in judged %}{% set s = x.v.verdict %}<tr><td><span class="mono">{{ x.p.idea.ticker | ticker }}</span> {{ pm.side(x.p.idea.side) }}</td><td><span class="chip state-{{ s.css }}">{{ s.word }}</span><br><span class="small muted">priced in: {{ s.priced_in }} · news: {{ s.news }}</span></td><td class="text"><ul class="small">{% for r in s.reasons %}<li>{{ r.text }}</li>{% endfor %}</ul></td><td class="text small">{{ s.mind or "—" }}</td></tr>{% endfor %}
-</tbody></table></div>
-{% else %}<p class="muted small">No Skeptic verdict this slot.</p>{% endif %}
-{% endcall %}
-
-{% call m.section("d-debate", 6, "Bull and bear", "bull") %}
-{% for b in sw.batches %}
-<h3>{% if sw.batches | length > 1 %}Batch {{ loop.index }}: {% endif %}{{ b.refs | join(", ") or "open trades only" }}</h3>
-<div class="paper-cols">
-{% for case, seat, name in ((b.bull, "bull", "Bull"), (b.bear, "bear", "Bear")) %}
-  <div class="paper-case accent-{{ seat }}">
-    <p><span class="dot accent-{{ seat }}" aria-hidden="true"></span><strong>{{ name }}</strong></p>
-    {% if case %}<p class="text">{{ case.argument }}</p>
-    {% if case.claims %}<ul class="small">{% for c in case.claims %}<li><span class="mono">{{ c.claim_id }} · {{ c.ref }}</span> {{ c.text }}{% for e in c.evidence %} <code class="small">{{ e }}</code>{% endfor %}</li>{% endfor %}</ul>{% endif %}
-    {% if case.rebuttals %}<p class="small"><strong>Answers to the bull:</strong></p><ul class="small">{% for r in case.rebuttals %}<li><span class="mono">{{ r.claim_id }}</span> {{ m.verdict(r.verdict) }} {{ r.text }}</li>{% endfor %}</ul>{% endif %}
-    {% else %}<p class="muted small">No usable case.</p>{% endif %}
-  </div>
-{% endfor %}
-</div>
-{% else %}<p class="muted small">No debate this slot.</p>{% endfor %}
-{% endcall %}
-
-{% call m.section("d-pm", 7, "Manager attempts and the vote", "pm") %}
-{% for b in sw.batches %}
-{% if sw.batches | length > 1 %}<h3>Batch {{ loop.index }}</h3>{% endif %}
-{{ m.wrap_open("Manager attempts") }}
-<table class="wide"><thead><tr><th>Attempt</th><th>Idea</th><th>Action</th><th>Levels</th><th>Reason</th></tr></thead><tbody>
-{% for rp in b.replicates %}
-{% if not rp.valid %}<tr><td>#{{ rp.replicate + 1 }}</td><td colspan="4" class="muted">reply unusable (counts as pass / hold)</td></tr>{% endif %}
-{% for a in rp.actions %}<tr><td>#{{ rp.replicate + 1 }}</td><td class="mono">{{ a.ref }}</td><td><strong>{{ a.action }}</strong></td><td class="small">{% if a.action == "enter" %}stop {{ "—" if a.stop_pct is none else ("%g%%" | format(a.stop_pct)) }} · target {{ "—" if a.target_pct is none else ("%g%%" | format(a.target_pct)) }} · {{ a.time_stop_days if a.time_stop_days is not none else "—" }} sessions{% endif %}</td><td class="text small">{{ a.reason }}</td></tr>{% endfor %}
-{% if rp.budget_pct is not none %}<tr><td>#{{ rp.replicate + 1 }}</td><td>budget</td><td><strong>{{ "%g" | format(rp.budget_pct) }}%</strong></td><td class="small">{{ "valid vote" if rp.budget_vote_valid else "vote refused" }}</td><td class="text small">{{ rp.budget_reason }}</td></tr>{% endif %}
-{% endfor %}
-</tbody></table></div>
-{% if b.tally %}<p class="small"><strong>Tally:</strong> {% for t in b.tally %}<span class="mono">{{ t.ref }}</span> {{ t.action }} {{ t.votes_for }} of {{ t.replicates }}{% if not loop.last %} · {% endif %}{% endfor %} (two of three are needed to enter).</p>{% endif %}
-{% else %}<p class="muted small">The manager did not run this slot.</p>{% endfor %}
-{% endcall %}
-
-{% call m.section("d-rules", 8, "S-rules and would-be paper legs", "risk") %}
-<p class="small">The swing rules run on every entry against the same paper book. Nothing is placed: these are the legs the planner would place.</p>
-{% set legged = d.ideas | selectattr("tleg") | list %}
-{% if legged %}
-{{ m.wrap_open("Paper legs") }}
-<table class="wide"><thead><tr><th>Entry</th><th>S-rules</th><th class="n">Size</th><th class="n">Stop</th><th class="n">Target</th><th>Time stop</th></tr></thead><tbody>
-{% for x in legged %}{% set l = x.tleg %}<tr><td><span class="mono">{{ x.p.idea.ticker | ticker }}</span> {{ pm.side(x.p.idea.side) }}{% if not x.p.chosen %} <span class="small muted">(traced only)</span>{% endif %}</td>{% if l.ok %}<td><span class="chip state-executed">all pass</span></td><td class="n">{{ l.size }}</td><td class="n">{{ l.stop }}</td><td class="n">{{ l.target }}</td><td>{{ l.time }}</td>{% else %}<td colspan="5"><span class="chip state-halted">{{ l.text }}</span></td>{% endif %}</tr>{% endfor %}
-</tbody></table></div>
-{% else %}<p class="muted small">No entry reached the swing rules.</p>{% endif %}
-{% if sw.budget %}<p><strong>Swing budget:</strong> {{ "%g" | format(sw.budget.swing_pct) }}% swing / {{ "%g" | format(sw.budget.core_pct) }}% core{% if sw.budget.median_pct is not none %} (median vote {{ "%g" | format(sw.budget.median_pct) }}%){% endif %}, {{ sw.budget.votes }} valid vote(s){% if sw.budget.fallback %}; no usable vote, the last budget was kept{% endif %}. Idle swing money is invested in the core.</p>{% endif %}
-{% endcall %}
-
-{% call m.section("d-trace", 9, "Real outcome vs the full trace", "skeptic") %}
-{% if sw.trace_all %}
-<p class="small">This run traced every idea through every stage. "Real" is what the pipeline did (and what we chose); "traced" is where the idea ended when nothing blocked it. {{ d.differ }} idea(s) differ.</p>
-{{ m.wrap_open("Real vs traced") }}
-<table class="wide"><thead><tr><th>Idea</th><th>Real</th><th>Traced</th></tr></thead><tbody>
-{% for x in d.ideas %}<tr{% if not x.p.same %} class="paper-diff"{% endif %}><td><span class="mono">{{ x.p.idea.ref }} {{ x.p.idea.ticker | ticker }}</span> {{ pm.side(x.p.idea.side) }}</td><td><span class="chip state-{{ x.real.css }}">{{ x.real.text }}</span>{% if x.real.note %}<br><span class="small muted">{{ x.real.note }}</span>{% endif %}</td><td><span class="chip state-{{ x.traced.css }}">{{ x.traced.text }}</span>{% if x.traced.note %}<br><span class="small muted">{{ x.traced.note }}</span>{% endif %}</td></tr>{% endfor %}
-</tbody></table></div>
-{% if sw.real_budget_flags %}<p class="small muted">The real slot's call budget would have applied: {{ sw.real_budget_flags | join(", ") }}.</p>{% endif %}
-{% else %}<p class="muted small">Not a trace-all run: only the real pipeline is recorded.</p>{% endif %}
-{% endcall %}
-{% endif %}
-
-{% call m.section("d-core", 10 if sw else 2, "Core council", "macro") %}
-{% set co = d.core %}
-<p>Basis <strong>{{ co.basis }}</strong>; {{ co.moved }} line(s) re-weighted{% if co.macro %}; macro regime <strong>{{ co.macro }}</strong>{% endif %}; {{ co.cards }} analyst card(s); {{ co.valid }} valid manager attempt(s).{% if co.hold %} Held: {{ co.hold | join(", ") }}.{% endif %}</p>
-{% if co.moves %}
-{{ m.wrap_open("Core weights") }}
-<table class="wide"><thead><tr><th>Line</th><th class="n">Before</th><th class="n">After the risk engine</th></tr></thead><tbody>
-{% for mv in co.moves %}<tr{% if mv.moved %} class="paper-diff"{% endif %}><td>{{ mv.line | ticker }}</td><td class="n">{{ mv.before }}</td><td class="n">{{ mv.after }}</td></tr>{% endfor %}
-</tbody></table></div>
-{% endif %}
-{% if co.bull or co.bear %}<div class="paper-cols">
-  <div class="paper-case accent-bull"><p><span class="dot accent-bull" aria-hidden="true"></span><strong>Bull</strong></p><p class="text small">{{ co.bull or "—" }}</p></div>
-  <div class="paper-case accent-bear"><p><span class="dot accent-bear" aria-hidden="true"></span><strong>Bear</strong></p><p class="text small">{{ co.bear or "—" }}</p></div>
-</div>{% endif %}
-{% if co.reps %}<ul class="small">{% for r in co.reps %}<li><span class="dot accent-pm" aria-hidden="true"></span>Manager attempt #{{ r.n + 1 }}: {{ "valid" if r.valid else "invalid" }} · sided with {{ r.sided }}{% if r.fact %} · decisive fact: {{ r.fact }}{% endif %}{% for dv in r.devs %}<br>{{ dv }}{% endfor %}{% if r.why %}<br>{{ r.why }}{% endif %}</li>{% endfor %}</ul>{% endif %}
-<p class="small"><a href="../../journal/paper/cycles/{{ doc.cycle_id[0:4] }}/{{ doc.cycle_id[5:7] }}/{{ doc.cycle_id }}.json">The sealed record (JSON)</a> · <a href="../index.html">every decision</a></p>
-{% endcall %}
 {% endblock %}

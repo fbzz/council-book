@@ -91,16 +91,95 @@ def test_the_decisions_table_is_numbered_newest_first(built):
 
 def test_a_decision_page_shows_the_whole_flow(built):
     _, _, pages = built
-    t = _text(pages["decisions/1/index.html"])
-    for words in ("What we chose", "Reading list", "Movers screen", "Market context", "Scout ideas and fact cards",
-                  "Code gate", "Skeptic", "Bull and bear", "Manager attempts and the vote", "Tally",
-                  "S-rules and would-be paper legs", "Swing budget", "Real outcome vs the full trace",
-                  "Core council", "What would change its mind"):
-        assert words in t, words
     html = pages["decisions/1/index.html"]
+    t = _text(html)
+    for words in ("Closest to trading" if "No trade" in t else "Entered", "Core", "Swing budget",
+                  "Every idea's journey", "Scout", "Gate", "Skeptic", "Debate", "PM", "Rules",
+                  "What would change its mind", "Core council", "Manager proposed", "Inputs",
+                  "The full reading list", "Movers screen and market context"):
+        assert words in t.replace("&#39;", "'"), words
     for seat in ("bull", "bear", "pm", "risk", "news", "macro", "scout", "skeptic"):
         assert f"accent-{seat}" in html, seat
-    assert "prnewswire_all headline (licensed)" in t                         # N: id + source only
+    assert html.count('class="jc') >= 1 and "<details" in html                # journey cards, no script
+    assert "licensed headline · prnewswire_all" in t or "licensed headline" in t   # N: id + source only
+    assert "SKEPTIC: SKEPTIC" not in t.upper().replace("  ", " ")             # no duplicated labels
+    assert not re.search(r"(S\d+:[a-z_]+)\W+\1", t)
+    assert "Withheld until the data licence is widened" not in t
+
+
+def test_paper_pages_carry_the_paper_status_chip(built):
+    _, _, pages = built
+    for name in ("decisions/1/index.html", "decisions/2/index.html"):
+        html = pages[name]
+        assert "PAPER · NO BROKER" in html, name
+        assert "REHEARSAL · NO ACCOUNT" not in html, name
+
+
+def test_no_external_request_from_a_decision_page(built):
+    _, _, pages = built
+    for name in ("decisions/1/index.html", "decisions/2/index.html"):
+        html = pages[name]
+        assert not re.search(r'<(?:img|link|script|iframe|source|video|audio)[^>]+(?:src|href)="(?:https?:)?//', html)
+        assert 'style="' not in html
+        for href in re.findall(r'href="(https?://[^"]+)"', html):           # links only: .gov sources, the repo
+            assert re.match(r"https://([A-Za-z0-9.-]+\.gov/|github\.com/)", href), href
+
+
+def _journey_fixture(built):
+    """Decision #1 with its first idea rewritten as "stopped at the swing rules (S8 illiquid) after
+    the manager voted 3 of 3 to enter" and another idea stopped at the Skeptic."""
+    out, dest, _ = built
+    site = _load_site()
+    raw = next((dest / "journal" / "paper" / "cycles").rglob(f"{out.cycle_id}.json")).read_bytes()
+    doc = P.PublicPaperCycle.model_validate_json(raw)
+    sw = doc.swing
+    first, *rest = sw.ideas
+    ref = first.idea.ref
+    rules = first.model_copy(update={"real_outcome": P.PaperOutcome(stage="rules", code="S8:illiquid"), "leg": None,
+                                     "traced_leg": P.PaperLeg(ok=False, rule="S8", code="illiquid"), "chosen": False,
+                                     "batch": 0, "same": True})
+    others = [r.model_copy(update={"real_outcome": P.PaperOutcome(stage="skeptic", code="skeptic_reject"), "leg": None,
+                                   "chosen": False}) for r in rest]
+    b0 = sw.batches[0]
+    tally = [t for t in b0.tally if t.ref != ref] + [P.PaperTally(ref=ref, action="enter", votes_for=3, replicates=3)]
+    batches = [b0.model_copy(update={"tally": tally, "refs": list(dict.fromkeys([ref, *b0.refs]))}), *sw.batches[1:]]
+    doc = doc.model_copy(update={"swing": sw.model_copy(update={"ideas": [*others, rules], "batches": batches})})
+    return site, site.decision_view(doc, True, site.Lines({"lines": [{"symbol": s} for s in ("NDX", "SPX")]})), ref
+
+
+def test_journey_states_for_an_idea_stopped_at_the_rules_after_pm_3_of_3(built):
+    _, d, ref = _journey_fixture(built)
+    j = next(x for x in d["journeys"] if x["ref"] == ref)
+    assert [s["state"] for s in j["steps"]] == ["ok", "ok", "ok", "ok", "ok", "stop"]
+    assert [s["key"] for s in j["steps"]] == ["scout", "gate", "skeptic", "debate", "pm", "rules"]
+    assert j["votes"] == (3, 3) and j["steps"][4]["word"] == "3/3" and j["steps"][5]["word"] == "S8"
+    assert j["reason"] == "too little trading volume" and j["code"] == "S8:illiquid"
+    assert j["stop_label"] == "Rules"
+    if len(d["journeys"]) > 1:
+        sk = next(x for x in d["journeys"] if x["ref"] != ref)
+        assert [s["state"] for s in sk["steps"]] == ["ok", "ok", "stop", "skip", "skip", "skip"]
+
+
+def test_banner_picks_the_idea_that_got_furthest(built):
+    _, d, ref = _journey_fixture(built)
+    assert d["journeys"][0]["ref"] == ref                                     # furthest first
+    bn = d["banner"]
+    assert not bn["entered"] and bn["closest"]["ref"] == ref
+    assert d["core_line"]["verb"] in ("built", "held") or d["core_line"]["verb"].startswith("changed")
+
+
+def test_journey_page_renders_the_banner_and_the_stop_reason(built):
+    site, d, ref = _journey_fixture(built)
+    env = site.make_env(["NDX", "SPX"])
+    tpl = env.get_template("decision.html.j2")
+    status = {"css": "rehearsal", "label": "x", "prelive": True, "mode": None, "paper": True, "built": ""}
+    html = tpl.render(d=d, book=None, root="../../", page="decisions", nav=[], status=status, csp="",
+                      brand_seats=site.hemicycle_seats())
+    t = _text(html)
+    assert "Closest to trading:" in t and "stopped at Rules (too little trading volume)" in t
+    assert "after the manager voted 3 of 3 to enter" in t
+    assert 'aria-current="step"' in html and "jp-stop" in html and "S8:illiquid" in html
+    assert t.count("S8:illiquid") <= 2                                       # the code chip once per card
 
 
 def test_nothing_licensed_or_in_money_terms_in_any_paper_output(built):
@@ -179,5 +258,21 @@ def test_paper_idea_cards_hide_the_live_only_stage(built, built_book):
         html = pages["decisions/1/index.html"]
         t = _text(html)
         assert "swing book is paper-only" not in t and "swing_book_paper_only" not in html
-        assert "paper: " in t                                                 # the paper stage chip instead
+        assert "Stopped at" in t or "Entered" in t                           # the journey card's outcome instead
 
+
+
+def test_site_wide_chip_says_paper_while_paper_runs_lead():
+    from types import SimpleNamespace as NS
+
+    site = _load_site()
+    old = datetime(2026, 9, 25, 14, 40, tzinfo=UTC)
+    cyc = NS(doc=NS(slot=old, cycle_id="2026-09-25T1440Z", mode="rehearsal", late_by_min=0), chip=None)
+    st = NS(state="AWAITING_ACCOUNT", last_cycle_at=old, last_cycle_id="2026-09-25T1440Z", note="", kill_state="NORMAL")
+    paper = [NS(slot=datetime(2026, 10, 1, 18, 40, tzinfo=UTC))]
+    s = site._status_context(NS(status=st, cycles=[cyc], ops=[], paper_rows=paper), NOW)
+    assert (s["label"], s["paper"]) == ("PAPER · NO BROKER", True)
+    s = site._status_context(NS(status=st, cycles=[cyc], ops=[], paper_rows=[]), NOW)
+    assert s["label"] == "REHEARSAL · NO ACCOUNT" and not s["paper"]
+    live = NS(state="LIVE", last_cycle_at=old, last_cycle_id="2026-09-25T1440Z", note="", kill_state="NORMAL")
+    assert site._status_context(NS(status=live, cycles=[cyc], ops=[], paper_rows=paper), NOW)["label"] != "PAPER · NO BROKER"

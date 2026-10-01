@@ -1,9 +1,9 @@
 {
   "algo": "sha256(salt||canonical_json)",
   "code_commit": "",
-  "commitment_sha256": "92d2034996822646793d7aec4ecc56efda0e2e8ce8538eaaba80daf872d1c619",
+  "commitment_sha256": "7469e1cb3bc2559fb36ed4dc2d041e4a41101f691f2b025b4a46c10a5d882414",
   "cycle_id": "2026-10-01T1840Z",
-  "salt": "377faf81b5109d6744ed6ef4c162d8e7a0348a29dfb01cf73682abd937c4749e",
+  "salt": "8d3ab4e8573674d4b3cc43198f4f332530d007df2c9a9aeae0961986421c2df3",
   "schema_id": "council-book/paper-reveal/v1",
-  "sealed_at": "2026-10-01T18:40:00Z"
+  "sealed_at": "2026-10-01T21:09:47.907892Z"
 }

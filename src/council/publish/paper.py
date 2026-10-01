@@ -111,9 +111,44 @@ class PaperReading(PublicModel):
     tickers: list[Line] = Field(default_factory=list, max_length=12)
 
 
+MoveBucket = Literal["down_3s", "down_2s", "down", "flat", "up", "up_2s", "up_3s"]
+
+
+def move_bucket(sigma: Any) -> str | None:
+    """A 1-day move in sigma as a public bucket (Alpaca-derived: the number itself is not published):
+    |s| < 0.5 flat, < 2 down/up, < 3 down_2s/up_2s, else down_3s/up_3s."""
+    s = _num(sigma, -100, 100)
+    if s is None:
+        return None
+    a, d = abs(s), "down" if s < 0 else "up"
+    return "flat" if a < 0.5 else d if a < 2 else f"{d}_2s" if a < 3 else f"{d}_3s"
+
+
+_CTX_MOVE = re.compile(r"moved [+-]?[\d.]+% \(([+-]?[\d.]+) sigma of 20 sessions\)")
+_MOVE_WORDS = {"down_3s": "fell sharply (3σ or more)", "down_2s": "fell (2–3σ)", "down": "fell (under 2σ)",
+               "flat": "was flat (under 0.5σ)", "up": "rose (under 2σ)", "up_2s": "rose (2–3σ)",
+               "up_3s": "rose sharply (3σ or more)"}
+
+
+def context_words(text: str) -> str | None:
+    """A market-context line with its Alpaca-derived % and sigma replaced by a bucket in words; None
+    when the line has any other number pattern (it is then left out, never published raw)."""
+    m = _CTX_MOVE.search(text)
+    if m is None:
+        return None
+    b = move_bucket(float(m.group(1)))
+    return text[:m.start()] + _MOVE_WORDS[b] + text[m.end():] if b else None
+
+
 class PaperScreenRow(PublicModel):
+    """One movers-screen row. The screen is built from Alpaca bars, so its move is published as a
+    bucket (`move`) only; `move_pct` / `move_sigma` stay empty (kept for older files)."""
+
+    OMIT_WHEN_DEFAULT = frozenset({"move"})
+
     id: SwingEvidenceId
     ticker: Line | None = None
+    move: MoveBucket | None = None
     move_pct: Pct | None = None
     move_sigma: Annotated[float, Field(ge=-100.0, le=100.0, allow_inf_nan=False)] | None = None
     volume: Literal["<1", "1-2", "2-4", ">4"] | None = None
@@ -433,10 +468,12 @@ def why_line(idea: PublicSwingIdea, real: PaperOutcome, leg: PaperLeg | None, pm
     return f"{words}{f' ({real.code})' if real.code and real.code != 'enter' else ''}"[:240]
 
 
-def _texter(licensed: Sequence[str], blocked: bool = False) -> Any:
+def _texter(licensed: Sequence[str], blocked: bool = False, market: bool = True) -> Any:
+    """Model-text cleaner: the licensed-overlap check, then (`market`) the market-figure scrub
+    (`redact.scrub_market_numbers`: licensed price / volume figures quoted by a model)."""
     from council.publish.redact import _SwingText
 
-    return _SwingText(leakscan.LicensedMatcher(list(licensed)), blocked=blocked)
+    return _SwingText(leakscan.LicensedMatcher(list(licensed)), blocked=blocked, market=market)
 
 
 def _ids(raw: Iterable[Any]) -> list[str]:
@@ -471,10 +508,11 @@ def _inputs(inp: Mapping[str, Any], text: Any) -> PaperInputs:
             continue
         sector = text(r.get("sector"), 40) if r.get("sector") else None
         screen.append(PaperScreenRow(id=sid, ticker=swing_line(str(r.get("line_id") or "")),
-                                     move_pct=_num(r.get("move_pct")), move_sigma=_num(r.get("move_sigma"), -100, 100),
+                                     move=move_bucket(r.get("move_sigma")),
                                      volume=_bucket(r.get("vol_ratio")), sector=sector or None))
-    context = [PaperContext(id=str(c["id"]), text=text(c.get("text"), 160))
-               for c in inp.get("context") or [] if _CTX_ID.match(str(c.get("id") or ""))]
+    context = [PaperContext(id=str(c["id"]), text=text(w, 160))
+               for c in inp.get("context") or [] if _CTX_ID.match(str(c.get("id") or ""))
+               for w in [context_words(str(c.get("text") or ""))] if w]
     trades = []
     for t in inp.get("open_trades") or []:
         line = swing_line(str(t.get("ticker") or ""))
@@ -546,12 +584,15 @@ def paper_swing(record: Mapping[str, Any], *, cycle_id: str, licensed_texts: Seq
     from council.swing.council import model_family
 
     tr = record.get("trace") if isinstance(record.get("trace"), Mapping) else None
-    texts = [*licensed_texts, *(own_texts or [])]
+    # only licensed item texts guard model text: the `N:` lines of a captured prompt section, never
+    # its public `P:` titles, code facts or the agents' own wording (`leakscan.licensed_lines`)
+    own_lines = feed_lines(own_texts) if own_texts is not None else None
+    texts = [*licensed_texts, *(own_lines or [])]
     text = _texter(texts, blocked=own_texts is None)
     ideas_rec = [r for r in record.get("ideas") or [] if _IDEA.match(str(r.get("ref") or ""))]
     public_ideas: dict[str, PublicSwingIdea] = {}
     flags: list[str] = []
-    origins = {cycle_id: list(own_texts) if own_texts is not None else None}
+    origins = {cycle_id: own_lines}
     for k in range(0, len(ideas_rec), 5):                 # the live section holds <= 5 ideas
         sec = public_swing_section({**record, "ideas": ideas_rec[k:k + 5], "bull": None, "bear": None},
                                    cycle_id=cycle_id, licensed_texts=licensed_texts, origin_texts=origins)
@@ -598,7 +639,7 @@ def paper_swing(record: Mapping[str, Any], *, cycle_id: str, licensed_texts: Seq
     return PaperSwing(
         trace_all=tr is not None, skeptic_model_family=family,
         # code-written inputs (screen, context, labels) are checked against the feed items' own lines
-        inputs=_inputs((tr or {}).get("inputs") or {}, _texter([*licensed_texts, *feed_lines(own_texts or [])])),
+        inputs=_inputs((tr or {}).get("inputs") or {}, _texter(texts, market=False)),
         ideas=ideas[:40],
         scout_passed=[x for x in (swing_line(str(s)) for s in (tr or {}).get("scout_passed") or []) if x][:40],
         batches=batches, budget=budget,
@@ -793,22 +834,9 @@ def scan_files(files: Mapping[str, bytes], *, licensed_texts: Sequence[str] = ()
         raise PaperPublishError("paper record failed the leak scan: " + "; ".join(str(f) for f in findings[:10]))
 
 
-_ID_LINE = re.compile(r"^\s*-\s*[A-Z]:[0-9A-Za-z_.:@#+-]+:")
-_N_LINE = re.compile(r"^\s*-\s*N:[0-9a-f]{8}:")
-
-
 def feed_lines(texts: Iterable[str]) -> list[str]:
-    """The licensed part of captured segments for the final scan: a segment that lists evidence
-    lines (`- N:...: ...`, `- P:...: ...`) keeps its `N:` lines only (a public `P:` / `S:` title next to
-    a feed item is not licensed); any other text is kept whole."""
-    out: list[str] = []
-    for t in texts:
-        lines = str(t).splitlines()
-        if any(_ID_LINE.match(x) for x in lines):
-            out += [x for x in lines if _N_LINE.match(x)]
-        else:
-            out.append(str(t))
-    return out
+    """`leakscan.licensed_lines`: the `N:` lines of a captured prompt section, other texts whole."""
+    return leakscan.licensed_lines(texts)
 
 
 def write(root: Path, files: Mapping[str, bytes]) -> list[Path]:
@@ -848,7 +876,54 @@ def publish_paper(rec: Any, pack: Any, *, state_dir: Path, root: Path, lines: An
     return doc.decision_no, write(root, files)
 
 
+
+def republish_paper(cycle_id: str, *, record: Mapping[str, Any] | None, state_dir: Path, root: Path,
+                    paper_rows: Sequence[Mapping[str, Any]] = (), canaries: Sequence[str | float] = (),
+                    code_commit: str = "", now: datetime | None = None) -> tuple[int, list[Path]]:
+    """`council paper republish <cycle>`: re-derive an EXISTING paper decision's public files after a
+    public-schema or redaction change. The core part is the published one (already public; the fact
+    pack is not kept); the swing part is rebuilt from the paper ledger's private swing record and the
+    cycle's capture (`origin_texts`, `N:` lines only), then re-sealed, revealed, leak-scanned (the
+    capture's licensed lines + canaries) and written with the SAME decision number. latest.json and
+    books/<n>.json are rewritten only for the newest decision (the paper book is the current one).
+    `record`: the paper ledger's cycle record (`Ledger.get_cycle`), `paper_rows` its paper trades;
+    the caller reads them (the public-record package never opens the ledger).
+    Raises (nothing written) on any failure."""
+    from council.models.cycle import CycleRecord
+    from council.paperbook import paper_book_public
+    from council.swing.record import origin_texts
+
+    root, state_dir = Path(root), Path(state_dir)
+    rows = read_rows(root)
+    row = next((r for r in rows if r.get("cycle_id") == cycle_id), None)
+    if row is None:
+        raise PaperPublishError(f"{cycle_id}: not a published paper decision")
+    path = root / cycle_file(cycle_id)
+    old = PublicPaperCycle.model_validate_json(path.read_bytes())
+    if record is None:
+        raise PaperPublishError(f"{cycle_id}: not in the paper ledger")
+    rec = CycleRecord.model_validate(record)
+    own = origin_texts(state_dir, [cycle_id]).get(cycle_id)
+    swing = (rec.extras or {}).get("swing")
+    part = None
+    if isinstance(swing, Mapping) and swing.get("ideas") is not None:
+        part = paper_swing(swing, cycle_id=cycle_id, licensed_texts=[], own_texts=own)
+    doc = old.model_copy(update={"swing": part})
+    newest = max(int(r.get("decision_no") or 0) for r in rows) == int(row["decision_no"])
+    try:
+        book = paper_book_public(state_dir) if newest else None
+    except Exception:  # noqa: BLE001 - no readable paper book: latest.json carries none
+        book = None
+    files, out = paper_files(lambda no: doc, root, cycle_id, paper_rows=paper_rows,
+                             sealed_at=now or datetime.now(UTC), code_commit=code_commit, book=book)
+    if out.decision_no != int(row["decision_no"]):
+        raise PaperPublishError("a republish must keep the decision number")
+    if not newest:
+        files = {k: v for k, v in files.items() if k != LATEST_PATH and not k.startswith(BOOKS_DIR + "/")}
+    scan_files(files, licensed_texts=feed_lines(own or []), canaries=canaries)
+    return out.decision_no, write(root, files)
+
 __all__ = ["BOOKS_DIR", "DECISIONS_PATH", "LATEST_PATH", "PAPER_DIR", "PaperPublishError", "PublicPaperBookAfter",
            "book_file", "PublicPaperCycle",
            "PublicPaperDecisionRow", "PublicPaperLatest", "build_paper_cycle", "decisions_bytes", "number_for",
-           "paper_files", "paper_latest", "paper_swing", "publish_paper", "read_rows", "scan_files"]
+           "paper_files", "paper_latest", "paper_swing", "publish_paper", "read_rows", "republish_paper", "scan_files"]

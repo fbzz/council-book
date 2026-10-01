@@ -306,6 +306,42 @@ def paper_report(
     typer.echo(str(path))
 
 
+@paper_app.command("republish")
+def paper_republish(
+    cycle_ids: list[str] = typer.Argument(..., help="Published paper cycle ids, oldest first."),
+    state_dir: Path = typer.Option(None, "--state-dir", help="The paper state dir (default <state>/paper); "
+                                                            "any other directory is refused."),
+    publish_dir: Path = typer.Option(None, "--publish-dir", help="The repo holding journal/paper (default: "
+                                                                "the repo the code runs from)."),
+) -> None:
+    """Re-derive existing paper decisions' public files (`journal/paper/...`) from the paper ledger and
+    the cycle capture after a public-schema or redaction change: same decision numbers, re-sealed,
+    leak-scanned, nothing committed or pushed. No model call, no network."""
+    from council import paths
+    from council.paperbook import PaperBook
+    from council.publish.leakscan import env_canaries
+    from council.publish.paper import PaperPublishError, republish_paper
+
+    root = Path(state_dir) if state_dir is not None else paths.state_dir() / PAPER_STATE
+    if root.name != PAPER_STATE:
+        _refuse(f"--state-dir must be the paper state dir (a directory named {PAPER_STATE!r})")
+    canaries: list[str | float] = [*env_canaries()]
+    book = PaperBook.load(root)
+    if book is not None:   # the paper NAV figures never appear in a public byte
+        canaries += [round(v, 2) for v in (book.start_nav, book.equity(), book.peak_nav) if v >= 10_000.0]
+    from council.ledger.db import Ledger
+
+    ledger = Ledger(root / "ledger.sqlite3")
+    for cid in cycle_ids:
+        try:
+            no, written = republish_paper(cid, record=ledger.get_cycle(cid), state_dir=root,
+                                          root=Path(publish_dir) if publish_dir else paths.REPO_ROOT,
+                                          paper_rows=ledger.paper_trades(), canaries=canaries)
+        except (PaperPublishError, FileNotFoundError, ValueError) as exc:
+            _refuse(f"paper republish {cid}: {exc}")
+        typer.echo(f"#{no} {cid}: {len(written)} file(s) written")
+
+
 @paper_app.command("status")
 def paper_status(
     state_dir: Path = typer.Option(None, "--state-dir", help="The paper state dir (default <state>/paper); "

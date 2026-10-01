@@ -204,6 +204,27 @@ class LicensedMatcher:
         return any(f" {t} " in padded for t in self.titles)
 
 
+_ID_LINE = re.compile(r"^\s*-\s*[A-Z]:[0-9A-Za-z_.:@#+-]+:")
+_N_LINE = re.compile(r"^\s*-\s*N:[0-9a-f]{8}:")
+
+
+def licensed_lines(texts: Iterable[str]) -> list[str]:
+    """The licensed part of captured texts. A captured swing prompt is held as ONE licensed item
+    (the whole section: public `P:` titles, code-written `X:` / `F:` facts, the Scout's own claim and
+    the `N:` headlines). Only its `N:` lines are licensed news, so a segment that lists evidence lines
+    (`- N:...: ...`, `- P:...: ...`) keeps its `N:` lines only; any other text (a feed headline or
+    body held on its own) is kept whole. Used by the overlap check that withholds agent text and by
+    the final leak scan, so public titles, code facts and model wording never cause withholding."""
+    out: list[str] = []
+    for t in texts:
+        lines = str(t).splitlines()
+        if any(_ID_LINE.match(x) for x in lines):
+            out += [x for x in lines if _N_LINE.match(x)]
+        else:
+            out.append(str(t))
+    return out
+
+
 class OriginTextsUnavailable(LookupError):
     """An origin cycle's licensed texts cannot be read (purged or never captured): fail closed."""
 
