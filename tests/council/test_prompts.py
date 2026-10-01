@@ -20,7 +20,7 @@ SWING_ROLES = ["scout", "skeptic", "swing_bear", "swing_bull", "swing_pm"]   # t
 def test_registry_lists_roles_and_ids(reg):
     assert reg.roles() == sorted(ROLES + SWING_ROLES)
     assert reg.names() == ["_desk_brief", "_swing_brief", *sorted(ROLES + SWING_ROLES)]
-    bumped = {"scout": 2, "skeptic": 3}              # 2026-09-28 paper-run fixes; skeptic v3 2026-10-01
+    bumped = {"scout": 2, "skeptic": 3, "news": 2, "macro": 2}   # news / macro v2: 2026-10-01
     for role in ROLES + SWING_ROLES:
         assert reg.prompt_id(role) == f"council-{role}/v{bumped.get(role, 1)}"
     assert reg.manifest()["_desk_brief"]["id"] == "council-desk_brief/v1"

@@ -7,7 +7,9 @@
   + the per-ticker RSS feed for the open trades, carried ideas and movers-screen names (`rss_tickers`,
   once per slot; ranked by `council.data.rss_news.rank_rss`; licensed text) + SEC's market-wide 8-K / 6-K
   (`swing.intake.sec_market_wide`), with public-domain filing text for a bounded number of filings
-  per slot (`swing.sec_text`, cached; movers and screen-universe filers ranked first); the MARKET
+  per slot (`swing.sec_text`, cached; movers and screen-universe filers ranked first). At the FIRST
+  swing slot of a session the reading list puts items available since the previous US close
+  (after-hours + pre-market) ahead of same-session items (`overnight_first`); the MARKET
   CONTEXT rows (the screen's ETF moves, the policy calendar's FOMC dates; the cycle adds its loaded
   CPI / NFP / PCE events); the after-close movers screen (`swing.screen`, Alpaca SIP daily
   bars, built by `prepare` once per session after 20:30 New York and cached); the code gate =
@@ -46,7 +48,7 @@ SOURCE_ERROR = "swing_source_error"
 UNVERIFIED_LABEL = "paper_unverified"
 CARD_HISTORY_DAYS = 600                 # calendar days of daily bars for a fact card (>= 400 sessions)
 UNIVERSE_TTL = timedelta(days=7)
-UNIVERSE_SECTOR_BUDGET_S = 120.0
+UNIVERSE_SECTOR_BUDGET_S = 240.0         # ~1,500 names (SEC fair access: <= 10/s)
 RECENT_DAYS = 7                         # ~5 sessions of recent ideas / rejections for the Scout
 SEC_TEXT_MAX_FETCHES = 15               # uncached filings read per slot (<= 3 EDGAR requests each)
 EVENT_HORIZON = timedelta(days=45)      # scheduled macro events shown as market context
@@ -95,6 +97,31 @@ def _dot(line_id: str) -> str:
 
 
 # ------------------------------------------------------------------------------------ real
+def is_first_swing_slot(slot: datetime, slots: Any) -> bool:
+    """True when `slot` is the earliest swing slot that passes the gate on its UTC day."""
+    from datetime import time as dtime
+
+    from council.swing.slots import season_of, swing_slot
+
+    utc = slot.astimezone(UTC)
+    allowed = slots.summer_utc if season_of(utc) == "summer" else slots.winter_utc
+    for hhmm in sorted(allowed):
+        hh, mm = (int(x) for x in hhmm.split(":"))
+        ts = datetime.combine(utc.date(), dtime(hh, mm), tzinfo=UTC)
+        if swing_slot(ts, slots).ok:
+            return ts == utc.replace(second=0, microsecond=0)
+    return False
+
+
+def overnight_first(items: Sequence[Any], window: tuple[datetime, datetime] | None) -> list[Any]:
+    """Items available in the overnight window (previous US close -> open) first, the rest after;
+    the order inside each group is kept. Unchanged without a window."""
+    if window is None:
+        return list(items)
+    lo, hi = window
+    return sorted(items, key=lambda i: 0 if lo <= i.available_at < hi else 1)
+
+
 def real_swing_sources(
     policy: Any,
     *,
@@ -239,7 +266,8 @@ class _RealState:
         return flags
 
     def screen_universe(self, now: datetime) -> list[Any]:
-        """S&P 500 + Nasdaq-100 + the AI list with FF12 sectors (SEC SIC), cached UNIVERSE_TTL in
+        """S&P 500 + Nasdaq-100 + S&P MidCap 400 + S&P SmallCap 600 (~1,500 liquid US names,
+        `stocks.universe.SWING_INDEXES`) + the AI list with FF12 sectors (SEC SIC), cached UNIVERSE_TTL in
         `state_dir/swing/universe.json`. Sector lookups are time-bounded; the rest stay None."""
         from council.stocks import universe as U
         from council.swing.screen import build_universe
@@ -247,12 +275,13 @@ class _RealState:
         path = self.state_dir / "swing" / "universe.json"
         try:
             cached = json.loads(path.read_text())
-            if now - datetime.fromisoformat(cached["asof"]) < UNIVERSE_TTL:
+            if (now - datetime.fromisoformat(cached["asof"]) < UNIVERSE_TTL
+                    and cached.get("indexes") == list(U.SWING_INDEXES)):     # a narrower cache is rebuilt
                 return build_universe(cached["tickers"], cached.get("sectors") or {})
         except (OSError, ValueError, KeyError, TypeError):
             pass
         tickers: list[str] = []
-        for index in U.INDEXES:
+        for index in U.SWING_INDEXES:
             try:
                 tickers += list(U.fetch_membership(index, cache_root=self.state_dir / "cache").symbols)
             except Exception as exc:  # noqa: BLE001
@@ -276,7 +305,8 @@ class _RealState:
             except Exception:  # noqa: BLE001 - an unknown sector is None
                 sectors[lid] = None
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"asof": now.isoformat(), "tickers": tickers, "sectors": sectors}) + "\n")
+        path.write_text(json.dumps({"asof": now.isoformat(), "indexes": list(U.SWING_INDEXES), "tickers": tickers,
+                                    "sectors": sectors}) + "\n")
         return build_universe(tickers, sectors)
 
     # ---- inputs
@@ -387,8 +417,9 @@ class _RealState:
         universe = self.screened()
         prefer = self.preferred(scr, universe)
         wide, self._filings = self.sec_items(now, slot=slot, enrich=True, prefer=prefer)
-        rss = self.rss_items(rss, slot=slot, now=now, open_trades=open_trades, prefer=prefer)
-        reading = reading_list(sec + wide, feed, gov, slot=slot, rss=rss)
+        overnight = self.overnight(slot)
+        rss = self.rss_items(rss, slot=slot, now=now, open_trades=open_trades, prefer=prefer, overnight=overnight)
+        reading = overnight_first(reading_list(sec + wide, feed, gov, slot=slot, rss=rss), overnight)
         self._reading = {i.id: i for i in reading}
         try:
             context = self.context_rows(scr, session, slot)
@@ -415,8 +446,18 @@ class _RealState:
         names += [lid for lid, tier in prefer.items() if tier == 0]
         return list(dict.fromkeys(n for n in (try_normalise_id(x) for x in names) if n))
 
+    def overnight(self, slot: datetime) -> tuple[datetime, datetime] | None:
+        """(previous US close, today's open) at the FIRST swing slot of a session, else None: the
+        Scout then reads after-hours and pre-market items first (user decision 2026-10-01)."""
+        sp = getattr(self.policy, "swing", None)
+        if sp is None or not is_first_swing_slot(slot, sp.slots):
+            return None
+        from council.data import rss_news
+
+        return rss_news.overnight_window(slot)
+
     def rss_items(self, market: Sequence[Any], *, slot: datetime, now: datetime, open_trades: Sequence[Any],
-                  prefer: Mapping[str, int]) -> list[Any]:
+                  prefer: Mapping[str, int], overnight: tuple[datetime, datetime] | None = None) -> list[Any]:
         """The Scout's RSS selection: the shared fetch's market feeds + the per-ticker feed (fetched
         once per slot here), ranked and capped (`council.data.rss_news.rank_rss`)."""
         from council.data import rss_news
@@ -442,7 +483,7 @@ class _RealState:
             got_items, got_flags = self._rss_memo[key]
             items += got_items
             self.flags += got_flags
-        return rss_news.rank_rss(items, cfg, slot=slot, priority=names)
+        return rss_news.rank_rss(items, cfg, slot=slot, priority=names, overnight=overnight)
 
     def recent(self, slot: datetime) -> tuple[list[str], dict[str, datetime]]:
         """Code-written lines of the last RECENT_DAYS of paper-tracked ideas, and each ticker's

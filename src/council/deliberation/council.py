@@ -69,7 +69,7 @@ from council.deliberation.officers import event_cards, vol_cards
 from council.deliberation.pm import PMRun, run_pm
 from council.deliberation.roles import MacroRun, NewsRun, run_news
 from council.deliberation.segments import SCRUB_CROSSED_FLAG, Segmented, joined
-from council.llm.gateway import Gateway
+from council.llm.gateway import BILLING_ERROR, Gateway, is_billing_error
 from council.llm.prompts import PromptRegistry
 from council.models.cards import EvidenceCard, MacroAnalystOutput
 from council.models.common import Strict
@@ -215,9 +215,12 @@ async def run_council(
             result = await fn(attempt)
             stage_calls += result.calls
             down = bool(result.calls) and all(c.status in OUTAGE_STATUSES for c in result.calls)
+            billing = any(is_billing_error(c.error) for c in result.calls)
+            if billing and BILLING_ERROR not in flags:
+                flags.append(BILLING_ERROR)              # Ollama refused (401/402/403): no point waiting
             if not down:
                 return _Stage(result, stage_calls, False)
-            if attempt < retries:
+            if attempt < retries and not billing:
                 flags.append(f"outage:{stage}:retry{attempt + 1}")
                 await sleep(wait_s)
         flags.append(f"stage_unavailable:{stage}")

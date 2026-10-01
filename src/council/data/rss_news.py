@@ -11,10 +11,15 @@ label (docs/data-rights.md). Links are not kept (`NewsItem.link` is for public-d
 Rules (the gov_news pattern, `council.data.gov_news`, whose XML guard and cleaners are reused):
 - Fetch: each market feed ONCE per slot (the core and the Scout share the memoised news fetch);
   the per-ticker feed (Yahoo, `{TICKER}` in its URL) once per ticker, for at most
-  `yahoo_max_tickers` names (the Scout's open trades, carried ideas and movers-screen names). One
-  attempt per request, `timeout_s` (15 s) read timeout, requests run concurrently within a budget;
-  a browser-like user agent (the feeds refuse library agents). A feed that fails (or is still
-  running at the budget) is skipped and flagged `news_source_error:rss:<feed>`; nothing raises.
+  `yahoo_max_tickers` (10) names (the Scout's open trades, carried ideas, then top movers-screen
+  names). Market feeds run concurrently within a budget; a market feed gets ONE retry after
+  RETRY_DELAY_S on a transient answer (HTTP 404 / 5xx or a transport error: PR Newswire's edge
+  answered 404 now and then, 2026-09-30), never on 429. Per-ticker requests run one at a time,
+  one per TICKER_PACE_S (1.5 s), no retry; a 429 stops them and every later per-ticker request
+  that New York day (`<state>/rss_backoff.json`), flagged once: `news_source_backoff:rss:<feed>`.
+  `timeout_s` (15 s) read timeout; a browser-like user agent (the feeds refuse library agents).
+  A feed that fails (or is still running at the budget) is skipped and flagged
+  `news_source_error:rss:<feed>`; nothing raises.
   Requests go only to the policy's feed hosts (a request hook refuses any other, redirects too).
 - XML: `gov_news.parse_xml` (no DOCTYPE / ENTITY declaration, 2 MB cap: no XXE, no entity bomb),
   RSS 2.0, RSS 1.0 and Atom (`gov_news.parse_feed`).
@@ -34,11 +39,15 @@ Rules (the gov_news pattern, `council.data.gov_news`, whose XML guard and cleane
   titles (their tickers are joined).
 - Ranking (`rank_rss`, the Scout): items on a priority name (movers screen, open trade, carried
   idea) first, then press releases / earnings / per-ticker items, then market headlines; newest
-  first inside a tier; at most `scout_per_feed` per feed and `scout_max` in all.
+  first inside a tier; at most `scout_per_feed` per feed and `scout_max` in all. At the first
+  swing slot of a session (`overnight=` the window from `overnight_window`), items available
+  since the previous US close and before the open (after-hours + pre-market) rank ahead of
+  everything else (user decision 2026-10-01: overnight news first).
 """
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -76,6 +85,10 @@ DEFAULT_TIMEOUT_S = 15.0
 CONNECT_TIMEOUT_S = 5.0
 MARKET_BUDGET_S = 25.0
 TICKER_BUDGET_S = 45.0
+TICKER_PACE_S = 1.5
+RETRY_DELAY_S = 2.0
+TRANSIENT_HTTP = frozenset({404, 500, 502, 503, 504})
+BACKOFF_FILE = "rss_backoff.json"
 MAX_WORKERS = 6
 KINDS = ("press", "earnings", "market", "ticker")
 TICKER_SLOT = "{TICKER}"
@@ -111,7 +124,7 @@ class RssConfig:
     timeout_s: float = DEFAULT_TIMEOUT_S
     scout_max: int = 40
     scout_per_feed: int = 8
-    yahoo_max_tickers: int = 30
+    yahoo_max_tickers: int = 10
 
     @property
     def hosts(self) -> frozenset[str]:
@@ -150,7 +163,7 @@ def rss_config(policy: Any) -> RssConfig | None:
         raise ValueError("news.rss feed labels must be unique")
     return RssConfig(feeds=tuple(feeds), timeout_s=float(raw.get("timeout_s", DEFAULT_TIMEOUT_S)),
                      scout_max=int(raw.get("scout_max", 40)), scout_per_feed=int(raw.get("scout_per_feed", 8)),
-                     yahoo_max_tickers=int(raw.get("yahoo_max_tickers", 30)))
+                     yahoo_max_tickers=int(raw.get("yahoo_max_tickers", 10)))
 
 
 # ------------------------------------------------------------------------------------ parse
@@ -290,12 +303,35 @@ def dedupe(items: Iterable[NewsItem]) -> list[NewsItem]:
     return out
 
 
+def overnight_window(slot: datetime) -> tuple[datetime, datetime] | None:
+    """(previous US close, this session's open) for a slot inside a US session day at or after its
+    open; None on a closed day, before the open or outside the known calendar."""
+    from council.clock import NEW_YORK, session_hours
+
+    day = slot.astimezone(NEW_YORK).date()
+    try:
+        hours = session_hours("us", day)
+        if hours is None or slot < hours[0]:
+            return None
+        for back in range(1, 8):
+            prev = session_hours("us", day - timedelta(days=back))
+            if prev is not None:
+                return prev[1], hours[0]
+    except Exception:  # noqa: BLE001 - outside the calendar: no overnight ordering
+        return None
+    return None
+
+
+def in_window(item: NewsItem, window: tuple[datetime, datetime] | None) -> bool:
+    return window is not None and window[0] <= item.available_at < window[1]
+
+
 def rank_rss(items: Iterable[NewsItem], cfg: RssConfig, *, slot: datetime, priority: Iterable[str] = (),
              max_items: int | None = None, per_feed: int | None = None,
-             lookback: timedelta = LOOKBACK) -> list[NewsItem]:
-    """The Scout's RSS selection (module rules): admitted at `slot`, deduplicated, priority names
-    first, then press / earnings / per-ticker items, then market headlines; newest first in a tier;
-    per-feed and total caps."""
+             lookback: timedelta = LOOKBACK, overnight: tuple[datetime, datetime] | None = None) -> list[NewsItem]:
+    """The Scout's RSS selection (module rules): admitted at `slot`, deduplicated, overnight items
+    first when `overnight` is given, then priority names, then press / earnings / per-ticker items,
+    then market headlines; newest first in a tier; per-feed and total caps."""
     names = frozenset(priority)
     cap = cfg.scout_max if max_items is None else max_items
     each = cfg.scout_per_feed if per_feed is None else per_feed
@@ -307,7 +343,8 @@ def rank_rss(items: Iterable[NewsItem], cfg: RssConfig, *, slot: datetime, prior
             return 0
         return 1 if cfg.kind_of(item.feed) in ("press", "earnings", "ticker") else 2
 
-    ranked = sorted(dedupe(ok), key=lambda i: (tier(i), -i.available_at.timestamp(), i.id))
+    ranked = sorted(dedupe(ok), key=lambda i: (0 if in_window(i, overnight) else 1, tier(i),
+                                              -i.available_at.timestamp(), i.id))
     used: dict[str, int] = {}
     out: list[NewsItem] = []
     for item in ranked:
@@ -336,8 +373,14 @@ class _HostGuard:
             raise gov_news.HostRefused("request to a host outside the RSS allow-list refused")
 
 
-def http_getter(cfg: RssConfig, *, transport: httpx.BaseTransport | None = None) -> tuple[Getter, httpx.Client]:
-    """A getter over one client (browser user agent, host guard, one attempt, `timeout_s`)."""
+class RssRateLimited(gov_news.DataError):
+    """HTTP 429 from a feed host."""
+
+
+def http_getter(cfg: RssConfig, *, transport: httpx.BaseTransport | None = None, retry: bool = False,
+                sleep: Callable[[float], None] = time.sleep) -> tuple[Getter, httpx.Client]:
+    """A getter over one client (browser user agent, host guard, `timeout_s`): one attempt, or with
+    `retry` one more after RETRY_DELAY_S on HTTP 404 / 5xx or a transport error (never on 429)."""
     guard = _HostGuard(cfg.hosts)
     client = httpx.Client(transport=transport, timeout=httpx.Timeout(cfg.timeout_s, connect=CONNECT_TIMEOUT_S),
                           follow_redirects=True, max_redirects=3,
@@ -345,8 +388,24 @@ def http_getter(cfg: RssConfig, *, transport: httpx.BaseTransport | None = None)
                                    "Accept-Encoding": "gzip, deflate"},
                           event_hooks={"request": [guard.request]})
 
-    def get(url: str) -> bytes:
+    def once(url: str) -> httpx.Response:
         response = client.get(url)
+        if response.status_code == 429:
+            raise RssRateLimited("rss: HTTP 429")
+        return response
+
+    def get(url: str) -> bytes:
+        try:
+            response = once(url)
+            transient = response.status_code in TRANSIENT_HTTP
+        except httpx.TransportError:
+            if not retry:
+                raise
+            transient, response = True, None
+        if transient and retry:
+            sleep(RETRY_DELAY_S)
+            response = once(url)
+        assert response is not None
         if response.status_code >= 400:
             raise gov_news.DataError(f"rss: HTTP {response.status_code}")
         body = response.content
@@ -375,7 +434,7 @@ def fetch_jobs(cfg: RssConfig, jobs: Sequence[_Job], *, now: datetime, slot: dat
     started = monotonic()
     client = None
     if get is None:
-        get, client = http_getter(cfg, transport=transport)
+        get, client = http_getter(cfg, transport=transport, retry=True)
     pool = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="rss")
     try:
         for job in jobs:
@@ -413,12 +472,95 @@ def yahoo_symbol(line_id: str) -> str:
     return line_id.replace("_", "-")
 
 
+def backoff_day(slot: datetime) -> str:
+    from council.clock import NEW_YORK
+
+    return slot.astimezone(NEW_YORK).date().isoformat()
+
+
+def backoff_active(state_dir: Path | None, label: str, slot: datetime) -> bool:
+    """True when a 429 from feed `label` was recorded for the slot's New York day."""
+    if state_dir is None:
+        return False
+    try:
+        held = json.loads((state_dir / BACKOFF_FILE).read_text())
+        return isinstance(held, dict) and held.get(label) == backoff_day(slot)
+    except (OSError, ValueError):
+        return False
+
+
+def record_backoff(state_dir: Path | None, label: str, slot: datetime) -> None:
+    if state_dir is None:
+        return
+    path = state_dir / BACKOFF_FILE
+    try:
+        held = json.loads(path.read_text()) if path.is_file() else {}
+    except (OSError, ValueError):
+        held = {}
+    held = {**(held if isinstance(held, dict) else {}), label: backoff_day(slot)}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(held, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
 def fetch_tickers(cfg: RssConfig, tickers: Iterable[str], *, now: datetime, slot: datetime,
-                  budget_s: float = TICKER_BUDGET_S, **kw: Any) -> NewsFetch:
-    """The per-ticker feeds for at most `yahoo_max_tickers` line ids (first ones win)."""
+                  install_key: bytes | None = None, get: Getter | None = None,
+                  transport: httpx.BaseTransport | None = None, budget_s: float = TICKER_BUDGET_S,
+                  state_dir: Path | None = None, sleep: Callable[[float], None] = time.sleep,
+                  monotonic: Callable[[], float] = time.monotonic, lookback: timedelta = LOOKBACK) -> NewsFetch:
+    """The per-ticker feeds for at most `yahoo_max_tickers` line ids (first ones win), one request
+    at a time, one per TICKER_PACE_S, within `budget_s`. A 429 stops this feed for the rest of the
+    New York day (recorded under `state_dir`; flagged `news_source_backoff:rss:<feed>` once)."""
     names = list(dict.fromkeys(t for t in (try_normalise_id(x) for x in tickers) if t))[:cfg.yahoo_max_tickers]
-    jobs = [_Job(f, yahoo_symbol(t)) for f in cfg.ticker_feeds() for t in names]
-    return fetch_jobs(cfg, jobs, now=now, slot=slot, budget_s=budget_s, **kw)   # tags come back as line ids
+    result = SourceResult(SOURCE)
+    assert result.report is not None
+    started = monotonic()
+    client = None
+    if get is None:
+        get, client = http_getter(cfg, transport=transport)
+    try:
+        for feed in cfg.ticker_feeds():
+            if backoff_active(state_dir, feed.label, slot):
+                continue                             # flagged once, by the run that hit the 429
+            last: float | None = None
+            failed = False
+            for name in names:
+                if monotonic() - started >= budget_s:
+                    result.report.error = "budget"
+                    failed = True
+                    break
+                if last is not None:
+                    wait = TICKER_PACE_S - (monotonic() - last)
+                    if wait > 0:
+                        sleep(wait)
+                last = monotonic()
+                try:
+                    body = get(feed.url_for(yahoo_symbol(name)))
+                    parse_rss(feed, body, now=now, slot=slot, install_key=install_key, ticker=yahoo_symbol(name),
+                              result=result, lookback=lookback)
+                except RssRateLimited:
+                    record_backoff(state_dir, feed.label, slot)
+                    result.report.error = "rate_limited"
+                    result.flag(f"news_source_backoff:{SOURCE}:{feed.label}")
+                    failed = True
+                    break
+                except Exception as exc:  # noqa: BLE001 - one ticker's failure never costs another's items
+                    result.report.error = gov_news.error_type(exc)
+                    failed = True
+            if failed:
+                result.report.feeds_failed += 1
+                if result.report.error not in ("rate_limited",):
+                    result.flag(f"news_source_error:{SOURCE}:{feed.label}")
+            else:
+                result.report.feeds_ok += 1
+    finally:
+        if client is not None:
+            client.close()
+    result.report.seconds = round(monotonic() - started, 3)
+    return NewsFetch(items=dedupe(result.items), flags=list(result.flags),
+                     sources={SOURCE: result.report})   # tags come back as line ids
 
 
 def _install_key(state_dir: Path | None) -> bytes | None:
@@ -448,7 +590,8 @@ def ticker_fetcher(policy: Any, state_dir: Path | None) -> Callable[[Sequence[st
         return None
 
     def fetch(tickers: Sequence[str], now: datetime, slot: datetime) -> NewsFetch:
-        return fetch_tickers(cfg, tickers, now=now, slot=slot, install_key=_install_key(state_dir))
+        return fetch_tickers(cfg, tickers, now=now, slot=slot, install_key=_install_key(state_dir),
+                             state_dir=state_dir)
 
     return fetch
 
@@ -465,5 +608,5 @@ def merge_fetches(*fetches: NewsFetch) -> NewsFetch:
 
 
 __all__ = ["LICENCE", "SOURCE", "RssConfig", "RssFeed", "canonical_link", "dedupe", "fetch_jobs", "fetch_market",
-           "fetch_tickers", "market_fetcher", "merge_fetches", "parse_rss", "rank_rss", "rss_config", "tag_tickers",
-           "ticker_fetcher", "yahoo_symbol"]
+           "fetch_tickers", "market_fetcher", "merge_fetches", "overnight_window", "parse_rss", "rank_rss",
+           "rss_config", "tag_tickers", "ticker_fetcher", "yahoo_symbol"]

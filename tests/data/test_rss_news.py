@@ -57,7 +57,7 @@ def fixture_get(url: str) -> bytes:
 def test_the_policy_lists_the_eleven_feeds(cfg):
     assert cfg is not None and tuple(f.label for f in cfg.feeds) == LABELS
     assert [f.label for f in cfg.ticker_feeds()] == ["yahoo_ticker"] and len(cfg.market_feeds()) == 10
-    assert cfg.timeout_s == 15 and cfg.scout_max == 40 and cfg.yahoo_max_tickers == 30
+    assert cfg.timeout_s == 15 and cfg.scout_max == 40 and cfg.yahoo_max_tickers == 10
     assert feed(cfg, "investing_stocks").naive_tz == "UTC"
     assert "feeds.finance.yahoo.com" in cfg.hosts and "www.benzinga.com" in cfg.hosts
 
@@ -199,10 +199,10 @@ def test_ticker_fetch_is_per_name_and_capped(cfg):
         return fixture_get(url)
 
     names = [f"T{n}" for n in range(40)] + ["BRK_B"]
-    rss_news.fetch_tickers(cfg, names, now=SLOT, slot=SLOT, get=get)
+    rss_news.fetch_tickers(cfg, names, now=SLOT, slot=SLOT, get=get, sleep=lambda _s: None)
     assert len(urls) == cfg.yahoo_max_tickers and "s=T0&" in urls[0]
     urls.clear()
-    got = rss_news.fetch_tickers(cfg, ["BRK_B"], now=SLOT, slot=SLOT, get=get)
+    got = rss_news.fetch_tickers(cfg, ["BRK_B"], now=SLOT, slot=SLOT, get=get, sleep=lambda _s: None)
     assert "s=BRK-B&" in urls[0] and got.items[0].symbols[0] == "BRK_B"
 
 

@@ -16,11 +16,21 @@ Rules (each one tested):
   - A rate limiter (calls per minute, sliding 60 s window) and a concurrency cap apply to every
     HTTP attempt.
   - Statuses: ok / parse_fail / timeout / transport.
+  - Structured output by role: the roles in `structured_roles` (default: the core `news` and
+    `macro` analysts) always get their schema as `format`, whatever `structured` says.
+  - Truncation: a reply that used the whole `num_predict` budget, or whose outer JSON object never
+    closes, is reported as `reply truncated ...` (never as the inner object's schema errors: the
+    core news / macro roles hit this on every real run until 2026-10-01), and the correction turn
+    gets TRUNCATION_BOOST x the budget and asks for fewer, shorter items.
+  - Billing / auth: HTTP 401, 402 and 403 from Ollama (e.g. "payment past due") are recorded as
+    `http <code> llm_billing_error` (status transport, not retried) and call `on_billing_error`
+    once per gateway (the caller sends the URGENT alert; it never raises into the call).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import re
@@ -44,6 +54,11 @@ _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 MAX_ERRORS_IN_CORRECTION = 12
 MAX_ERROR_CHARS = 300
 RETRYABLE_HTTP = frozenset({408, 409, 425, 429})
+BILLING_HTTP = frozenset({401, 402, 403})
+BILLING_ERROR = "llm_billing_error"          # flag and error marker (see `is_billing_error`)
+STRUCTURED_ROLES = frozenset({"news", "macro"})
+TRUNCATION_BOOST = 2.0
+TRUNCATED = "reply truncated at the token limit (the JSON object is not closed)"
 
 
 @dataclass(frozen=True)
@@ -118,6 +133,27 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
     return last
 
 
+def is_truncated(text: str) -> bool:
+    """True when the reply's first JSON object starts but never closes (output cut off): the text
+    after think blocks and fences starts with `{` and decoding fails at the end of the text."""
+    if not isinstance(text, str):
+        return False
+    cleaned = _FENCE.sub("", _OPEN_THINK.sub("", _THINK_BLOCK.sub("", text)).strip()).strip()
+    start = cleaned.find("{")
+    if start == -1 or cleaned[:start].strip():
+        return False
+    try:
+        json.JSONDecoder().raw_decode(cleaned, start)
+    except json.JSONDecodeError as exc:
+        return exc.msg.startswith("Unterminated string") or exc.pos >= len(cleaned) - 1
+    return False
+
+
+def is_billing_error(error: str | None) -> bool:
+    """True for a gateway error text that records an Ollama billing / auth refusal."""
+    return BILLING_ERROR in str(error or "")
+
+
 def format_validation_errors(exc: ValidationError) -> list[str]:
     """`loc: message` per error, e.g. `cards.0.claim: String should have at most 200 characters`."""
     out = []
@@ -144,9 +180,11 @@ def correction_message(errors: Sequence[str]) -> str:
     shown = list(errors)[:MAX_ERRORS_IN_CORRECTION]
     lines = "\n".join(f"- {e}" for e in shown)
     more = "" if len(errors) <= len(shown) else f"\n- ... and {len(errors) - len(shown)} more"
+    shorter = ("Your reply was cut off before the JSON object closed: write FEWER and SHORTER items "
+               "(well under every limit) so the whole object fits.\n") if TRUNCATED in errors else ""
     return (
         "Your previous reply was not accepted by the checker. Problems:\n"
-        f"{lines}{more}\n"
+        f"{lines}{more}\n{shorter}"
         "Reply with the JSON object only: ONE corrected JSON object containing exactly the fields "
         "described in the instructions, starting with { and ending with }. No reasoning or prose "
         "before or after it, no markdown fences."
@@ -235,6 +273,8 @@ class OllamaGateway:
         clock: Callable[[], float] = time.monotonic,
         backoff_s: float = 2.0,
         structured: bool = False,
+        structured_roles: frozenset[str] | Sequence[str] = STRUCTURED_ROLES,
+        on_billing_error: Callable[[int], None] | None = None,
     ) -> None:
         if not timeouts:
             raise ValueError("timeout ladder must have at least one step")
@@ -242,6 +282,9 @@ class OllamaGateway:
         self.model = model
         self.think = False
         self.structured = bool(structured)
+        self.structured_roles = frozenset(structured_roles)
+        self.on_billing_error = on_billing_error
+        self.billing_error = False               # set on the first 401/402/403 (sticky)
         self.num_ctx = int(num_ctx)
         self.timeouts = tuple(float(t) for t in timeouts)
         self._transport = transport
@@ -268,8 +311,9 @@ class OllamaGateway:
         )
 
     def _body(self, messages: list[dict[str, str]], seed: int, num_predict: int,
-              schema: type[BaseModel] | None = None) -> dict[str, Any]:
-        fmt: Any = inline_schema(schema) if self.structured and schema is not None else "json"
+              schema: type[BaseModel] | None = None, role: str = "") -> dict[str, Any]:
+        structured = self.structured or role in self.structured_roles
+        fmt: Any = inline_schema(schema) if structured and schema is not None else "json"
         return {
             "model": self.model,
             "messages": messages,
@@ -297,6 +341,9 @@ class OllamaGateway:
                 raise _AttemptFailure("transport", f"{type(exc).__name__}", True) from exc
         if resp.status_code >= 500 or resp.status_code in RETRYABLE_HTTP:
             raise _AttemptFailure("transport", f"http {resp.status_code}", True)
+        if resp.status_code in BILLING_HTTP:
+            self._billing(resp.status_code)
+            raise _AttemptFailure("transport", f"http {resp.status_code} {BILLING_ERROR}", False)
         if resp.status_code >= 400:
             raise _AttemptFailure("transport", f"http {resp.status_code}", False)
         try:
@@ -312,6 +359,13 @@ class OllamaGateway:
         tokens_in = int(payload.get("prompt_eval_count") or 0)
         tokens_out = int(payload.get("eval_count") or 0)
         return (content if isinstance(content, str) else ""), tokens_in, tokens_out
+
+    def _billing(self, code: int) -> None:
+        first = not self.billing_error
+        self.billing_error = True
+        if first and self.on_billing_error is not None:
+            with contextlib.suppress(Exception):     # an alert failure never reaches the call
+                self.on_billing_error(int(code))
 
     async def _post_with_ladder(
         self, body: dict[str, Any], failed: list[str] | None = None, turn: str = "first",
@@ -380,7 +434,7 @@ class OllamaGateway:
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             try:
                 raw, t_in, t_out = await self._post_with_ladder(
-                    self._body(messages, seed, num_predict, schema), failed, "first")
+                    self._body(messages, seed, num_predict, schema, role), failed, "first")
             except _AttemptFailure as exc:
                 return result(None, exc.status, str(exc))
             tokens_in, tokens_out = t_in, t_out
@@ -388,6 +442,10 @@ class OllamaGateway:
             parsed, errors = decode_reply(raw, schema)
             if parsed is not None:
                 return result(parsed, "ok")
+            retry_predict = num_predict
+            if is_truncated(raw) or (t_out > 0 and t_out >= num_predict):
+                errors = [TRUNCATED]
+                retry_predict = int(num_predict * TRUNCATION_BOOST)
 
             sent_assistant, correction, first = raw[:8000], correction_message(errors), list(errors)
             retry_messages = [
@@ -398,7 +456,7 @@ class OllamaGateway:
             first_errors = "; ".join(errors)
             try:
                 raw2, t_in, t_out = await self._post_with_ladder(
-                    self._body(retry_messages, seed, num_predict, schema), failed, "correction"
+                    self._body(retry_messages, seed, retry_predict, schema, role), failed, "correction"
                 )
             except _AttemptFailure as exc:
                 return result(None, "parse_fail", f"{first_errors} | correction {exc.status}: {exc}")
@@ -407,6 +465,8 @@ class OllamaGateway:
             raw = raw2
             turns.append(raw2)
             parsed, errors2 = decode_reply(raw2, schema)
+            if parsed is None and (is_truncated(raw2) or (t_out > 0 and t_out >= retry_predict)):
+                errors2 = [TRUNCATED]
             if parsed is not None:
                 return result(parsed, "ok", f"corrected: {first_errors}")
             return result(None, "parse_fail", f"{first_errors} | after correction: {'; '.join(errors2)}")

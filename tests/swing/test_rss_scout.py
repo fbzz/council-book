@@ -72,7 +72,7 @@ def run(policy, tmp_path):
 
     def tickers(names, now, slot):
         calls.append(list(names))
-        return rss_news.fetch_tickers(cfg, names, now=now, slot=slot, get=fixture_get)
+        return rss_news.fetch_tickers(cfg, names, now=now, slot=slot, get=fixture_get, sleep=lambda _s: None)
 
     _screen(tmp_path)
     src = ss.real_swing_sources(policy, state_dir=tmp_path, keys_loader=lambda: object(),

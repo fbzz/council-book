@@ -212,7 +212,9 @@ def test_parse_the_live_table_layouts():
     assert parse_constituents(ONE_CELL_PER_LINE) == (["MMM", "AMD", "BRK.B"],
                                                      {"MMM": 66740, "AMD": 2488, "BRK.B": 1067983})
     assert parse_constituents(NDX_LIST) == (["ADBE", "GOOGL"], {})
-    assert U.MEMBERSHIP_PAGES == {"sp500": "List of S&P 500 companies", "nasdaq100": "List of NASDAQ-100 companies"}
+    assert U.MEMBERSHIP_PAGES == {"sp500": "List of S&P 500 companies", "nasdaq100": "List of NASDAQ-100 companies",
+                                  "sp400": "List of S&P 400 companies", "sp600": "List of S&P 600 companies"}
+    assert U.INDEXES == ("sp500", "nasdaq100")         # the sleeve; the swing screen reads SWING_INDEXES
 
 
 def test_parse_falls_back_to_the_table_with_a_ticker_column():

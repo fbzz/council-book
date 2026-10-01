@@ -194,6 +194,49 @@ The swing pipeline on real data and real models, with no broker token and nothin
    sometimes `paper_reference_last_close` or `swing_screen_missing` (the after-close screen is
    built once per session after 20:30 New York).
 
+4. **FRED key (free)**: without one every cycle carries `calendar:release_dates_skipped_no_fred_key`
+   (CPI / NFP / PCE release dates are not loaded). Request a free key at fred.stlouisfed.org
+   (My Account -> API Keys) and put it in the mode-0600 `.env` as `COUNCIL_FRED_TOKEN=<key>` (or
+   `council-op keys store fred`, Keychain item `council-book.fred`). The calendar reads it through
+   the same loader; no code change.
+5. **Outage alerts (ntfy)**: `council-op keys store ntfy-topic` (or `COUNCIL_NTFY_TOPIC` in the
+   environment) enables URGENT phone alerts. When Ollama refuses model calls with HTTP 401 / 402 /
+   403 (e.g. "payment past due"), the cycle carries the flag `llm_billing_error`, the council stops
+   waiting for the outage retries, and one URGENT `llm_billing_error` alert goes out per 4 hours
+   (paper and dry runs included; record `<state dir>/llm_alerts.json`). Fix the ollama.com account,
+   then the next slot runs normally.
+6. **RSS notes**: the per-ticker Yahoo feed is read for at most 10 names (open trades, carried
+   ideas, top movers), one request per 1.5 s; after an HTTP 429 it is skipped for the rest of the
+   New York day (`news_source_backoff:rss:yahoo_ticker`, flagged once; record
+   `<state dir>/rss_backoff.json`). A market feed (e.g. PR Newswire) is retried once on a transient
+   404 / 5xx; a persistent failure is still `news_source_error:rss:<feed>`.
+
+## 7a. Paper swing job (launchd, operator-installed)
+
+`ops/paper-cycle.sh` runs `COUNCIL_MODE=dry_run council cycle --paper` from this checkout at
+14:52 and 18:52 UTC on weekdays (`ops/launchd/com.fbzz.council-paper.cycle.plist.tmpl`). In US
+winter time (from 1 Nov 2026) only 18:52 UTC is a swing slot: the script logs a skip for a winter
+14:52 start. Output goes to `<state>/paper/logs/paper-cycle.log`. The label is outside
+`com.fbzz.council.*`, so `ops/install.sh`, readiness and smoke never touch it. Prerequisites: steps
+1-2 of section 7 and `uv sync` in the checkout (the job runs `<checkout>/.venv/bin/council`).
+Agents never install or load it; the operator runs, in a terminal:
+
+```sh
+REPO="$HOME/Code/council-book"                       # this checkout
+LOGS="$HOME/Library/Application Support/council-book/paper/logs"
+PLIST="$HOME/Library/LaunchAgents/com.fbzz.council-paper.cycle.plist"
+mkdir -p "$LOGS"
+sed -e "s|{{REPO}}|$REPO|g" -e "s|{{HOME}}|$HOME|g" -e "s|{{LOGS}}|$LOGS|g" \
+  "$REPO/ops/launchd/com.fbzz.council-paper.cycle.plist.tmpl" > "$PLIST"
+plutil -lint "$PLIST"
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+launchctl print "gui/$(id -u)/com.fbzz.council-paper.cycle" | head -20
+tail -n 40 "$LOGS/paper-cycle.log"                    # after the next slot
+```
+
+Stop and remove: `launchctl bootout "gui/$(id -u)/com.fbzz.council-paper.cycle" && rm "$PLIST"`.
+Run one slot by hand (same command the job runs): `COUNCIL_MODE=dry_run council cycle --paper`.
+
 ## 8. Swing book incidents (rehearsal sign-off)
 
 | Situation | What to do |

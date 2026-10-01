@@ -12,8 +12,8 @@ max_calls_per_cycle: 16
 drop_order_when_over_budget: [single_agent_control, macro, news]
 format: json                   # Ollama Cloud ignores JSON schemas: JSON mode + strict validation after decode
 roles:
-  news:     {enabled: true,  replicates: 1, cadence: every_cycle, max_num_predict: 1200}
-  macro:    {enabled: true,  replicates: 1, cadence: first_cycle_of_utc_day, max_num_predict: 700}
+  news:     {enabled: true,  replicates: 1, cadence: every_cycle, max_num_predict: 3000}   # 1200 truncated every real reply (2026-10-01)
+  macro:    {enabled: true,  replicates: 1, cadence: first_cycle_of_utc_day, max_num_predict: 2000}   # 700 truncated every real reply
   bull:     {enabled: true,  replicates: 1, max_num_predict: 2000}
   bear:     {enabled: true,  replicates: 1, max_num_predict: 2000}
   pm:       {enabled: true,  replicates: 3, max_num_predict: 1200}
@@ -29,7 +29,7 @@ news:                          # what the news role reads (transparency v2, T3b;
     timeout_s: 15              # per request; one attempt, a failure flags news_source_error:rss:<feed>
     scout_max: 40              # RSS items in the swing Scout's reading list per slot
     scout_per_feed: 8          # at most this many from one feed (Yahoo counts once across tickers)
-    yahoo_max_tickers: 30      # per-ticker Yahoo requests per slot: open trades, carried ideas, movers-screen names
+    yahoo_max_tickers: 10      # per-ticker Yahoo requests per slot (one per ~1.5 s; a 429 stops them for the New York day): open trades, carried ideas, top movers
     feeds:                     # kind: press | earnings | market | ticker (ranking tier); naive_tz: zone of a pubDate without one
       - {label: prnewswire_all, kind: press, url: "https://www.prnewswire.com/rss/news-releases-list.rss"}
       - {label: nasdaq_earnings, kind: earnings, url: "https://www.nasdaq.com/feed/rssoutbound?category=Earnings"}

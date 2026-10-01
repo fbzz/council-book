@@ -25,6 +25,8 @@
     "Bash(./ops/uninstall.sh:*)",
     "Bash(ops/rehearse-onboarding.sh:*)",
     "Bash(./ops/rehearse-onboarding.sh:*)",
+    "Bash(ops/paper-cycle.sh:*)",
+    "Bash(./ops/paper-cycle.sh:*)",
     "Bash(git tag:*)",
     "Bash(git push origin council-spec:*)",
     "Bash(git push --tags:*)",

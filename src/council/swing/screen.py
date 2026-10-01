@@ -1,8 +1,8 @@
 """The after-close movers screen (design swing-book.md rev 2, §1.2; SW-1). Facts, not picks.
 
-Built ONCE per US trading day after the close, for the screen universe (S&P 500 + Nasdaq-100 + the
-AI list, ~600 names, plus the FF12 sector ETFs and the market-context ETFs SPY / QQQ / IWM / VIXY),
-from COMPLETED daily bars only. The ETFs' D moves are kept in `Screen.context` (the Scout's MARKET
+Built ONCE per US trading day after the close, for the screen universe (S&P 500 + Nasdaq-100 +
+S&P MidCap 400 + S&P SmallCap 600 + the AI list, ~1,520 names, plus the FF12 sector ETFs and the
+market-context ETFs SPY / QQQ / IWM / VIXY), from COMPLETED daily bars only. The ETFs' D moves are kept in `Screen.context` (the Scout's MARKET
 CONTEXT). A screen for D is available to a slot from D 20:30 New York (`ready_at`), whenever its
 cache file was written (the cycle writes it at its own clock, which is at or after the slot):
 
@@ -58,17 +58,19 @@ PROVIDER = "alpaca_screen"
 # The screen's own ceilings, far below Alpaca's free plan (200 requests a minute, no symbol quota:
 # `facts.market.BUDGET_LIMITS`). One multi-symbol request counts ONCE against the hour and day
 # limits, and `symbols_per_month` counts DISTINCT symbols (`RequestBudget.reserve`), so re-pulling
-# the same ~612 names every session costs nothing more. One screen = ceil(612 / 100) = 7 requests,
-# built once per session (`sources.prepare` caches it); a month of 23 sessions x 2 slots, even
-# rebuilt at both, is 322 requests and ~612 symbols (test_screen_fits_a_month_of_two_slots).
-LIMITS = BudgetLimits(requests_per_hour=30, requests_per_day=60, symbols_per_month=1_500)
+# the same names every session costs nothing more. The universe is ~1,520 names (S&P 500 +
+# Nasdaq-100 + S&P 400 + S&P 600 + the AI list, user decision 2026-10-01) + 15 ETFs: one screen =
+# ceil(1,535 / 100) = 16 requests, built once per session (`sources.prepare` caches it); a month of
+# 23 sessions x 2 slots, even rebuilt at both, is 736 requests and ~1,535 distinct symbols plus
+# index churn (test_screen_fits_a_month_of_two_slots).
+LIMITS = BudgetLimits(requests_per_hour=40, requests_per_day=80, symbols_per_month=2_500)
 PACE_S = 2.0
-DEADLINE_S = 240.0
-MAX_REQUESTS = 20
+DEADLINE_S = 300.0
+MAX_REQUESTS = 24
 SYMBOLS_PER_REQUEST = 100          # ~100 x 50 sessions = 5,000 bars: one page
 LOOKBACK_DAYS = 75                 # calendar days: >= 21 sessions for sigma and the volume median
 READY_AFTER = (20, 30)             # New York wall time on D
-UNIVERSE_MAX = 700
+UNIVERSE_MAX = 1_700
 LIST_MAX = 10
 MOVER_MIN_SIGMA = 2.0
 VOLUME_MIN_RATIO = 2.0

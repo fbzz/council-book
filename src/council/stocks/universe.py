@@ -49,9 +49,14 @@ from council.stocks.sec import SecClient, TickerRow
 
 MONEY = "Money"
 INDEXES = ("sp500", "nasdaq100")
+# The swing movers screen's wider universe (user decision 2026-10-01): + S&P MidCap 400 and S&P
+# SmallCap 600, ~1,520 distinct liquid US names. The stock sleeve keeps INDEXES.
+SWING_INDEXES = (*INDEXES, "sp400", "sp600")
 AI = "ai"
-MEMBERSHIP_PAGES = {"sp500": "List of S&P 500 companies", "nasdaq100": "List of NASDAQ-100 companies"}
-MEMBERSHIP_COUNTS = {"sp500": (480, 520), "nasdaq100": (95, 110)}   # plausible row counts
+MEMBERSHIP_PAGES = {"sp500": "List of S&P 500 companies", "nasdaq100": "List of NASDAQ-100 companies",
+                    "sp400": "List of S&P 400 companies", "sp600": "List of S&P 600 companies"}
+MEMBERSHIP_COUNTS = {"sp500": (480, 520), "nasdaq100": (95, 110),   # plausible row counts
+                     "sp400": (385, 415), "sp600": (580, 620)}
 MEDIAWIKI_API = "https://en.wikipedia.org/w/api.php"
 # Wikimedia's user-agent policy wants a contact; a project URL, never the SEC e-mail address.
 MEDIAWIKI_USER_AGENT = "council-book/0.1 (https://github.com/fbzz/council-book; index membership, read-only)"

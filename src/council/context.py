@@ -118,7 +118,7 @@ def hold_reference_stub() -> dict[str, Any]:
 SKEPTIC_MIN_TIMEOUT_S = 75.0
 
 
-def make_skeptic_gateway(policy: Policy, settings: Settings, *, stub: bool) -> Any:
+def make_skeptic_gateway(policy: Policy, settings: Settings, *, stub: bool, state_dir: Path | None = None) -> Any:
     """The Skeptic's own gateway on `policy/swing.yaml` `llm.skeptic_model` (Q-S9: another model
     family); the fixture Skeptic when stubbed. None without a swing policy."""
     sp = getattr(policy, "swing", None)
@@ -137,7 +137,8 @@ def make_skeptic_gateway(policy: Policy, settings: Settings, *, stub: bool) -> A
                          calls_per_min=int(c["limiter"]["calls_per_min"]),
                          concurrency=int(c["limiter"]["concurrency"]),
                          timeouts=tuple(max(float(t), SKEPTIC_MIN_TIMEOUT_S) for t in c["timeouts_s"]),
-                         num_ctx=int(c["num_ctx"]), structured=True)
+                         num_ctx=int(c["num_ctx"]), structured=True,
+                         on_billing_error=billing_alert(settings, state_dir))
 
 
 def swing_sources(policy: Policy, settings: Settings, *, kind: Literal["real", "fixture"], broker: Any | None,
@@ -156,12 +157,13 @@ def swing_sources(policy: Policy, settings: Settings, *, kind: Literal["real", "
     from council.data import rss_news
 
     return ss.real_swing_sources(policy, state_dir=state_dir, broker=broker, news=news, ledger=ledger,
-                                 skeptic_gateway=make_skeptic_gateway(policy, settings, stub=False),
+                                 skeptic_gateway=make_skeptic_gateway(policy, settings, stub=False,
+                                                                      state_dir=state_dir),
                                  allow_unverified=not live and broker is None,
                                  rss_tickers=rss_news.ticker_fetcher(policy, state_dir))
 
 
-def make_gateway(policy: Policy, settings: Settings, *, stub: bool) -> Any:
+def make_gateway(policy: Policy, settings: Settings, *, stub: bool, state_dir: Path | None = None) -> Any:
     if stub:
         from council.llm.stub import StubGateway
 
@@ -173,7 +175,61 @@ def make_gateway(policy: Policy, settings: Settings, *, stub: bool) -> Any:
                          calls_per_min=int(c["limiter"]["calls_per_min"]),
                          concurrency=int(c["limiter"]["concurrency"]),
                          timeouts=tuple(float(t) for t in c["timeouts_s"]),
-                         num_ctx=int(c["num_ctx"]))
+                         num_ctx=int(c["num_ctx"]),
+                         on_billing_error=billing_alert(settings, state_dir))
+
+
+LLM_BILLING_ALERT = ("council: model calls refused",
+                     "URGENT llm_billing_error: Ollama refused the model call (HTTP {code}: billing or auth, "
+                     "e.g. payment past due). The council holds the reference until it is fixed: check the "
+                     "ollama.com account.")
+
+
+def billing_alert(settings: Settings, state_dir: Path | None):
+    """The gateway's `on_billing_error` hook: one URGENT ntfy (`llm_billing_error`) per
+    POLICY_ALERT_EVERY when a topic is configured (paper and dry runs included: an outage alert, no
+    trade); None without a state dir. Fixed text; never raises."""
+    if state_dir is None:
+        return None
+
+    def alert(code: int) -> None:
+        alert_llm_billing(state_dir, settings, code)
+
+    return alert
+
+
+def alert_llm_billing(root: Path, settings: Settings, code: int, *, now: datetime | None = None) -> bool:
+    """Send the `llm_billing_error` URGENT unless one went out inside POLICY_ALERT_EVERY (record:
+    `<root>/llm_alerts.json`). True when an alert went out. Never raises."""
+    from council.clock import utcnow
+
+    if not settings.ntfy_topic:
+        return False
+    now = now or utcnow()
+    record = root / "llm_alerts.json"
+    try:
+        sent = json.loads(record.read_text()) if record.is_file() else {}
+        last = datetime.fromisoformat(sent["llm_billing_error"]) if "llm_billing_error" in sent else None
+    except (OSError, ValueError, TypeError, KeyError):
+        sent, last = {}, None
+    if last is not None and now - last < POLICY_ALERT_EVERY:
+        return False
+    try:
+        from council.operator.notify import Notifier
+
+        title, body = LLM_BILLING_ALERT
+        Notifier(settings.ntfy_topic, window={"tz": "UTC", "start": "00:00", "end": "00:00"}).send(
+            title, body.format(code=int(code)), priority="urgent")
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        print(f"llm billing alert failed: {type(exc).__name__}", file=sys.stderr)
+        return False
+    try:
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({**(sent if isinstance(sent, dict) else {}),
+                                      "llm_billing_error": now.isoformat()}) + "\n")
+    except OSError:
+        pass
+    return True
 
 
 BROKER_FEED_SOURCE = "broker_feed"        # the source name in flags and fetch reports
@@ -651,7 +707,7 @@ def build_context(*, mode: Literal["live", "dry_run", "stub"], stub_llm: bool = 
         notifier = Notifier(settings.ntfy_topic)
 
     return CycleContext(policy=policy, settings=settings, ledger=ledger,
-                        gateway=make_gateway(policy, settings, stub=stub_llm or mode == "stub"),
+                        gateway=make_gateway(policy, settings, stub=stub_llm or mode == "stub", state_dir=root),
                         registry=PromptRegistry(), sources=sources, publisher=publisher,
                         notifier=notifier, state_dir=root,
                         run_single_agent=bool(policy.council["roles"]["single_agent_control"]["enabled"]),

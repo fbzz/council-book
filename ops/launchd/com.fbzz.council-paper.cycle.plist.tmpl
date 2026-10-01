@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Paper swing cycle (no broker, publishes nothing): weekdays 14:52 and 18:52 UTC. The script skips
+     14:52 in US winter time (18:52 UTC only from 1 Nov 2026). Installed and loaded by the operator only
+     (docs/runbook.md §7a); ops/install.sh does not install it. The label is deliberately outside
+     com.fbzz.council.* so the live readiness and smoke checks never treat it as a live job. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.fbzz.council-paper.cycle</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string><string>-i</string>
+    <string>/bin/bash</string><string>{{REPO}}/ops/paper-cycle.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>{{REPO}}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:{{HOME}}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>{{HOME}}</string>
+    <key>COUNCIL_REPO</key><string>{{REPO}}</string>
+    <key>COUNCIL_ROLE</key><string>runner</string>
+    <key>COUNCIL_AGENT_CONTEXT</key><string>1</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>52</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>18</integer><key>Minute</key><integer>52</integer></dict>
+  </array>
+  <key>RunAtLoad</key><false/>
+  <key>Nice</key><integer>5</integer>
+  <key>StandardOutPath</key><string>{{LOGS}}/paper-cycle.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>{{LOGS}}/paper-cycle.launchd.err.log</string>
+</dict>
+</plist>

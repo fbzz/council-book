@@ -29,7 +29,7 @@ def test_news_keeps_valid_drops_invalid_and_assigns_ids(reg, pack, lines, policy
     assert material.qualifying and material.corroborated_by == ["K:vol:1"]
     assert not context.qualifying and context.corroborated_by == []
     assert run.calls[0].status == "ok" and run.calls[0].role == "news"
-    assert run.calls[0].prompt_id == "council-news/v1"
+    assert run.calls[0].prompt_id == "council-news/v2"
 
 
 def test_news_material_without_vol_card_is_not_qualifying(reg, lines, policy):
