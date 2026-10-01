@@ -87,6 +87,7 @@ from council.publish.public_models import (
     PublicSwingSection,
 )
 from council.publish.redact import _clip
+from council.swing.rules import RULE_OF as SWING_RULE_CODES
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -181,7 +182,7 @@ CODE_ROLES = (
     ("Scorekeeper", "Computes controls and card scores. Descriptive only.", "neutral"),
 )
 LLM_ROLES = {
-    "news": ("News analyst", "Writes evidence cards from broker news items. Their text is never republished.", "ADVISES", "news"),
+    "news": ("News analyst", "Writes evidence cards from public RSS feeds and SEC filings, cited by id. Licensed text is never republished.", "ADVISES", "news"),
     "macro": ("Macro analyst", "Describes the macro regime and its drivers. Context only.", "CONTEXT", "macro"),
     "filings": ("Filings analyst", "Reads company filings (arrives with single stocks).", "ADVISES", "news"),
     "sector": ("Sector analyst", "Ranks names inside a peer group (arrives with single stocks).", "CONTEXT", "news"),
@@ -195,22 +196,22 @@ ROSTER_AGENT = {"news": "news", "macro": "macro", "bull": "bull", "bear": "bear"
 PROMPT_ROLE_ALIASES = {"bull_open": "bull", "bull_rebuttal": "bull", "single_agent": "single_agent_control"}
 
 RULE_TITLES = {
-    "gross": "Gross exposure caps (sum of absolute weights, x NAV)",
+    "gross": "Gross exposure caps",
     "net": "Net exposure range and short gross cap",
     "killswitch": "Soft kill: warn, then halt, as a fraction of the lifetime peak",
     "catastrophe_stop": "Every open carries a catastrophe stop-loss",
     "reentry_cooloff_days": "Cool-off before re-entering after a stop hit",
-    "caps": "Per-line and cluster caps (absolute weight, x NAV)",
+    "caps": "Per-line and cluster caps",
     "leverage_caps": "Leverage caps by asset class",
     "margin_use_max": "Margin use cap (keeps a cash reserve)",
     "ex_ante_vol_hard": "Ex-ante book volatility hard cap",
-    "vol_breaker": "Volatility breaker (short vs long EWMA ratio)",
+    "vol_breaker": "Volatility breaker",
     "authority": "Council authority bands around the reference",
     "deadband": "Deadband: changes too small to be worth trading are skipped",
     "min_hold_days": "Minimum holding periods",
     "churn": "Turnover limits",
     "cost_budget": "Cost and carry budgets",
-    "net_of_cost_gate": "Net-of-cost gate (break-even Sharpe)",
+    "net_of_cost_gate": "Net-of-cost gate",
     "event_block": "No adds around scheduled macro events",
     "anti_chase_sigma": "Anti-chase: no adds right after a large one-day move",
     "freshness": "Data freshness limits",
@@ -588,7 +589,8 @@ class JournalView:
 
     @property
     def has_swing(self) -> bool:
-        return self.swing is not None or any(cv.doc.swing is not None for cv in self.cycles)
+        return (self.swing is not None or any(cv.doc.swing is not None for cv in self.cycles)
+                or any(d.swing is not None for d in self.paper_cycles.values()))
 
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:
@@ -794,11 +796,11 @@ def rule_plain(key: str, v: Any) -> str:
     """One plain sentence per rule, with the numbers from policy/risk.yaml. Empty if unknown."""
     try:
         if key == "gross":
-            return (f"All positions added together (long and short) stay under {v['proposal_max']}x the portfolio; "
-                    f"code refuses anything above {v['hard_max']}x.")
+            return (f"All positions added together (long and short) stay under {_p(v['proposal_max'])} of the portfolio; "
+                    f"code refuses anything above {_p(v['hard_max'])}.")
         if key == "net":
-            return (f"Long minus short stays between {v['min']}x and {v['max']}x the portfolio; "
-                    f"shorts together at most {v['short_gross_max']}x.")
+            return (f"Long minus short stays between {_p(v['min'])} and {_p(v['max'])} of the portfolio; "
+                    f"shorts together at most {_p(v['short_gross_max'])}.")
         if key == "killswitch":
             return f"Measured from the best value ever reached: {kill_phrase(v)}."
         if key == "catastrophe_stop":
@@ -826,17 +828,17 @@ def rule_plain(key: str, v: Any) -> str:
             return (f"The council may change at most {v['max_deviations_per_cycle']} lines per run, each inside a range "
                     "that code sets from the line's trend.")
         if key == "deadband":
-            return (f"Changes smaller than {v['level']} of a line's full size, or under {_share0(v['min_nav_share'])} "
+            return (f"Changes smaller than {_p(v['level'])} of a line's full size, or under {_share0(v['min_nav_share'])} "
                     "of the portfolio, are not traded.")
         if key == "min_hold_days":
             return (f"A position is kept at least {v['default']} days ({v['crypto']} for crypto) before it is reversed; "
                     "moving back to the reference is always allowed.")
         if key == "churn":
-            return (f"Trading is limited to {v['turnover_7d_max']}x the portfolio in 7 days and "
-                    f"{v['turnover_30d_max']}x in 30 days.")
+            return (f"Trading is limited to {_p(v['turnover_7d_max'])} of the portfolio in 7 days and "
+                    f"{_p(v['turnover_30d_max'])} in 30 days.")
         if key == "cost_budget":
-            return (f"One run may spend at most {v['cycle_max_bps']} basis points (hundredths of a percent) of the portfolio "
-                    f"on trading costs, and {v['discretionary_30d_max_bps']} over 30 days.")
+            return (f"One run may spend at most {_bp(v['cycle_max_bps'])} of the portfolio on trading costs, and "
+                    f"{_bp(v['discretionary_30d_max_bps'])} over 30 days on discretionary trades.")
         if key == "net_of_cost_gate":
             return "A trade must be expected to earn clearly more than it costs, after spread, fees and overnight financing."
         if key == "event_block":
@@ -1116,7 +1118,7 @@ def evidence_label(ref: Any, lines: Lines) -> dict[str, str]:
     """A plain label for an evidence reference; `raw` is the id, kept in a title attribute."""
     kind = getattr(ref, "kind", "")
     if kind == "broker_feed":
-        return {"label": "news item", "raw": f"{ref.id} · broker news item, cited by id; its text is not republished",
+        return {"label": "news item", "raw": f"{ref.id} · a public RSS feed or SEC filing item, cited by id; licensed text is not republished",
                 "css": "feed"}
     if kind == "fred":
         raw = f"M:{ref.series}" + (f".{ref.measure}" if ref.measure else "") + (f"@{ref.as_of}" if ref.as_of else "")
@@ -1314,11 +1316,11 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
               more="It never forces a sale: selling is always allowed inside an event window.",
               short="Blocks adds around scheduled macro releases.", phase="read"),
     AgentSpec("news", "News analyst", "LLM", "news", "Analysts",
-              "Reads broker news items and writes evidence cards that cite them by id.",
+              "Reads public RSS feeds and SEC filings and writes evidence cards that cite them by id.",
               roles=("news",), source="prompts/news.md",
               more="The news text itself is licensed and never republished: a card cites a feed item by its id "
                    "only, and the analyst's own short paraphrase is shown.",
-              short="Turns broker news into cited evidence cards.", phase="evidence"),
+              short="Turns public RSS feeds and SEC filings, cited by id, into evidence cards.", phase="evidence"),
     AgentSpec("macro", "Macro analyst", "LLM", "macro", "Analysts",
               "Describes the macro regime and its drivers from public macro data; context only.",
               roles=("macro",), source="prompts/macro.md",
@@ -4409,7 +4411,7 @@ def swing_idea_view(i: Any) -> dict[str, Any]:
     cats = []
     for c in i.catalysts:
         if c.kind == "broker_feed":
-            cats.append({"label": c.id, "note": "broker news item, id only", "href": "", "css": "feed"})
+            cats.append({"label": c.id, "note": "a public RSS feed or SEC filing item, cited by id", "href": "", "css": "feed"})
         elif c.kind == "licensed_news":
             cats.append({"label": c.id, "note": f"{c.source} headline (licensed), id only", "href": "", "css": "feed"})
         elif c.kind == "public_news":
@@ -4519,23 +4521,34 @@ def swing_page_view(view: JournalView, geo: Geometry) -> dict[str, Any]:
 
 
 def swing_agent_cards(view: JournalView) -> list[dict[str, Any]]:
-    """The Scout's and the Skeptic's cards: job, calls and usable share over every swing run."""
+    """The Scout's and the Skeptic's cards: job, calls and usable share over every swing meeting,
+    paper and live (`role_stats`); the latest verdict from the newest meeting with a swing part."""
     out = []
+    calls_all = role_calls(view)
+    latest: list[tuple[datetime, int, str, Any]] = []      # (slot, decision no, href, swing ideas)
+    for cv in view.cycles:
+        if cv.doc.swing is not None:
+            latest.append((cv.doc.slot, 0, f"cycles/{cv.doc.cycle_id}.html#swing-ideas", list(cv.doc.swing.ideas)))
+    for no, doc in view.paper_cycles.items():
+        if doc.swing is not None:
+            latest.append((doc.slot, no, paper_href(no) + "#d-ideas", [p.idea for p in doc.swing.ideas]))
+    latest.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    last = latest[0] if latest else None
     for spec in SWING_AGENT_SPECS:
-        calls = [call_view(x) for cv in view.cycles for x in cv.doc.calls if x.role in spec.roles]
-        ok = sum(1 for x in calls if not x["failed"])
-        last = next((cv for cv in view.cycles if cv.doc.swing is not None), None)
+        st = role_stats(view, spec.roles, calls_all)
         verdict = ""
         if last is not None and spec.slug == "scout":
-            verdict = plural(len(last.doc.swing.ideas), "idea")
+            verdict = plural(len(last[3]), "idea")
         elif last is not None:
-            words = [i.verdict.verdict for i in last.doc.swing.ideas if i.verdict is not None]
+            words = [i.verdict.verdict for i in last[3] if i.verdict is not None]
             verdict = ", ".join(f"{words.count(w)} {w}" for w in ("pass", "wait", "reject") if words.count(w)) or "no verdict"
         out.append({"spec": spec, "slug": spec.slug, "name": spec.name, "accent": spec.accent,
                     "icon": {"scout": "file-search", "skeptic": "flask-conical"}[spec.slug], "kind": spec.kind,
-                    "short": spec.short, "job": spec.job, "more": spec.more, "calls": len(calls), "ok": ok,
-                    "ok_pct": f"{100.0 * ok / len(calls):.0f}%" if calls else "—", "verdict": verdict,
-                    "last": last, "source": f"{REPO_URL}/blob/main/{spec.source}", "source_path": spec.source,
+                    "short": spec.short, "job": spec.job, "more": spec.more, "calls": st["calls"], "ok": st["ok"],
+                    "ok_pct": st["ok_pct"], "verdict": verdict, "stats": st,
+                    "last": last, "last_href": last[2] if last else "", "last_slot": last[0] if last else None,
+                    "last_paper": bool(last and last[1]),
+                    "source": f"{REPO_URL}/blob/main/{spec.source}", "source_path": spec.source,
                     "page": f"agents/{spec.slug}.html"})
     return out
 
@@ -4708,7 +4721,13 @@ def paper_book_home(book: Any, as_of: datetime | None, geo: Geometry) -> dict[st
     closed = [{"line": t.ticker, "side": t.side, "ret": fmt_signed(t.return_net_pct), "days": t.days_held,
                "why": EXIT_WORDS.get(t.exit_reason or "", (t.exit_reason or "closed").replace("_", " "))}
               for t in book.swing_trades if t.status == "closed"]
+    cost = getattr(book, "cost_pct", None)
+    parts_ret = None
+    if cost is not None:     # the return = market move - declared costs paid (percent only)
+        parts_ret = {"market": fmt_signed(book.paper_return_pct + cost), "cost": fmt_signed(-cost),
+                     "market_up": book.paper_return_pct + cost >= 0}
     return {"rows": rows, "split": split, "closed": closed[-10:][::-1], "ret": fmt_signed(book.paper_return_pct),
+            "ret_parts": parts_ret,
             "up": book.paper_return_pct >= 0, "since": fmt_day(book.started) if book.started else "—",
             "as_of": as_of}
 
@@ -4726,7 +4745,7 @@ def decision_view(doc: PublicPaperCycle, verified: bool, lines: Lines) -> dict[s
         it = r.item
         if it.kind in ("licensed_news", "broker_feed"):
             label, note = it.id, (f"{it.source} headline (licensed): id and source only" if it.source
-                                  else "broker news item (licensed): id only")
+                                  else "licensed feed item: id only")
         elif it.kind == "filing":
             label, note = " ".join(x for x in (it.form or "filing", ", ".join(it.items)) if x), it.id
         else:
@@ -4753,7 +4772,7 @@ def decision_view(doc: PublicPaperCycle, verified: bool, lines: Lines) -> dict[s
         counts[key] = counts.get(key, 0) + 1
     core = paper_core_view(doc.core, lines)
     cl = core_line(doc.core, lines)
-    return {"doc": doc, "sw": sw, "ideas": ideas, "chosen": chosen, "reading": reading,
+    return {"doc": doc, "sw": sw, "ideas": ideas, "chosen": chosen, "reading": reading, "run_href": "",
             "core": core, "core_line": cl, "verified": verified, "journeys": journeys,
             "banner": verdict_banner(journeys, cl, sw),
             "inputs": {"counts": sorted(counts.items(), key=lambda t: -t[1]),
@@ -5052,6 +5071,507 @@ def paper_home(view: JournalView, lines: Lines, geo: Geometry | None = None) -> 
                      "since": fmt_day(perf.since) if perf.since else "—", "note": perf.note} if perf else None}
 
 
+# ------------------------------------------------------------------------------ shared view model
+# Helpers for every page (FOUNDATION). Paper runs are the current reality, so pages read these
+# instead of `view.cycles` alone:
+#
+#   meetings(view, lines) -> list[dict]         every council meeting, newest first: live runs
+#       (kind "live" / "rehearsal", from journal/cycles) and paper decisions (kind "paper", from
+#       journal/paper). Keys: kind, badge ("LIVE" | "REHEARSAL" | "PAPER"), cycle_id, slot,
+#       decision_no (int | None), verdict (one sentence), chosen (words, "no trade"), ideas (int),
+#       core_moves (int), core_verb ("built" / "held" / "changed 2 lines"), href (the decision page
+#       for paper, the run page for live; relative to the site root), run_href (the live run page
+#       or ""), decision_href (the paper decision page or ""), verified (bool).
+#   role_calls(view) -> list[dict]              every model call of every meeting: {kind, cycle_id,
+#       slot, decision_no, href, call (PublicCall)}; newest meeting first.
+#   role_stats(view, roles) -> dict             one agent's numbers over paper + live calls whose
+#       role is in `roles`: calls, ok, failed, ok_pct ("83%" | "—"), ok_num, runs (meetings it
+#       spoke in), by_kind {paper, live, rehearsal}, latency (median, words), last (the newest
+#       role_calls row or None).
+#   agent_role_stats(view) -> {slug: role_stats} for every agent page slug (core specs + scout,
+#       skeptic) and the swing seats (swing_bull, swing_bear, swing_pm).
+#   rule_anchor(code) -> "S8" | "R14" | "MC" | None   the rules.html card id for a rule / reason
+#       code ("S8:illiquid", "R14", "NDX: R11", "net_rr_below_min" -> "S6"); None when unknown.
+#   rule_href(code, root="") -> "rules.html#S8" | ""; Jinja: `rule_link(code, root, cls)` renders
+#       the code chip as a link to its rule card (a plain <code> when unknown).
+#   AGENT_OF_STEP: journey step key -> agent page slug (scout, skeptic, bull, pm; gate/rules -> "").
+SWING_RULE_OF: dict[str, str] = dict(SWING_RULE_CODES)
+CORE_RULE_WORDS = {"material_change": "MC", "material_change_required": "MC", "not_material": "MC",
+                   "initial_build": "IB", "build_phase": "IB", "approval": "AP", "reconcile": "RC",
+                   "priority": "PR"}
+RULE_ID = re.compile(r"(?:^|[\s:(])((?:SB|S|R)\d{1,2}[a-z]?)(?=$|[\s:),.])")
+AGENT_OF_STEP = {"scout": "scout", "skeptic": "skeptic", "debate": "bull", "pm": "pm", "gate": "", "rules": ""}
+AGENT_ROLE_SLUGS = {**{a.slug: tuple(a.roles) for a in AGENT_SPECS if a.roles},
+                    "scout": ("scout",), "skeptic": ("skeptic",), "swing_bull": ("swing_bull",),
+                    "swing_bear": ("swing_bear",), "swing_pm": ("swing_pm",)}
+
+
+def rule_anchor(code: str | None) -> str | None:
+    if not code:
+        return None
+    text = str(code).strip()
+    m = RULE_ID.search(text)
+    if m:
+        return m.group(1)
+    bare = text.split(":")[-1].strip()
+    return SWING_RULE_OF.get(bare) or CORE_RULE_WORDS.get(bare)
+
+
+def rule_href(code: str | None, root: str = "") -> str:
+    a = rule_anchor(code)
+    return f"{root}rules.html#{a}" if a else ""
+
+
+def rule_link(code: str | None, root: str = "", cls: str = "jc-code") -> Markup:
+    if not code:
+        return Markup("")
+    href = rule_href(code, root)
+    if not href:
+        return Markup('<code class="{}">{}</code>').format(cls, code)
+    return Markup('<a class="{} rule-link" href="{}" title="Rule {}: what it says and its numbers">{}</a>').format(
+        cls, href, rule_anchor(code), code)
+
+
+def _meeting_verdict(chosen: str, ideas: int | None, core_verb: str) -> str:
+    swing = ("no swing trade" if chosen == "no trade" else f"entered {chosen}")
+    if ideas is not None:
+        swing += f" from {plural(ideas, 'idea')}"
+    return f"{swing[:1].upper()}{swing[1:]}; core {core_verb}."
+
+
+def meetings(view: JournalView, lines: Lines) -> list[dict[str, Any]]:
+    live_ids = {cv.doc.cycle_id for cv in view.cycles}
+    out: list[dict[str, Any]] = []
+    for cv in view.cycles:
+        c = cv.doc
+        sec = c.swing
+        chosen_i = [i for i in (sec.ideas if sec else []) if i.stage_reached in ("planned", "approved", "executed")]
+        chosen = ", ".join(f"{ticker(i.ticker)} {i.side}" for i in chosen_i) or "no trade"
+        cl = core_line(c, lines)
+        kind = "rehearsal" if cv.rehearsal else "live"
+        href = f"cycles/{c.cycle_id}.html"
+        out.append({"kind": kind, "badge": kind.upper(), "cycle_id": c.cycle_id, "slot": c.slot,
+                    "decision_no": None, "chosen": chosen, "ideas": len(sec.ideas) if sec else 0,
+                    "core_moves": cl["moved"], "core_verb": cl["verb"],
+                    "verdict": _meeting_verdict(chosen, len(sec.ideas) if sec else None, cl["verb"]),
+                    "href": href, "run_href": href, "decision_href": "", "verified": cv.verified})
+    for r in view.paper_rows:
+        doc = view.paper_cycles.get(r.decision_no)
+        cl = core_line(doc.core, lines) if doc is not None else {"verb": "held" if not r.core_moves else
+                                                                  f"changed {plural(r.core_moves, 'line')}",
+                                                                  "moved": r.core_moves}
+        chosen = chosen_words(list(r.chosen))
+        has_swing = doc is not None and doc.swing is not None
+        out.append({"kind": "paper", "badge": "PAPER", "cycle_id": r.cycle_id, "slot": r.slot,
+                    "decision_no": r.decision_no, "chosen": chosen, "ideas": r.ideas,
+                    "core_moves": r.core_moves, "core_verb": cl["verb"],
+                    "verdict": _meeting_verdict(chosen, r.ideas if has_swing or r.ideas else None, cl["verb"]),
+                    "href": paper_href(r.decision_no),
+                    "run_href": f"cycles/{r.cycle_id}.html" if r.cycle_id in live_ids else "",
+                    "decision_href": paper_href(r.decision_no),
+                    "verified": view.paper_verified.get(r.decision_no, False)})
+    out.sort(key=lambda m: (m["slot"], m["decision_no"] or 0), reverse=True)
+    return out
+
+
+def role_calls(view: JournalView) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for cv in view.cycles:
+        kind = "rehearsal" if cv.rehearsal else "live"
+        for x in cv.doc.calls:
+            rows.append({"kind": kind, "cycle_id": cv.doc.cycle_id, "slot": cv.doc.slot, "decision_no": None,
+                         "href": f"cycles/{cv.doc.cycle_id}.html", "call": x})
+    for no, doc in view.paper_cycles.items():
+        for x in doc.core.calls:
+            rows.append({"kind": "paper", "cycle_id": doc.cycle_id, "slot": doc.slot, "decision_no": no,
+                         "href": paper_href(no), "call": x})
+    rows.sort(key=lambda r: (r["slot"], r["decision_no"] or 0), reverse=True)
+    return rows
+
+
+def role_stats(view: JournalView, roles: tuple[str, ...] | list[str] | set[str],
+               calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    mine = [r for r in (calls if calls is not None else role_calls(view)) if r["call"].role in set(roles)]
+    views = [call_view(r["call"]) for r in mine]
+    n = len(views)
+    ok = sum(1 for v in views if not v["failed"])
+    by_kind = {k: sum(1 for r in mine if r["kind"] == k) for k in ("paper", "live", "rehearsal")}
+    lat = median([float(r["call"].latency_ms) for r in mine if r["call"].latency_ms is not None])
+    return {"calls": n, "ok": ok, "failed": n - ok, "ok_pct": f"{100.0 * ok / n:.0f}%" if n else "—",
+            "ok_num": 100.0 * ok / n if n else None, "runs": len({(r["kind"], r["cycle_id"]) for r in mine}),
+            "by_kind": by_kind, "latency": fmt_secs(int(lat)) if lat is not None else "—",
+            "last": mine[0] if mine else None}
+
+
+def agent_role_stats(view: JournalView) -> dict[str, dict[str, Any]]:
+    calls = role_calls(view)
+    return {slug: role_stats(view, roles, calls) for slug, roles in AGENT_ROLE_SLUGS.items()}
+
+
+# ------------------------------------------------------------------------------ the rules page
+def _p(frac: Any, digits: int = 2) -> str:
+    """A fraction as a percent in words (0.08 -> "8%", 1.9 -> "190%")."""
+    return f"{trim_number(float(frac) * 100.0, digits)}%"
+
+
+def _bp(bps: Any) -> str:
+    """Basis points as a percent ("40" -> "0.4%")."""
+    return f"{trim_number(float(bps) / 100.0, 3)}%"
+
+
+def _n(v: Any) -> str:
+    return trim_number(float(v), 2) if isinstance(v, int | float) and not isinstance(v, bool) else str(v)
+
+
+def _yes(v: Any) -> str:
+    return "yes" if v else "no"
+
+
+def _core_numbers(key: str, v: Any) -> list[tuple[str, str]]:
+    """The labelled numbers of one core rule (percent of the portfolio unless stated)."""
+    if key == "gross":
+        return [("Proposals stay under", _p(v["proposal_max"])), ("Code refuses above", _p(v["hard_max"])),
+                ("On a watch, cut back to", _p(v["watch_derisk_to"]))]
+    if key == "net":
+        return [("Net exposure at least", _p(v["min"])), ("Net exposure at most", _p(v["max"])),
+                ("All shorts together at most", _p(v["short_gross_max"]))]
+    if key == "killswitch":
+        return [("Warn (no new risk) at a fall of", _p(1 - float(v["warn_at"]))),
+                ("Halt at a fall of", _p(1 - float(v["halt_at"]))), ("Confirming reads", _n(v["confirm_reads"])),
+                ("Seconds between reads", _n(v["confirm_gap_s"])), ("Measured from", f"the {v['peak']} peak")]
+    if key == "catastrophe_stop":
+        out = [("Stop distance", f"the larger of the class floor and {_n(v['sigma_mult'])} × daily volatility × √{_n(v['horizon_days'])}"),
+               ("Furthest stop", _p(v["cap"]))]
+        out += [(f"Floor: {k.replace('_', ' ')}", _p(x)) for k, x in v.get("floors", {}).items()]
+        return out
+    if key == "reentry_cooloff_days":
+        return [("Wait after a stop hit", plural(int(v["default"]), "day")), ("Crypto", plural(int(v["crypto"]), "day"))]
+    if key == "caps":
+        out = [(f"Line cap: {k}", _p(x)) for k, x in v["line"].items()]
+        return out + [("Crypto together", _p(v["crypto_total"])), ("Currencies together", _p(v["fx_total"])),
+                      ("Equity lines together (" + ", ".join(v["equity_beta_cluster"]["members"]) + ")",
+                       _p(v["equity_beta_cluster"]["max"]))]
+    if key == "leverage_caps":
+        return [(f"Leverage: {k}", f"{_n(x)}x") for k, x in v.items()]
+    if key == "margin_use_max":
+        return [("Margin in use at most", _p(v)), ("Cash reserve at least", _p(1 - float(v)))]
+    if key == "ex_ante_vol_hard":
+        return [("Expected yearly volatility below", _p(v))]
+    if key == "vol_breaker":
+        return [("One line: short-term vs usual volatility", f"{_n(v['instrument_ratio'])}×"),
+                ("Whole book", f"{_n(v['book_ratio'])}×"), ("Volatility card from", f"{_n(v['card_ratio'])}×")]
+    if key == "authority":
+        return [("Lines changed per run, at most", _n(v["max_deviations_per_cycle"])),
+                ("Uptrend: cut with a qualifying card, up to", _p(v["up"]["cut_with_qualifying_card"]) + " of the line's full size"),
+                ("Uptrend: extra leverage, up to", _p(v["up"]["leverage_extension"]) + " (only if it passes the cost gate)"),
+                ("Mixed trend: range", f"{_p(v['mixed']['lo'])} to {_p(v['mixed']['hi'])}"),
+                ("Downtrend: range", f"{_p(v['down']['lo'])} to {_p(v['down']['hi'])} (shorts need a cited risk card)"),
+                ("Expired cards return the line to the reference", _yes(v.get("card_expiry_returns_to_reference")))]
+    if key == "deadband":
+        return [("Skip changes under", _p(v["level"]) + " of the line's full size"), ("Crypto", _p(v["level_crypto"])),
+                ("Or under", _p(v["min_nav_share"]) + " of the portfolio")]
+    if key == "min_hold_days":
+        return [("Hold at least", plural(int(v["default"]), "day")), ("Crypto", plural(int(v["crypto"]), "day")),
+                ("No flip from long to short within", f"{_n(v['no_flip_hours'])} h"),
+                ("Moving back to the reference is always allowed", _yes(v.get("toward_reference_exempt")))]
+    if key == "churn":
+        return [("Added in one run, at most", _p(v["cycle_increase_max"])), ("Traded in 7 days, at most", _p(v["turnover_7d_max"])),
+                ("Traded in 30 days, at most", _p(v["turnover_30d_max"]))]
+    if key == "cost_budget":
+        return [("Trading costs in one run, at most", _bp(v["cycle_max_bps"])),
+                ("Discretionary costs in 30 days, at most", _bp(v["discretionary_30d_max_bps"])),
+                ("Overnight financing a proposal may add, a day", _bp(v["carry_proposal_max_bps_day"])),
+                ("Financing that puts the book on watch, a day", _bp(v["carry_watch_max_bps_day"]))]
+    if key == "net_of_cost_gate":
+        return [("Break-even Sharpe ratio, reference trades, at most", _n(v["reference_max_srbe"])),
+                ("Break-even Sharpe ratio, council trades, at most", _n(v["council_max_srbe"])),
+                ("Assumed holding period", f"{v['hold_days']['default']} days ({v['hold_days']['crypto']} crypto)")]
+    if key == "event_block":
+        return [("No adds before a macro release", f"{_n(v['macro_before_h'])} h"), ("… and after it", f"{_n(v['macro_after_h'])} h"),
+                ("Before a company's earnings", f"{_n(v['earnings_before_h'])} h"), ("… and after", f"{_n(v['earnings_after_h'])} h"),
+                ("An estimated earnings date counts as", f"± {_n(v['earnings_estimate_window_days'])} trading days")]
+    if key == "anti_chase_sigma":
+        return [("No adds after a one-day move larger than", f"{_n(v)}σ (its usual daily move)")]
+    if key == "freshness":
+        return [("Daily bars at most", f"{_n(v['daily_bar_max_h'])} h old"), ("4-hour bars at most", f"{_n(v['four_hour_bar_max_h'])} h old"),
+                ("Quotes at most", f"{_n(v['quote_max_s'])} s old"),
+                ("Frozen reference share at most", _p(v["frozen_reference_share_max"]))]
+    if key == "material_change_required":
+        return [("Required", _yes(v))]
+    if key == "initial_build":
+        return [("Rules paused per never-filled line", ", ".join(v["exempt"])), ("At most", plural(int(v["max_cycles"]), "run")),
+                ("R14 overnight financing", "still applies")]
+    if key == "proposal":
+        return [("Risk-adding and discretionary orders, at most", _n(v["max_legs"])), ("All orders, at most", _n(v["max_legs_total"]))]
+    if key == "approval":
+        w = v["window"]
+        return [("Approval window", f"{w['start']}–{w['end']} Lisbon time"),
+                ("Price moved since the run, at most", f"{_n(v['open_price_guard_sigma4h'])}σ of 4 hours"),
+                ("Book drift since the run, at most", _p(v["drift_l1_max"])), ("Order size may differ by", _p(v["amount_tolerance"])),
+                ("Cost may rise to", f"{_n(v['cost_tolerance_mult'])}× plus {_bp(v['cost_tolerance_add_bps'])}"),
+                ("Exposure after the fills, within", _p(v["post_fill_exposure_tolerance"]))]
+    if key == "reconcile":
+        return [("Gap between the real book and the plan, flagged above", _p(v["drift_max"])),
+                ("Stop-loss level tolerance", _p(v["sl_rate_tolerance"]))]
+    if key == "priority":
+        return [("Order", " > ".join(str(x).replace("_", " ") for x in v))]
+    return [(k.replace(".", " · ").replace("_", " "), val) for k, val in _flatten(v, "" if isinstance(v, dict) else key)]
+
+
+CORE_EXTRA = {   # id -> (title, plain), rules without a block of numbers in policy/risk.yaml
+    "R19": ("Closed markets", "A line whose market is closed is held where it is; nothing is bought or sold on it "
+            "until the market reopens."),
+    "R20": ("Open blockers", "While an operator blocker is open (an unresolved incident or check), the lines it covers "
+            "are held and no new risk is added; swing ideas are dropped too."),
+}
+CORE_IDS = {"material_change_required": "MC", "initial_build": "IB", "approval": "AP", "reconcile": "RC", "priority": "PR"}
+INITIAL_BUILD_PLAIN = ("While the book is first built, a line that has never been filled is exempt from {exempt} "
+                       "(churn, cost budget and the net-of-cost gate), until every target line has been filled once or "
+                       "{n} runs have passed; R14's overnight-financing limit still applies.")
+
+
+def core_rule_cards(policy_dir: Path) -> list[dict[str, Any]]:
+    text = (policy_dir / "risk.yaml").read_text()
+    data = yaml.safe_load(text) or {}
+    ids: dict[str, str] = {}
+    for line in text.splitlines():
+        m = re.match(r"^([a-z_]+):.*?#\s*(R\d+[a-z]?)\b", line)
+        if m:
+            ids[m.group(1)] = m.group(2)
+    cards = []
+    for key, value in data.items():
+        if key == "version":
+            continue
+        rid = ids.get(key) or CORE_IDS.get(key) or key.upper()[:3]
+        plain = rule_plain(key, value)
+        if key == "initial_build":
+            plain = INITIAL_BUILD_PLAIN.format(exempt=join_words(list(value.get("exempt", []))),
+                                               n=SPELLED.get(int(value.get("max_cycles", 5)), value.get("max_cycles")))
+        cards.append({"id": rid, "key": key, "title": RULE_TITLES.get(key, key.replace("_", " ").capitalize()),
+                      "plain": plain or RULE_TITLES.get(key, key), "numbers": _core_numbers(key, value),
+                      "codes": [], "seat": "risk"})
+        if key == "freshness":
+            for xid, (title, plain_x) in CORE_EXTRA.items():
+                cards.append({"id": xid, "key": "", "title": title, "plain": plain_x, "numbers": [], "codes": [],
+                              "seat": "risk"})
+    return cards
+
+
+SWING_TITLES = {
+    "S0": "Not a core holding", "S1": "Position size", "S2": "Open trades", "S3": "Weekly cap on new trades",
+    "S4": "Open risk", "S5": "Stops", "S6": "Targets and reward against risk", "S7": "Time stop", "S8": "Liquidity",
+    "S9": "Earnings", "S10": "Similar trades and market exposure", "S11": "No chasing", "S12": "Fees",
+    "S13": "Shorts", "S14": "Cool-off", "S15": "Loss brake", "S16": "Entry guard at approval",
+    "S17": "Drawdown scaling", "S18": "The swing budget is full", "SB16": "Which setups may trade",
+}
+
+
+def _swing_text(rid: str, s: dict[str, Any]) -> tuple[str, list[tuple[str, str]]]:
+    g = lambda *path: _dig(s, path)       # noqa: E731
+    if rid == "S0":
+        return ("A stock the core council already holds as a line cannot also be a swing trade.", [])
+    if rid == "S1":
+        return (f"Each swing trade is about {_p(g('size', 'target_nav'))} of the portfolio, cut so that hitting the stop "
+                f"loses at most {_p(g('size', 'max_loss_nav_at_stop'))} ({_p(g('size', 'short_max_loss_nav_at_stop'))} for a short).",
+                [("Target size", _p(g("size", "target_nav"))), ("Smallest size after the stop cut", _p(g("size", "min_nav"))),
+                 ("Loss at the stop, long, at most", _p(g("size", "max_loss_nav_at_stop"))),
+                 ("Loss at the stop, short, at most", _p(g("size", "short_max_loss_nav_at_stop"))),
+                 ("Short with unknown short interest", f"{_p(g('size', 'short_si_unknown_mult'))} of the size")])
+    if rid == "S2":
+        return (f"At most {_n(g('capacity', 'max_open'))} swing trades open at once, {_n(g('capacity', 'max_short'))} of them "
+                "short, and one per stock.",
+                [("Open trades, at most", _n(g("capacity", "max_open"))), ("Shorts, at most", _n(g("capacity", "max_short"))),
+                 ("Per stock", "1")])
+    if rid == "S3":
+        return (f"At most {_n(g('capacity', 'max_new_7d'))} new swing trades in any seven days: a ceiling, not a quota.",
+                [("New trades in a rolling 7 days, at most", _n(g("capacity", "max_new_7d")))])
+    if rid == "S4":
+        return (f"All open and proposed swing trades together may lose at most {_p(g('capacity', 'max_open_risk_nav'))} "
+                "of the portfolio at their stops, allowing for gaps.",
+                [("Open risk at the stops, at most", _p(g("capacity", "max_open_risk_nav"))),
+                 ("Gap allowance", f"{_n(g('capacity', 'open_risk_gap_mult'))}× the stop distance")])
+    if rid == "S5":
+        return (f"Every trade has a stop between {_p(g('stops', 'min_pct'))} and {_p(g('stops', 'max_long_pct'))} away "
+                f"({_p(g('stops', 'max_short_pct'))} for a short), outside one day's normal range; stops only ever move toward safety.",
+                [("Closest stop", _p(g("stops", "min_pct"))), ("Furthest stop, long", _p(g("stops", "max_long_pct"))),
+                 ("Furthest stop, short", _p(g("stops", "max_short_pct"))),
+                 ("At least", f"{_n(g('stops', 'min_atr_mult'))} × the average daily range")])
+    if rid == "S6":
+        return (f"The target must pay at least {_n(g('targets', 'min_net_rr'))} times what the stop risks, after costs, and be "
+                "a move the stock can plausibly make in the time allowed. The code gate checks the Scout's levels before the Skeptic sees them.",
+                [("Net reward against risk, at least", _n(g("targets", "min_net_rr"))),
+                 ("Target, at least", f"{_n(g('targets', 'min_cost_mult'))} × the round-trip cost"),
+                 ("Target, at most", _p(g("targets", "max_pct"))),
+                 ("Target, at most", f"{_n(g('targets', 'max_vol_mult'))} × daily volatility × √sessions"),
+                 ("Daily volatility, at most", _p(g("targets", "max_sigma_daily")))])
+    if rid == "S7":
+        return (f"A trade closes after {_n(g('time_stop', 'min_sessions'))} to {_n(g('time_stop', 'max_sessions'))} sessions; "
+                f"the manager may extend it once, with a new cited fact, to at most {_n(g('time_stop', 'max_total_sessions'))}.",
+                [("Time stop", f"{_n(g('time_stop', 'min_sessions'))}–{_n(g('time_stop', 'max_sessions'))} sessions"),
+                 ("One extension, at most", f"{_n(g('time_stop', 'max_extension_sessions'))} sessions"),
+                 ("In total, at most", f"{_n(g('time_stop', 'max_total_sessions'))} sessions")])
+    if rid == "S8":
+        return ("Only stocks that trade enough every day and are not penny stocks; shorts need much more trading volume.",
+                [("Thresholds", "a minimum average daily traded value and share price, higher for shorts; the amounts are in "
+                                "policy/swing.yaml (this site shows no money amounts)")])
+    if rid == "S9":
+        return (f"No entry within {_n(g('earnings', 'no_entry_within_sessions'))} sessions of earnings, an exit proposal "
+                f"{_n(g('earnings', 'exit_before_sessions'))} session before them, and a {_n(g('earnings', 'post_report_wait_h'))}-hour wait after a report.",
+                [("No entry within", f"{_n(g('earnings', 'no_entry_within_sessions'))} sessions"),
+                 ("Exit proposal before", f"{_n(g('earnings', 'exit_before_sessions'))} session"),
+                 ("Wait after a report", f"{_n(g('earnings', 'post_report_wait_h'))} h"),
+                 ("An estimated date counts as", f"± {_n(g('earnings', 'estimated_window_days'))} days")])
+    if rid == "S10":
+        return (f"At most {_n(g('correlation', 'max_open_per_bucket'))} trades on the same kind of bet, and the swing book's "
+                "net market exposure stays small.",
+                [("Trades per bucket, at most", _n(g("correlation", "max_open_per_bucket"))),
+                 ("Counts as the same bet above a correlation of", _n(g("correlation", "same_bet_corr"))),
+                 ("Swing book's net beta, at most", _n(g("correlation", "max_swing_net_beta")))])
+    if rid == "S11":
+        return (f"An idea is dropped if the stock already moved more than {_n(g('chase', 'max_move_since_news_sigma'))}σ since "
+                f"the news; from {_n(g('chase', 'prior_wait_sigma'))}σ the Skeptic leans towards wait.",
+                [("Dropped above", f"{_n(g('chase', 'max_move_since_news_sigma'))}σ since the news"),
+                 ("The Skeptic's wait prior from", f"{_n(g('chase', 'prior_wait_sigma'))}σ")])
+    if rid == "S12":
+        enforce = g("fees", "mode") == "enforce"
+        return (("Fees are " + ("enforced" if enforce else "measured and published, never a brake") +
+                 f": a budget of {_bp(g('fees', 'budget_30d_nav_bps'))} of the portfolio over 30 days."),
+                [("Mode", "enforced" if enforce else "reported only"), ("Fee budget over 30 days", _bp(g("fees", "budget_30d_nav_bps"))),
+                 ("Fees against gross gains, at most", _p(g("fees", "max_fee_to_gross"), 1)),
+                 ("Measured after", plural(int(g("fees", "min_closed_for_ratio")), "closed trade"))])
+    if rid == "S13":
+        return ("Shorts are 1x with a hard stop, and never on a recent listing, a crowded or squeeze-prone name, a takeover "
+                "target or a stock that just flushed.",
+                [("Listed at least", f"{_n(g('shorts', 'min_listing_days'))} days"),
+                 ("Short interest, at most", f"{_n(g('shorts', 'max_si_pct_float'))}% of the float"),
+                 ("No short after a fall of", f"{_n(g('shorts', 'no_short_after_down_sigma'))}σ"),
+                 ("No short after a 20-day rise above", _p(g("shorts", "no_short_ret20_above"))),
+                 ("Squeeze risk: price within this far of its high", _p(g("shorts", "near_high_pct"))),
+                 ("… with volume above", f"{_n(g('shorts', 'near_high_vol_ratio'))}× normal"),
+                 ("Takeover news looked back", f"{_n(g('shorts', 'takeover_lookback_days'))} days")])
+    if rid == "S14":
+        return (f"After a stop is hit the stock waits {_n(g('cooloff', 'after_stop_sessions'))} sessions; after any other exit "
+                f"{_n(g('cooloff', 'after_exit_sessions'))}.",
+                [("After a stop", f"{_n(g('cooloff', 'after_stop_sessions'))} sessions"),
+                 ("After another exit", f"{_n(g('cooloff', 'after_exit_sessions'))} sessions")])
+    if rid == "S15":
+        return (f"A net loss of {_p(abs(float(g('brake', 'pnl_nav'))))} of the portfolio over {_n(g('brake', 'window_days'))} days, "
+                "after all costs, stops new swing trades; only the operator lifts it.",
+                [("Loss that stops new trades", _p(g("brake", "pnl_nav"))), ("Window", f"{_n(g('brake', 'window_days'))} days"),
+                 ("After all costs", _yes(g("brake", "net_of_all_costs")))])
+    if rid == "S16":
+        return (f"An approved entry is a market order within {_n(g('entry_guard', 'valid_minutes'))} minutes of the run; it "
+                "is dropped if the price already ran too far or hit the stop.",
+                [("Approve within", f"{_n(g('entry_guard', 'valid_minutes'))} min"),
+                 ("Price run, at most", f"{_p(g('entry_guard', 'max_run_stop_frac'))} of the stop distance or {_p(g('entry_guard', 'max_run_pct'))}"),
+                 ("Re-proposals, at most", _n(g("entry_guard", "max_reproposals")))])
+    if rid == "S17":
+        return (f"From a fall of {_p(abs(float(g('drawdown_scale', 'from_peak'))))} below the peak, trades shrink to "
+                f"{_p(g('drawdown_scale', 'size_nav'))} with at most {_n(g('drawdown_scale', 'max_open'))} open; the core kill "
+                "switch's warn or halt blocks new entries.",
+                [("Starts at a fall of", _p(abs(float(g("drawdown_scale", "from_peak"))))),
+                 ("Size then", _p(g("drawdown_scale", "size_nav"))), ("Open trades then, at most", _n(g("drawdown_scale", "max_open")))])
+    if rid == "S18":
+        return ("An entry is refused if it would push the swing trades above the swing budget the council set (below).",
+                [("Budget", "see the swing budget card")])
+    if rid == "SB16":
+        live = ", ".join(SETUP_WORDS.get(x, x.replace("_", " ")) for x in s.get("setups_live", []))
+        paper = ", ".join(SETUP_WORDS.get(x, x.replace("_", " ")) for x in s.get("setups_paper_only", []))
+        return ("Only some setups may trade; the rest are tracked on paper only, to measure them.",
+                [("May trade", live or "—"), ("Paper only", paper or "—")])
+    return ("", [])
+
+
+def _dig(d: Any, path: tuple[str, ...]) -> Any:
+    for k in path:
+        d = (d or {}).get(k)
+    return d
+
+
+def swing_rule_cards(policy_dir: Path) -> list[dict[str, Any]]:
+    path = policy_dir / "swing.yaml"
+    s = (yaml.safe_load(path.read_text()) or {}) if path.exists() else {}
+    if not s:
+        return []
+    order = [f"S{n}" for n in range(19)] + ["SB16"]
+    cards = []
+    for rid in order:
+        try:
+            plain, nums = _swing_text(rid, s)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            plain, nums = "", []
+        codes = [{"code": c, "words": code_words(c)} for c, r in SWING_RULE_OF.items() if r == rid]
+        cards.append({"id": rid, "key": "", "title": SWING_TITLES.get(rid, rid), "plain": plain or SWING_TITLES.get(rid, rid),
+                      "numbers": nums, "codes": codes, "seat": "skeptic" if rid == "S11" else "scout"})
+        if rid == "S18":
+            b = s.get("budget") or {}
+            try:
+                cards.append({"id": "budget", "key": "budget", "title": "The swing budget (set by the council)",
+                              "plain": (f"The swing manager's attempts each vote a swing budget from 0 to {_n(b['max_pct'])}% of "
+                                        f"the portfolio in steps of {_n(b['step_pct'])}; code takes the median and clamps it. "
+                                        "Unused swing money is invested in the core."),
+                              "numbers": [("Range", f"0–{_n(b['max_pct'])}%"), ("Steps", f"{_n(b['step_pct'])}%"),
+                                          ("Decided by", "the median of the swing manager's valid votes"),
+                                          ("Before the first valid vote", f"{_n(b['default_pct'])}%; later the last budget is kept"),
+                                          ("Code ceiling", f"{_n(invariants.SWING_MAX_BUDGET_PCT)}%"),
+                                          ("Core re-sized when swing exposure moved by", _p(b["core_rescale_deadband_nav"]))],
+                              "codes": [], "seat": "pm", "badge": "Budget"})
+            except (KeyError, TypeError, ValueError):
+                continue
+    return cards
+
+
+def hard_limit_cards() -> list[dict[str, Any]]:
+    i = invariants
+    g = lambda name, default=None: getattr(i, name, default)    # noqa: E731
+    cards = [
+        {"id": "H1", "title": "Total exposure", "plain": f"All positions together stay at most {_p(i.GROSS_HARD_MAX)} of the portfolio.",
+         "numbers": [("Gross exposure, at most", _p(i.GROSS_HARD_MAX))]},
+        {"id": "H2", "title": "Kill switch", "plain": "Whatever the policy file says, code stops adding risk and proposes selling "
+                                                      f"everything at a fall of {_p(1 - i.HALT_AT_PEAK_FRACTION)} from the best value ever reached, at the latest.",
+         "numbers": [("Halt at a fall of", _p(1 - i.HALT_AT_PEAK_FRACTION)), ("Measured from", "the lifetime peak")]},
+        {"id": "H3", "title": "A stop-loss on every opening order", "plain": "Every order that opens a position carries a stop-loss at the broker.",
+         "numbers": [("Required", _yes(i.STOP_LOSS_ON_EVERY_OPEN))]},
+        {"id": "H4", "title": "A person approves every order", "plain": "No code path places an order without the operator's approval.",
+         "numbers": [("Required", _yes(i.HUMAN_APPROVAL_REQUIRED))]},
+        {"id": "H5", "title": "Only the agent portfolio", "plain": "Only the dedicated agent portfolio is ever touched; never the main account.",
+         "numbers": [("Enforced", _yes(i.NEVER_TOUCH_MAIN_ACCOUNT))]},
+        {"id": "H6", "title": "Swing ceilings", "plain": "The swing policy may be stricter than these, never looser.",
+         "numbers": [("Open swing trades, at most", _n(g("SWING_MAX_OPEN"))), ("Shorts, at most", _n(g("SWING_MAX_SHORT"))),
+                     ("One trade's size, at most", _p(g("SWING_MAX_SIZE_NAV"))), ("New trades in 7 days, at most", _n(g("SWING_MAX_NEW_7D"))),
+                     ("Loss at the stop, long, at most", _p(g("SWING_MAX_LONG_LOSS_NAV"))),
+                     ("Loss at the stop, short, at most", _p(g("SWING_MAX_SHORT_LOSS_NAV"))),
+                     ("Stop distance, long, at most", _p(g("SWING_MAX_LONG_STOP_PCT"))),
+                     ("Stop distance, short, at most", _p(g("SWING_MAX_SHORT_STOP_PCT"))),
+                     ("Open risk at the stops, at most", _p(g("SWING_MAX_OPEN_RISK_NAV"))),
+                     ("Gap allowance, at least", f"{_n(g('SWING_MIN_GAP_MULT'))}×"),
+                     ("Time stop including the extension, at most", f"{_n(g('SWING_MAX_TOTAL_SESSIONS'))} sessions"),
+                     ("Net reward against risk, at least", _n(g("SWING_MIN_NET_RR"))),
+                     ("An approved entry is stale after", f"{_n(g('SWING_MAX_ENTRY_VALID_MIN'))} min"),
+                     ("Model calls per slot, at most", _n(g("SWING_MAX_LLM_CALLS_PER_SLOT"))),
+                     ("Declared cost per leg, at least", f"{_n(g('SWING_MIN_DECLARED_COST_PCT_PER_LEG'))}%"),
+                     ("Loss brake fires no deeper than", _p(g("SWING_BRAKE_MIN_PNL_NAV"))),
+                     ("Drawdown scaling starts no later than", _p(g("SWING_DD_SCALE_MIN_FROM_PEAK"))),
+                     ("Size under drawdown scaling, at most", _p(g("SWING_DD_SCALE_MAX_SIZE_NAV")))]},
+        {"id": "H7", "title": "Swing budget ceiling", "plain": f"The council sets the swing budget itself, but code never lets it exceed {_n(g('SWING_MAX_BUDGET_PCT'))}% of the portfolio.",
+         "numbers": [("Swing budget, at most", f"{_n(g('SWING_MAX_BUDGET_PCT'))}%")]},
+        {"id": "H8", "title": "Go-live switches", "plain": "Constants in the code decide what may trade at all; changing one is a code change, not a setting.",
+         "numbers": [("Swing book trades live", _yes(g("SWING_BOOK_LIVE"))), ("Stock sleeve live", _yes(g("STOCK_SLEEVE_LIVE"))),
+                     ("Broker news feed allowed", _yes(g("BROKER_FEED_ENABLED")))]},
+    ]
+    for c in cards:
+        c.update(key="", codes=[], seat="code")
+    return cards
+
+
+def rule_book(policy_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """The rules page: hard limits (code constants), the core rules (policy/risk.yaml, R1-R21 + MC,
+    IB, AP, RC, PR) and the swing rules (policy/swing.yaml, S0-S18, SB16 and the swing budget). Each
+    card: id (the anchor, e.g. "R14", "S8"), title, plain (one sentence), numbers [(label, value)]
+    in % or plain units (never a raw yaml key), codes [{code, words}] and seat (badge colour)."""
+    return {"hard": hard_limit_cards(), "core": core_rule_cards(policy_dir), "swing": swing_rule_cards(policy_dir)}
+
+
 def make_env(lines: Lines | list[str] | None = None) -> Environment:
     if not isinstance(lines, Lines):
         lines = Lines({"lines": [{"symbol": s} for s in (lines or [])]})
@@ -5096,6 +5616,7 @@ def make_env(lines: Lines | list[str] | None = None) -> Environment:
         ring_css=ring_css,
         how_words=HOW_WORDS,
         swing_page=lambda k: "",         # replaced in build() once the swing asset pages are known
+        rule_link=rule_link, rule_href=rule_href, rule_anchor=rule_anchor, agent_of_step=AGENT_OF_STEP,
     )
     return env
 
@@ -5317,11 +5838,13 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
             after = view.paper_books.get(no)
             if after is None and view.paper_latest is not None and view.paper_latest.decision_no == no:
                 after = SimpleNamespace(book=view.paper_latest.book, as_of=view.paper_latest.as_of)
-            render("decision.html.j2", paper_href(no), "../../", "decisions",
-                   d=decision_view(doc, view.paper_verified.get(no, False), lines),
+            dv = decision_view(doc, view.paper_verified.get(no, False), lines)
+            if doc.cycle_id in runs:            # a live run of the same slot has its own page
+                dv["run_href"] = f"cycles/{doc.cycle_id}.html"
+            render("decision.html.j2", paper_href(no), "../../", "decisions", d=dv,
                    book=paper_book_home(after.book, after.as_of, geo) if after is not None else None)
     render("how.html.j2", "how.html", "", "how", roster=load_roster(prompts_dir, policy_dir))
-    render("rules.html.j2", "rules.html", "", "rules", rules=load_rules(policy_dir))
+    render("rules.html.j2", "rules.html", "", "rules", rules=load_rules(policy_dir), book=rule_book(policy_dir))
     render("record.html.j2", "record.html", "", "record", incidents=view.incidents, withdrawn=load_withdrawn())
     for old, new, name in REDIRECTS:
         path = out_dir / old

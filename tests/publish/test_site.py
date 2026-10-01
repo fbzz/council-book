@@ -193,9 +193,9 @@ def test_how_and_rules_pages_list_roles_and_rules(site, tmp_path):
     for text in ("Portfolio manager", "DECIDES", "ADVISES", "CONTEXT", "CODE", "Risk officer", "HUMAN"):
         assert text in pages["how.html"], text
     rules = pages["rules.html"]
-    for text in ("R1", "R3", "R15", "In plain words"):
+    for text in ('id="R1"', 'id="R3"', 'id="R15"', "Show the numbers"):
         assert text in rules, text
-    assert "code refuses anything above 2.0x" in rules                       # plain words, policy numbers
+    assert "code refuses anything above 200%" in rules                       # plain words, policy numbers
     assert "−20%: no new risk · −25%: stop, and a proposal to sell everything goes to the human" in rules
 
 
@@ -674,7 +674,7 @@ def test_phone_tables_stack_and_scroll_regions_are_focusable(rehearsal_site):
     _, pages = rehearsal_site
     run = pages[f"cycles/{CYCLE_ID}.html"]
     for name, marker in (("index.html", 'class="runlist"'), ("cycles.html", 'class="wide stack runs"'),
-                         (f"cycles/{CYCLE_ID}.html", 'class="wide stack changes"'), ("rules.html", 'class="rules wide stack"')):
+                         (f"cycles/{CYCLE_ID}.html", 'class="wide stack changes"'), ("rules.html", 'class="rule-grid"')):
         assert marker in pages[name], name
     assert 'data-label="After risk"' in run and 'data-label="What changed"' in pages["index.html"]
     for name, html in pages.items():

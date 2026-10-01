@@ -78,7 +78,7 @@ def test_run_page_shows_swing_ideas_and_book(built):
                  "priced in: mostly", "said pass", "3 of 3", "paper-only setup", "Skeptic health"):
         assert word in text, word
     assert "PAPER" in run and "live setup" in text
-    assert F.N_GLOBEX in run and "broker news item, id only" in text
+    assert F.N_GLOBEX in run and "a public RSS feed or SEC filing item, cited by id" in text
     assert F.FEED_TITLE not in run and F.LIVE_VALUE not in run
     assert "rules written before the first trade" in text and "1.25% per trade leg" in text
     assert 'class="sw-bar"' in run and "stop 6.00% · target 15.00%" in text

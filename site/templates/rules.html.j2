@@ -2,46 +2,52 @@
 {% import "macros.html.j2" as m %}
 {% block title %}Rules{% endblock %}
 {% block toc %}
-{{ m.toc_item("invariants", "Hard-coded limits", "code") }}
-{{ m.toc_item("rules", "Risk rules", "risk") }}
+{{ m.toc_item("p-hard", "Hard limits", "code") }}
+{{ m.toc_item("p-core", "Core rules", "risk") }}
+{% if book.swing %}{{ m.toc_item("p-swing", "Swing rules", "scout") }}{% endif %}
 {% endblock %}
 {% block hero %}
 <header class="hero">
   <p class="eyebrow">Rules</p>
-  <h1>The numbers the council cannot change</h1>
-  <p class="lede">Prompts explain these rules to the models; code enforces them. A change to any number is a policy change, recorded in every sealed run by the policy file's hash.</p>
+  <h1>The rules the council works inside</h1>
+  <p class="lede">Code enforces every rule; the prompts only explain them. The council cannot change any number here except one: the swing budget, which it votes on each run inside a range code clamps. Any other change is a policy change, recorded in every sealed run by the policy file's hash.</p>
 </header>
 {% endblock %}
+{% macro card(r) %}
+<article class="rule-card accent-{{ r.seat }}" id="{{ r.id }}" aria-labelledby="{{ r.id }}-h">
+  <h3 class="rule-h" id="{{ r.id }}-h"><span class="rule-badge rb-{{ r.seat }}">{{ r.badge if r.badge is defined else r.id }}</span> {{ r.title }}</h3>
+  <p class="rule-plain">{{ r.plain }}</p>
+  {% if r.numbers %}
+  <details class="jd accent-{{ r.seat }} rule-more">
+    <summary><strong>Show the numbers</strong> <span class="jd-sum">{{ plural(r.numbers | length, "value") }}</span></summary>
+    <div class="jd-body">
+      <dl class="rule-nums">{% for k, v in r.numbers %}<div><dt>{{ k }}</dt><dd class="n">{{ v }}</dd></div>{% endfor %}</dl>
+    </div>
+  </details>
+  {% endif %}
+  {% if r.codes %}
+  <p class="rule-codes small"><span class="jd-k">Reason codes it can give</span>{% for c in r.codes %}<span class="rule-code"><code class="jc-code">{{ r.id }}:{{ c.code }}</code> {{ c.words }}</span>{% endfor %}</p>
+  {% endif %}
+</article>
+{% endmacro %}
 {% block main %}
 
-{% call m.section("invariants", 1, "Hard-coded limits", "code") %}
-<p>These are constants in the code. The policy file may be stricter, never looser, and a test enforces it.</p>
-<ul class="ticks">
-  <li>Total exposure at most <span class="n">{{ invariants.gross }}x</span> the portfolio.</li>
-  <li>Kill switch, measured from the best value ever reached: {{ kill_phrase }}. Whatever the policy file says, code stops at a fall of <span class="n">{{ ((1 - invariants.halt) * 100) | round(0) | int }}%</span> at the latest.</li>
-  <li>Stop-loss on every opening order: <strong>{{ "required" if invariants.stop else "not required" }}</strong>.</li>
-  <li>Human approval of every order: <strong>{{ "required" if invariants.human else "not required" }}</strong>.</li>
-  <li>Only the dedicated agent portfolio is ever touched: <strong>{{ "yes" if invariants.main_account else "no" }}</strong>.</li>
-</ul>
+{% call m.section("p-hard", 1, "Hard limits", "code") %}
+<p>Constants in the code. The policy files may be stricter, never looser, and a test enforces it.</p>
+<div class="rule-grid">{% for r in book.hard %}{{ card(r) }}{% endfor %}</div>
 {% endcall %}
 
-{% call m.section("rules", 2, "Risk rules", "risk") %}
-<p>Every rule the risk engine checks on every run. <em>x</em> means a multiple of the portfolio's value (0.5x = half of it).</p>
-{{ m.wrap_open("Risk rules") }}
-<table class="rules wide stack" role="table">
-  <thead><tr role="row"><th role="columnheader">Rule</th><th role="columnheader">In plain words</th><th role="columnheader">What it is</th><th role="columnheader">Numbers</th></tr></thead>
-  <tbody>
-  {% for r in rules %}
-  <tr role="row">
-    <td role="cell" class="n"><strong>{{ r.rule_id or "—" }}</strong></td>
-    <td role="cell" class="text">{{ r.plain or r.title }}</td>
-    <td role="cell" class="text" data-label="What it is">{{ r.title }}<br><code class="muted small">{{ r.key }}</code></td>
-    <td role="cell" class="numbers text" data-label="Numbers">{% for k, v in r.numbers %}<span class="kv"><span class="k">{{ k }}</span> <span class="n">{{ v }}</span></span>{% endfor %}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
+{% call m.section("p-core", 2, "Core rules", "risk") %}
+<p>Every rule the risk engine checks on every run of the core council. Shares are of the portfolio's value; a line's "full size" is the weight the rules alone would give it.</p>
+<div class="rule-grid">{% for r in book.core %}{{ card(r) }}{% endfor %}</div>
 <p class="muted small">Source: <code>policy/risk.yaml</code>. Its hash is recorded in every sealed run.</p>
 {% endcall %}
+
+{% if book.swing %}
+{% call m.section("p-swing", 3, "Swing rules", "scout") %}
+<p>The swing book's rules, run twice: on each idea before the Skeptic sees it, and on the manager's entries before a paper leg is built. Exits are never refused. The <span class="rule-badge rb-skeptic">S11</span> badge marks the rule that also sets the Skeptic's starting lean.</p>
+<div class="rule-grid">{% for r in book.swing %}{{ card(r) }}{% endfor %}</div>
+<p class="muted small">Source: <code>policy/swing.yaml</code>. Nothing here trades with money while the swing book's go-live switch is off.</p>
+{% endcall %}
+{% endif %}
 {% endblock %}

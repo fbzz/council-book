@@ -17,19 +17,19 @@
 {% call m.section("list", 1, "All runs", "proposed") %}
 {% if cycles %}
 {{ m.wrap_open("All runs") }}
-<table class="wide stack runs" role="table">
-  <thead><tr role="row"><th role="columnheader">When</th><th role="columnheader">What changed</th><th role="columnheader">Agents</th><th role="columnheader">Decision</th><th role="columnheader" class="n">Agreement</th><th role="columnheader">Control</th><th role="columnheader">Seal</th></tr></thead>
+<table class="wide stack runs">
+  <thead><tr><th>When</th><th>What changed</th><th>Agents</th><th>Decision</th><th class="n">Agreement</th><th>Control</th><th>Seal</th></tr></thead>
   <tbody>
   {% for cv, r, tr in cycles %}
   {% set c = cv.doc %}
-  <tr role="row">
-    <td role="cell" class="when"><a href="cycles/{{ c.cycle_id }}.html">{{ c.slot | when }}</a><br>{{ m.chip(cv.mode_chip) }}{% if c.late_by_min %} <span class="muted small">ran {{ c.late_by_min | late }} late</span>{% endif %}</td>
-    <td role="cell" class="text push" data-label="What changed">{{ r.change_words }}</td>
-    <td role="cell" data-label="Agents">{{ m.agent_strip(tr, "cycles/" ~ c.cycle_id ~ ".html") }}</td>
-    <td role="cell" data-label="Decision">{{ m.chip(cv.chip) }}{% if cv.human_outcome not in ("none", "pending", "no_action") %}<br><span class="muted small">{{ cv.human_outcome | replace("_", " ") }}</span>{% endif %}</td>
-    <td role="cell" class="n" data-label="Agreement">{% if cv.min_agreement_pct is not none %}<span title="{{ cv.min_agreement_pct | pct }} of valid attempts">{{ agreement_words(cv.min_agreement_pct, c.pm.valid_replicates) }}</span>{% else %}—{% endif %}</td>
-    <td role="cell" data-label="Control">{% if cv.control_agrees is none %}—{% elif cv.control_agrees %}same{% else %}<strong>differs</strong>{% endif %}</td>
-    <td role="cell" data-label="Seal">{% if cv.verified %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span>{% elif cv.commitment %}<span class="chip state-sealed">SEALED</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>NO SEAL</span>{% endif %}</td>
+  <tr>
+    <td class="when"><a href="cycles/{{ c.cycle_id }}.html">{{ c.slot | when }}</a><br>{{ m.chip(cv.mode_chip) }}{% if c.late_by_min %} <span class="muted small">ran {{ c.late_by_min | late }} late</span>{% endif %}</td>
+    <td class="text push" data-label="What changed">{{ r.change_words }}</td>
+    <td data-label="Agents">{{ m.agent_strip(tr, "cycles/" ~ c.cycle_id ~ ".html") }}</td>
+    <td data-label="Decision">{{ m.chip(cv.chip) }}{% if cv.human_outcome not in ("none", "pending", "no_action") %}<br><span class="muted small">{{ cv.human_outcome | replace("_", " ") }}</span>{% endif %}</td>
+    <td class="n" data-label="Agreement">{% if cv.min_agreement_pct is not none %}<span title="{{ cv.min_agreement_pct | pct }} of valid attempts">{{ agreement_words(cv.min_agreement_pct, c.pm.valid_replicates) }}</span>{% else %}—{% endif %}</td>
+    <td data-label="Control">{% if cv.control_agrees is none %}—{% elif cv.control_agrees %}same{% else %}<strong>differs</strong>{% endif %}</td>
+    <td data-label="Seal">{% if cv.verified %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span>{% elif cv.commitment %}<span class="chip state-sealed">SEALED</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>NO SEAL</span>{% endif %}</td>
   </tr>
   {% endfor %}
   </tbody>

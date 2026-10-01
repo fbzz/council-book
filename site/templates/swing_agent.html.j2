@@ -21,9 +21,9 @@
 {% endcall %}
 {% call m.section("record", 2, "Its record", "neutral") %}
 <dl class="strip">
-  <div class="st"><dt>Calls</dt><dd class="st-v">{{ agent.calls }}</dd><dd class="st-sub">published swing runs only</dd></div>
+  <div class="st"><dt>Calls</dt><dd class="st-v">{{ agent.calls }}</dd><dd class="st-sub">{{ agent.stats.by_kind.paper }} paper · {{ agent.stats.by_kind.live + agent.stats.by_kind.rehearsal }} live or rehearsal</dd></div>
   <div class="st"><dt>Usable</dt><dd class="st-v st-v-sm">{{ agent.ok_pct }}</dd><dd class="st-sub">{{ agent.ok }} of {{ agent.calls }} replies</dd></div>
-  <div class="st"><dt>Latest</dt><dd class="st-v st-v-sm">{{ agent.verdict or "—" }}</dd><dd class="st-sub">{% if agent.last %}<a href="../cycles/{{ agent.last.doc.cycle_id }}.html#swing-ideas">{{ agent.last.doc.slot | short_when }}</a>{% else %}not yet{% endif %}</dd></div>
+  <div class="st"><dt>Latest</dt><dd class="st-v st-v-sm">{{ agent.verdict or "—" }}</dd><dd class="st-sub">{% if agent.last %}<a href="../{{ agent.last_href }}">{{ agent.last_slot | short_when }}</a>{% if agent.last_paper %} <span class="chip state-rehearsal paper-badge">PAPER</span>{% endif %}{% else %}not yet{% endif %}</dd></div>
 </dl>
 <p class="small"><a href="../swing/index.html#sw-funnel">The idea funnel</a> compares what the Skeptic passed, rejected and sent to wait, all tracked on paper.</p>
 {% endcall %}

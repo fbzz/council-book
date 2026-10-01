@@ -202,17 +202,17 @@
 <p>Every line starts from the <strong>mechanical reference</strong>: {{ reference_gloss }}. The council may move a few lines; then the risk engine may hold some back. <strong>Size</strong> is how much of a line's full allocation is held (1.00 = the full amount the rules give it); the percentage is its weight in the portfolio.</p>
 {% if run.changed_rows %}
 {{ m.wrap_open("What changed, by line") }}
-<table class="wide stack changes" role="table">
-  <thead><tr role="row"><th role="columnheader">Line</th>{% if not cv.rehearsal %}<th role="columnheader" class="n">Before</th>{% endif %}<th role="columnheader" class="n">Reference</th><th role="columnheader" class="n">Council</th><th role="columnheader" class="n">After risk</th><th role="columnheader">Why</th></tr></thead>
+<table class="wide stack changes">
+  <thead><tr><th>Line</th>{% if not cv.rehearsal %}<th class="n">Before</th>{% endif %}<th class="n">Reference</th><th class="n">Council</th><th class="n">After risk</th><th>Why</th></tr></thead>
   <tbody>
   {% for r in run.changed_rows %}
-  <tr role="row">
-    <td role="cell"><strong>{{ m.ln(r.line, "../") }}</strong>{% if r.verb %} {{ m.direction_chip(r.verb.split(" ")[0]) }}{% endif %}</td>
-    {% if not cv.rehearsal %}<td role="cell" class="n" data-label="Before">{{ r.base_x | share }}</td>{% endif %}
-    <td role="cell" class="n" data-label="Reference">size {{ r.ref_level | level }}<br><span class="muted">{{ r.ref_x | share }}</span></td>
-    <td role="cell" class="n" data-label="Council"><strong>size {{ r.council_level | level }}</strong><br><span class="muted">{{ r.council_x | share }}</span></td>
-    <td role="cell" class="n" data-label="After risk"><strong>size {{ r.risk_level | level }}</strong><br><span class="muted">{{ r.final_x | share }}</span></td>
-    <td role="cell" class="text" data-label="Why">{% for w in r.why %}<p class="why"><span class="who">{{ w.who }}:</span> {% if w.raw %}<span title="{{ w.raw }}">{{ w.text }}</span>{% else %}{{ w.text }}{% endif %} {% for e in w.evidence %}{{ m.ev_chip(tr.fx.chip(e)) }}{% endfor %}</p>{% else %}<span class="muted">—</span>{% endfor %}</td>
+  <tr>
+    <td><strong>{{ m.ln(r.line, "../") }}</strong>{% if r.verb %} {{ m.direction_chip(r.verb.split(" ")[0]) }}{% endif %}</td>
+    {% if not cv.rehearsal %}<td class="n" data-label="Before">{{ r.base_x | share }}</td>{% endif %}
+    <td class="n" data-label="Reference">size {{ r.ref_level | level }}<br><span class="muted">{{ r.ref_x | share }}</span></td>
+    <td class="n" data-label="Council"><strong>size {{ r.council_level | level }}</strong><br><span class="muted">{{ r.council_x | share }}</span></td>
+    <td class="n" data-label="After risk"><strong>size {{ r.risk_level | level }}</strong><br><span class="muted">{{ r.final_x | share }}</span></td>
+    <td class="text" data-label="Why">{% for w in r.why %}<p class="why"><span class="who">{{ w.who }}:</span> {% if w.raw %}<span title="{{ w.raw }}">{{ w.text }}</span>{% else %}{{ w.text }}{% endif %} {% for e in w.evidence %}{{ m.ev_chip(tr.fx.chip(e)) }}{% endfor %}</p>{% else %}<span class="muted">—</span>{% endfor %}</td>
   </tr>
   {% endfor %}
   </tbody>
@@ -265,7 +265,7 @@
 
 {% if a.slug == "news" %}
 {{ subhead("saw", "What it saw") }}
-<p>{% if b.n_items %}{{ plural(b.n_items, "broker news item") }}{% else %}The broker news items of the pack{% endif %} — cited by id only; their licensed text is never republished — and the code cards.</p>
+<p>{% if b.n_items %}{{ plural(b.n_items, "item") | cap }} from public RSS feeds and SEC filings{% else %}The public RSS feed and SEC filing items of the pack{% endif %}, cited by id (licensed text is never republished), and the code cards.</p>
 {{ subhead("said", "What it said") }}
 {% for k in b.cards %}{{ m.kcard(k) }}{% else %}<p class="muted">No cards{% if a.failure %}: the call gave no usable output{% endif %}.</p>{% endfor %}
 {% if b.cards %}
@@ -371,7 +371,7 @@
   <thead><tr><th>Rule</th><th>Check</th><th>Result</th><th class="n">Value</th><th class="n">Limit</th></tr></thead>
   <tbody>
   {% for ch in run.failed_checks %}
-  <tr><td class="n">{{ ch.rule_id }}</td><td>{{ check_name(ch.name) }}</td><td><span class="chip state-halted"><span aria-hidden="true">✗ </span>FAIL</span></td><td class="n">{{ ch.value | value }}</td><td class="n">{{ ch.limit | value }}</td></tr>
+  <tr><td class="n">{{ rule_link(ch.rule_id, root, "rule-id") }}</td><td>{{ check_name(ch.name) }}</td><td><span class="chip state-halted"><span aria-hidden="true">✗ </span>FAIL</span></td><td class="n">{{ ch.value | value }}</td><td class="n">{{ ch.limit | value }}</td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -393,12 +393,12 @@
     <thead><tr><th>Rule</th><th>Check</th><th>Result</th><th class="n">Value</th><th class="n">Limit</th></tr></thead>
     <tbody>
     {% for ch in c.risk.checks %}
-    <tr><td class="n">{{ ch.rule_id }}</td><td>{{ check_name(ch.name) }} <span class="muted small">{{ ch.name }}</span></td><td>{% if ch.passed %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>PASS</span>{% else %}<span class="chip state-halted"><span aria-hidden="true">✗ </span>FAIL</span>{% endif %}</td><td class="n">{{ ch.value | value }}</td><td class="n">{{ ch.limit | value }}</td></tr>
+    <tr><td class="n">{{ rule_link(ch.rule_id, root, "rule-id") }}</td><td>{{ check_name(ch.name) }} <span class="muted small">{{ ch.name }}</span></td><td>{% if ch.passed %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>PASS</span>{% else %}<span class="chip state-halted"><span aria-hidden="true">✗ </span>FAIL</span>{% endif %}</td><td class="n">{{ ch.value | value }}</td><td class="n">{{ ch.limit | value }}</td></tr>
     {% endfor %}
     </tbody>
   </table>
   </div>
-  <p class="small muted">Rule numbers refer to the <a href="../rules.html">rules page</a>. Values are as the risk engine computed them (x = a multiple of the portfolio's value; bp = hundredths of a percent).{% if c.risk.hold_reasons %} Raw hold notes: {% for h in c.risk.hold_reasons %}<code>{{ h }}</code>{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}</p>
+  <p class="small muted">Each rule number links to its card on the <a href="../rules.html">rules page</a>. Values are as the risk engine computed them (x = a multiple of the portfolio's value; bp = hundredths of a percent).{% if c.risk.hold_reasons %} Raw hold notes: {% for h in c.risk.hold_reasons %}{{ rule_link(h, root, "hold-code") }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}</p>
 </details>
 {% else %}
 {{ m.empty("No risk decision", "The run ended before the risk engine ran.") }}

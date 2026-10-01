@@ -15,7 +15,7 @@
 {% endblock %}
 {% block hero %}
 <header class="hero">
-  <p class="eyebrow">{{ pm.badge() }} Decision #{{ doc.decision_no }} · {{ doc.slot | when }}</p>
+  <p class="eyebrow">{{ pm.badge() }} <a href="../index.html">Decisions</a> / #{{ doc.decision_no }} · {{ doc.slot | when }}{% if d.run_href %} · <a href="{{ root }}{{ d.run_href }}">run page</a>{% endif %}</p>
   <h1>Decision #{{ doc.decision_no }}: {{ "entered " ~ (d.chosen | length) ~ " paper trade(s)" if d.chosen else "no swing trade" }}</h1>
   <p class="lede">A paper run: real data and the real agents, nothing traded, no approval. Published at once through the same public pipeline as a live run (allow-listed fields, licensed news by id only, percent-only).{% if d.verified %} <span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span> the file re-hashes to its commitment.{% endif %}</p>
   <aside class="disclaimer" role="note" aria-label="About this record">
@@ -60,7 +60,7 @@
   {% for mv in co.moves %}<tr{% if mv.moved %} class="paper-diff"{% endif %}><td>{{ mv.line | ticker }}</td><td class="n">{{ mv.before }}</td><td class="n">{{ mv.proposed }}</td><td class="n">{{ mv.after }}</td></tr>{% endfor %}
   </tbody></table></div>
   {% endif %}
-  {% if co.holds %}<h3 class="small">Held by the risk engine</h3><ul class="jd-list">{% for h in co.holds %}<li>{% if h.line %}<span class="tkr">{{ h.line | ticker }}</span>: {% endif %}{{ h.text }} <code class="jc-code" title="{{ h.raw }}">{{ h.raw.split(": ", 1)[-1].split(" ")[0] }}</code></li>{% endfor %}</ul>{% endif %}
+  {% if co.holds %}<h3 class="small">Held by the risk engine</h3><ul class="jd-list">{% for h in co.holds %}<li>{% if h.line %}<span class="tkr">{{ h.line | ticker }}</span>: {% endif %}{{ h.text }} {{ rule_link(h.raw.split(": ", 1)[-1].split(" ")[0], root) }}</li>{% endfor %}</ul>{% endif %}
   {% if co.reps %}<h3 class="small">Manager attempts</h3><ul class="jd-list">{% for r in co.reps %}<li><span class="dot accent-pm" aria-hidden="true"></span>#{{ r.n + 1 }}: {{ "valid" if r.valid else "invalid" }} · sided with {{ r.sided }}{% if r.fact %}<br><span class="jd-k">Decisive fact</span> {{ r.fact }}{% endif %}{% for dv in r.devs %}<br>{{ dv }}{% endfor %}{% if r.why %}<br>{{ r.why }}{% endif %}</li>{% endfor %}</ul>{% endif %}
   {% if co.bull or co.bear %}<div class="paper-cols">
     <div class="paper-case accent-bull"><p><span class="dot accent-bull" aria-hidden="true"></span><strong>Bull</strong></p><p class="text small">{{ co.bull or "—" }}</p></div>
@@ -69,7 +69,7 @@
   <p class="small">{{ plural(co.cards, "analyst card") | cap }}.</p>
   </div>
 </details>
-<p class="small"><a href="../../journal/paper/cycles/{{ doc.cycle_id[0:4] }}/{{ doc.cycle_id[5:7] }}/{{ doc.cycle_id }}.json">The sealed record (JSON)</a> · <a href="../index.html">every decision</a></p>
+<p class="small"><a href="../../journal/paper/cycles/{{ doc.cycle_id[0:4] }}/{{ doc.cycle_id[5:7] }}/{{ doc.cycle_id }}.json">The sealed record (JSON)</a>{% if d.run_href %} · <a href="{{ root }}{{ d.run_href }}">the full run page</a>{% endif %} · <a href="../index.html">every decision</a> · <a href="{{ root }}cycles.html">every meeting</a> · <a href="{{ root }}agents/pm.html">the manager's page</a> · <a href="{{ root }}rules.html#p-core">the core rules</a></p>
 {% endcall %}
 
 {% if sw %}

@@ -1222,7 +1222,7 @@ body.moved p { max-width: 40rem; margin: 48px auto; padding: 0 16px; }
   .top-inner { gap: 4px 12px; padding: 10px 16px 6px; }
   .brand { font-size: var(--fs-3); }
   .pages { gap: 0; margin: 0 -7px; font-size: var(--fs-1); }
-  .pages a { padding: 6px 7px; }
+  .pages a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 7px; }
   .pages a[aria-current="page"]::after { left: 8px; right: 8px; bottom: 0; }
   .toc { padding: 6px 10px; }
   .toc-title { display: none; }
@@ -1509,3 +1509,38 @@ body.moved p { max-width: 40rem; margin: 48px auto; padding: 0 16px; }
 .disclaimer { margin-top: 16px; padding: 12px 16px; border: 1px solid var(--line); border-left: 3px solid var(--awaiting); border-radius: 6px; background: color-mix(in srgb, var(--awaiting) 6%, var(--card)); font-size: var(--fs-small, 0.875rem); color: var(--ink); max-width: 72ch; }
 .disclaimer p { margin: 0; }
 .disclaimer p + p { margin-top: 6px; }
+
+/* ---- rules page: one card per rule, deep-linkable (#R14, #S8) ---- */
+.rule-grid { display: grid; gap: var(--sp-3); margin: var(--sp-3) 0; }
+.rule-card { min-width: 0; background: var(--raised); border: 1px solid var(--line); border-left: 3px solid var(--accent, var(--seat-none)); border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); scroll-margin-top: 80px; }
+.rule-card:target { box-shadow: 0 0 0 2px var(--link); border-left-color: var(--link); }
+.rule-h { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-2); font: 600 var(--fs-3)/1.3 var(--font-head); color: var(--ink-strong); }
+.rule-plain { margin: 0 0 var(--sp-2); max-width: 70ch; }
+.rule-badge { --c: var(--seat-none); display: inline-block; min-width: 2.6em; text-align: center; font: 600 var(--fs-label)/1.3 var(--font-mono); letter-spacing: 0.04em; color: var(--ink-strong); background: color-mix(in srgb, var(--c) 18%, var(--card)); border: 1px solid var(--c); border-radius: 4px; padding: 2px 6px; vertical-align: middle; }
+.rb-risk { --c: var(--seat-risk); }
+.rb-scout { --c: var(--seat-scout); }
+.rb-skeptic { --c: var(--seat-skeptic); }
+.rb-pm { --c: var(--seat-pm); }
+.rb-code { --c: var(--line-strong); }
+.rule-more > summary { min-height: 44px; }
+.rule-nums { display: grid; gap: var(--sp-1) var(--sp-4); margin: var(--sp-2) 0; }
+.rule-nums > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-3); align-items: baseline; border-bottom: 1px solid var(--line-soft); padding: 2px 0; }
+.rule-nums dt { color: var(--muted); font-size: var(--fs-1); min-width: 0; overflow-wrap: break-word; }
+.rule-nums dd { margin: 0; text-align: right; color: var(--ink-strong); max-width: 32ch; overflow-wrap: break-word; }
+.rule-codes { margin: var(--sp-2) 0 0; }
+.rule-code { display: block; margin: var(--sp-1) 0; }
+@media (min-width: 900px) { .rule-nums { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* a rule / reason code that links to its rule card */
+a.rule-link { color: var(--link); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent); text-underline-offset: 2px; }
+a.rule-link:hover { text-decoration-color: var(--link); }
+a.rule-link.jc-code { color: var(--link); }
+.jd-more { margin-top: var(--sp-3); }
+.jd-more a { color: var(--link); }
+
+/* paper panel: lede and the return split (market vs costs) */
+.paper-lede { margin: 0 0 var(--sp-3); }
+.pbook-parts { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-1) var(--sp-4); margin: 0 0 var(--sp-3); }
+.pbook-part { white-space: nowrap; }
+.pbook-part .up { color: var(--long); }
+.pbook-part .down { color: var(--short); }

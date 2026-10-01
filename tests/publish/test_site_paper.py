@@ -285,3 +285,76 @@ def test_redaction_markers_render_as_one_chip_outside_tags_only():
     assert 'title="[value removed]"' in out                     # attributes untouched
     assert out.count('class="redacted"') == 3
     assert "[figure withheld]" not in out.split(">", 1)[1]
+
+
+# ------------------------------------------------------------------ foundation: shared helpers, rules, links
+def test_paper_return_splits_into_market_and_costs(built_book):
+    _, pages = built_book
+    home = _text(pages["index.html"])
+    assert "Market" in home and "Costs" in home and "declared trading costs" in home
+    assert re.search(r"Costs −0\.\d+%", home), home
+
+
+def test_rule_anchor_maps_every_kind_of_code():
+    site = _load_site()
+    for code, want in (("S8:illiquid", "S8"), ("R14", "R14"), ("NDX: R11", "R11"), ("net_rr_below_min", "S6"),
+                       ("setup_paper_only", "SB16"), ("swing_blocker", "R20"), ("R20 blocker", "R20"), ("R4d", "R4d"),
+                       ("material_change_required", "MC")):
+        assert site.rule_anchor(code) == want, code
+    assert site.rule_anchor("nothing_known") is None and site.rule_href("S8:illiquid", "../") == "../rules.html#S8"
+    assert 'href="rules.html#S8"' in str(site.rule_link("S8:illiquid"))
+    assert str(site.rule_link("odd")).startswith("<code")
+
+
+def test_rules_page_has_a_card_per_rule_with_numbers_in_percent(built):
+    _, dest, pages = built
+    html = pages["rules.html"]
+    t = _text(html)
+    for rid in [f"R{n}" for n in range(1, 22) if n not in (19, 20)] + ["R19", "R20", "R4d", "MC", "IB", "AP", "RC", "PR",
+                                                                        "H1", "H7", "budget", "SB16"] + [f"S{n}" for n in range(19)]:
+        if rid in ("R21",) or rid.startswith("R") and rid not in t:
+            continue
+        assert f'id="{rid}"' in html, rid
+    assert 'id="R14"' in html and 'id="S8"' in html and 'id="R19"' in html
+    assert "cannot change" not in pages["rules.html"].split("<h1>")[1].split("</h1>")[0]
+    assert "Show the numbers" in t and "Hard limits" in t and "Core rules" in t and "Swing rules" in t
+    assert "S8:illiquid" in t and "too little trading volume" in t                  # codes a rule can emit
+    assert "rb-risk" in html and "rb-scout" in html and "rb-skeptic" in html
+    for raw in ("proposal_max", "turnover_7d_max", "max_open_risk_nav", "cycle_max_bps", "min_adv_usd"):
+        assert raw not in html, raw
+    assert "exempt from R13, R14 and R15" in t and "overnight-financing limit still applies" in t
+    assert "$" not in html and "50000000" not in html and "50_000_000" not in html
+    assert f'content="{CSP}"' in html and "<script" not in html.lower() and 'style="' not in html
+
+
+def test_decision_pages_deep_link_rules_agents_and_meetings(built):
+    _, _, pages = built
+    html = pages["decisions/1/index.html"]
+    assert re.search(r'class="jc-code rule-link" href="\.\./\.\./rules\.html#(S|SB|R)\d+', html), \
+        re.findall(r'jc-code[^>]*>', html)
+    for slug in ("scout", "skeptic", "pm", "bull"):
+        assert f'href="../../agents/{slug}.html"' in html, slug
+    assert 'href="../../cycles.html"' in html and 'href="../index.html"' in html
+
+
+def test_paper_swing_builds_the_scout_and_skeptic_pages(built):
+    _, _, pages = built
+    for slug in ("scout", "skeptic"):
+        assert f"agents/{slug}.html" in pages, slug
+        assert "paper" in _text(pages[f"agents/{slug}.html"])
+
+
+def test_meetings_and_role_stats_count_paper_runs(published, tmp_path, _core_policy):  # noqa: F811
+    _, _, repo = published
+    site = _load_site()
+    view = site.load_journal(repo / "journal")
+    lines = site.Lines({"lines": []})
+    rows = site.meetings(view, lines)
+    paper = [r for r in rows if r["kind"] == "paper"]
+    assert paper and paper[0]["decision_no"] == max(r.decision_no for r in view.paper_rows)
+    assert paper[0]["href"].startswith("decisions/") and paper[0]["verdict"].endswith(".")
+    assert rows == sorted(rows, key=lambda r: (r["slot"], r["decision_no"] or 0), reverse=True)
+    stats = site.agent_role_stats(view)
+    assert stats["scout"]["by_kind"]["paper"] >= 1 and stats["scout"]["calls"] >= 1
+    assert {"skeptic", "swing_bull", "swing_bear", "swing_pm", "pm", "bull"} <= set(stats)
+    assert view.has_swing

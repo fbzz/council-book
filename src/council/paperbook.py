@@ -297,14 +297,15 @@ class PaperBook:
         if trade_id in self.swing or not (_finite(entry_ref) and entry_ref > 0) or not size_nav > 0:
             return False
         notional = float(size_nav) * self.equity()
-        self.cash -= notional * self.declared_swing_pct_per_leg / 100.0
+        entry_cost = notional * self.declared_swing_pct_per_leg / 100.0
+        self.cash -= entry_cost
         self.swing[trade_id] = PaperSwing(trade_id=trade_id, ticker=ticker, side=side, line=line, notional=notional,
                                           entry_ref=float(entry_ref), stop_pct=float(stop_pct),
                                           target_pct=float(target_pct), entry_day=entry_day,
                                           time_stop_day=time_stop_day, setup=setup, last_price=float(entry_ref),
                                           opened_cycle=cycle_id, sigma_daily=sigma_daily, beta=beta)
         self.log({"kind": "swing_entry", "at": at.isoformat(), "cycle": cycle_id, "trade": trade_id,
-                  "ticker": ticker, "side": side, "size_nav": round(float(size_nav), 6)})
+                  "ticker": ticker, "side": side, "size_nav": round(float(size_nav), 6), "cost": entry_cost})
         return True
 
     def close_swing(self, trade_id: str, exit_px: float, reason: str, day: str, days_held: int) -> None:
@@ -315,7 +316,31 @@ class PaperBook:
         t.status, t.exit_reason, t.exit_day, t.days_held = "closed", reason, day, int(days_held)
         t.last_price, t.net_ret = float(exit_px), gross - 2.0 * leg
         self.log({"kind": "swing_exit", "trade": trade_id, "reason": reason, "day": day,
-                  "net_pct": round(100.0 * t.net_ret, 4)})
+                  "net_pct": round(100.0 * t.net_ret, 4), "cost": t.notional * leg})
+
+    def costs_paid(self) -> float | None:
+        """Every declared cost the paper fills paid so far, summed from the private ledger's fill rows
+        (`core_fill`, `swing_entry`, `swing_exit` with a `cost`). A swing row written before the
+        ledger carried its cost is re-derived from the declared leg; None when the ledger is unreadable."""
+        path = Path(self.state_dir) / LEDGER_FILE
+        if not path.exists():
+            return 0.0
+        total = 0.0
+        try:
+            rows = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+        except (OSError, ValueError):
+            return None
+        leg = self.declared_swing_pct_per_leg / 100.0
+        for r in rows:
+            kind = r.get("kind")
+            cost = r.get("cost")
+            if kind in ("core_fill", "swing_entry", "swing_exit") and _finite(cost):
+                total += max(float(cost), 0.0)
+            elif kind in ("swing_entry", "swing_exit"):
+                t = self.swing.get(str(r.get("trade") or ""))
+                if t is not None:
+                    total += t.notional * leg
+        return total
 
     # ------------------------------------------------------------------ public view
     def public(self) -> dict[str, Any]:
@@ -341,6 +366,8 @@ class PaperBook:
                 "entry_day": t.entry_day, "days_held": int(t.days_held), "exit_reason": t.exit_reason,
                 "return_net_pct": round(100.0 * ret, 2)})
         core_gross = sum(abs(v) for v in core_lines.values())
+        paid = self.costs_paid()
+        cost_pct = round(100.0 * paid / self.start_nav, 2) if paid is not None and self.start_nav > 0 else None
         swing_gross = sum(abs(v) for v in swing_w.values()) * 100.0
         return {
             "version": VERSION,
@@ -350,6 +377,7 @@ class PaperBook:
             "swing_trades": trades,
             "split_pct": {"core": round(core_gross, 2), "swing": round(swing_gross, 2),
                           "cash": round(100.0 * self.cash / eq, 2) if eq > 0 else 0.0},
+            "cost_pct": cost_pct,          # declared costs paid since start, % of the start NAV (>= 0)
             "cost_basis": {"core": "policy cost model per side", "swing_pct_per_leg": self.declared_swing_pct_per_leg},
             "funding": self.funding,
         }

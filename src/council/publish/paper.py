@@ -330,7 +330,11 @@ class PaperBookView(PublicModel):
     """The paper BOOK (`council.paperbook.paper_book_public`): what the paper broker holds after the
     paper fills, marked to market. Percent only; the paper NAV is never an input."""
 
+    OMIT_WHEN_DEFAULT = frozenset({"cost_pct"})
+
     paper_return_pct: Pct
+    cost_pct: Pct | None = None           # declared costs paid since start, % of the start NAV (the
+                                          # return's cost part; market part = return + cost_pct)
     started: date | None = None
     core: list[PaperBookLine] = Field(default_factory=list, max_length=64)
     swing_trades: list[PaperBookTrade] = Field(default_factory=list, max_length=200)
@@ -357,7 +361,9 @@ def paper_book_view(pub: Mapping[str, Any] | None) -> PaperBookView | None:
                                          days_held=int(t.get("days_held") or 0), exit_reason=t.get("exit_reason"),
                                          return_net_pct=t["return_net_pct"]))
         split = pub.get("split_pct") or {}
+        cost = pub.get("cost_pct")
         return PaperBookView(paper_return_pct=pub["paper_return_pct"], started=_day(pub.get("started_at")),
+                             cost_pct=float(cost) if _num(cost, 0.0, 1000.0) is not None else None,
                              core=[PaperBookLine(line=k, weight_pct=v) for k, v in (pub.get("core_weights_pct") or {}).items()],
                              swing_trades=trades[-200:], core_pct=split.get("core", 0.0),
                              swing_pct=split.get("swing", 0.0), cash_pct=split.get("cash", 0.0))

@@ -371,3 +371,19 @@ def test_engine_build_lines_are_per_line():
     assert run.ib("R14", "NDX") and not run.ib("R14", "BTC") and not run.ib("R14", "SPX")
     closed = _Run(eng, snapshot=_snap({"BTC": 0.13}), initial_build=frozenset(), **base)
     assert closed.initial_exempt == frozenset() and not closed.ib("R14", "NDX")   # after closure R14 applies
+
+
+def test_public_view_splits_out_the_declared_costs_paid(tmp_path):
+    """cost_pct: every declared cost the paper fills paid (core legs + swing legs), % of the start
+    NAV, summed from the private ledger; return = market - cost (percent only)."""
+    book = _book(tmp_path / "c")
+    assert book.public()["cost_pct"] == 0.0
+    book.trade_core({"NDX": 0.3, "BTC": 0.1}, {"NDX": 400.0, "BTC": 60000.0}, lambda s, b, a: 4.0, at=NOW, cycle_id="c1")
+    pub = book.public()
+    assert pub["cost_pct"] == 0.08                                    # two legs x 4 bps
+    assert pub["paper_return_pct"] == -0.08                           # nothing moved yet: the cost is the return
+    book.enter_swing(trade_id="trade:y", ticker="ACME", side="long", line="SW_ACME", size_nav=0.08, entry_ref=50.0,
+                     stop_pct=0.05, target_pct=0.08, entry_day="2026-10-01", time_stop_day="2026-10-15",
+                     setup="news_continuation", at=NOW, cycle_id="c1")
+    assert book.public()["cost_pct"] == pytest.approx(0.18, abs=0.011)   # + 1.25% of an 8% position
+    assert not MONEY.search(json.dumps(book.public()))

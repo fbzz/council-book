@@ -35,7 +35,7 @@
     <span class="chip tag">{{ v.setup }}</span>{% if v.paper %}{{ paper() }}{% else %}<span class="chip state-executed" title="A setup that may trade">live setup</span>{% endif %}
     <span class="chip state-{{ v.stage_css }} sw-stage">{{ v.stage }}</span>
   </header>
-  {% if v.drop %}<p class="small sw-drop">Why it stopped: {{ v.drop }}{% if i.drop_code %} <code>{{ i.drop_code }}</code>{% endif %}</p>{% endif %}
+  {% if v.drop %}<p class="small sw-drop">Why it stopped: {{ v.drop }}{% if i.drop_code %} {{ rule_link(i.drop_code, root) }}{% endif %}</p>{% endif %}
   <div class="sw-row"><span class="sw-k">Catalyst</span><span class="sw-v">{% for c in v.cats %}{% if c.href %}<a class="ev ev-{{ c.css }}" href="{{ c.href }}" title="{{ c.note }}">{{ c.label }}</a>{% else %}<span class="ev ev-{{ c.css }}" title="{{ c.note }}">{{ c.label }}{% if c.css == "feed" %} <span class="ev-note">{{ c.note }}</span>{% endif %}</span>{% endif %}{% endfor %}</span></div>
   {% if i.catalyst_claim %}<div class="sw-row"><span class="sw-k">Claim</span><span class="sw-v">{{ i.catalyst_claim }}</span></div>{% endif %}
   {% if i.thesis %}<div class="sw-row"><span class="sw-k">Scout</span><span class="sw-v"><span class="dot accent-scout" aria-hidden="true"></span>{{ i.thesis }}</span></div>{% endif %}

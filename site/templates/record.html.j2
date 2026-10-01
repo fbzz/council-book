@@ -18,16 +18,16 @@
 {% call m.section("incidents", 1, "Incidents", "halted" if incidents else "stone") %}
 {% if incidents %}
 {{ m.wrap_open("Incidents") }}
-<table class="wide stack" role="table">
-  <thead><tr role="row"><th role="columnheader">Incident</th><th role="columnheader">Opened</th><th role="columnheader">Severity</th><th role="columnheader">Status</th><th role="columnheader">What happened</th></tr></thead>
+<table class="wide stack">
+  <thead><tr><th>Incident</th><th>Opened</th><th>Severity</th><th>Status</th><th>What happened</th></tr></thead>
   <tbody>
   {% for i in incidents %}
-  <tr role="row">
-    <td role="cell" class="n"><strong>{{ i.incident_id }}</strong>{% if i.withheld %}<br><span class="chip state-warn">run withheld</span>{% endif %}</td>
-    <td role="cell" class="n" data-label="Opened">{{ i.opened_slot | when }}</td>
-    <td role="cell" data-label="Severity"><span class="chip sev-{{ i.severity }}">{{ i.severity }}</span></td>
-    <td role="cell" data-label="Status">{% if i.status == "resolved" %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>resolved</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>{{ i.status }}</span>{% endif %}</td>
-    <td role="cell" class="text"><strong>{{ i.title }}</strong><br><span class="small">{{ i.summary }}</span>{% if i.cycles %}<br><span class="small muted">Runs: {% for cid in i.cycles %}<a href="cycles/{{ cid }}.html">{{ cid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}</td>
+  <tr>
+    <td class="n"><strong>{{ i.incident_id }}</strong>{% if i.withheld %}<br><span class="chip state-warn">run withheld</span>{% endif %}</td>
+    <td class="n" data-label="Opened">{{ i.opened_slot | when }}</td>
+    <td data-label="Severity"><span class="chip sev-{{ i.severity }}">{{ i.severity }}</span></td>
+    <td data-label="Status">{% if i.status == "resolved" %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>resolved</span>{% else %}<span class="chip state-warn"><span aria-hidden="true">! </span>{{ i.status }}</span>{% endif %}</td>
+    <td class="text"><strong>{{ i.title }}</strong><br><span class="small">{{ i.summary }}</span>{% if i.cycles %}<br><span class="small muted">Runs: {% for cid in i.cycles %}<a href="cycles/{{ cid }}.html">{{ cid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}</td>
   </tr>
   {% endfor %}
   </tbody>

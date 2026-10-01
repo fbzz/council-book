@@ -17,18 +17,18 @@
 {% call m.section("dec-list", 1, "Every decision", "pm") %}
 {% if rows %}
 {{ m.wrap_open("Every decision") }}
-<table class="wide stack decisions" role="table">
-  <thead><tr role="row"><th role="columnheader" class="n">#</th><th role="columnheader">When</th><th role="columnheader">Kind</th><th role="columnheader" class="n">Ideas</th><th role="columnheader">Chosen</th><th role="columnheader">Why</th><th role="columnheader">Seal</th></tr></thead>
+<table class="wide stack decisions">
+  <thead><tr><th class="n">#</th><th>When</th><th>Kind</th><th class="n">Ideas</th><th>Chosen</th><th>Why</th><th>Seal</th></tr></thead>
   <tbody>
   {% for r in rows %}
-  <tr role="row">
-    <td role="cell" class="n" data-label="#">{% if r.no %}<a href="../{{ r.href }}">#{{ r.no }}</a>{% else %}—{% endif %}</td>
-    <td role="cell" class="when" data-label="When"><a href="../{{ r.href }}">{{ r.slot | when }}</a></td>
-    <td role="cell" data-label="Kind">{{ pm.badge(r.badge) }}</td>
-    <td role="cell" class="n" data-label="Ideas">{{ r.ideas }}</td>
-    <td role="cell" data-label="Chosen">{{ r.chosen }}</td>
-    <td role="cell" class="text" data-label="Why">{{ r.why }}</td>
-    <td role="cell" data-label="Seal">{% if r.verified %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span>{% else %}<span class="chip state-warn">UNVERIFIED</span>{% endif %}</td>
+  <tr>
+    <td class="n" data-label="#">{% if r.no %}<a href="../{{ r.href }}">#{{ r.no }}</a>{% else %}—{% endif %}</td>
+    <td class="when" data-label="When"><a href="../{{ r.href }}">{{ r.slot | when }}</a></td>
+    <td data-label="Kind">{{ pm.badge(r.badge) }}</td>
+    <td class="n" data-label="Ideas">{{ r.ideas }}</td>
+    <td data-label="Chosen">{{ r.chosen }}</td>
+    <td class="text" data-label="Why">{{ r.why }}</td>
+    <td data-label="Seal">{% if r.verified %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span>{% else %}<span class="chip state-warn">UNVERIFIED</span>{% endif %}</td>
   </tr>
   {% endfor %}
   </tbody>
