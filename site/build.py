@@ -4233,7 +4233,14 @@ DROP_WORDS = {
     "brake_on": "the swing brake is on (30-day net loss limit): no new entries until the operator lifts it",
     "brake_engaged": "new entries are paused after the Skeptic canary check failed, until the operator lifts it",
     "brake_unknown": "the swing brake could not be checked, so no new entry",
+    "day2_unconfirmed": "day-2 check: the price has not yet confirmed the news, so it waits another day",
+    "net_rr_below_min": "the reward is too small for the risk once trading costs are counted",
+    "S6:net_rr_below_min": "the reward is too small for the risk once trading costs are counted",
+    "skeptic_wait_debated": "the Skeptic said wait; the bull, bear and manager heard it and did not enter",
 }
+SETUP_WORDS = {"news_continuation": "news continuation", "post_earnings_drift": "post-earnings drift",
+               "second_order": "second-order effect",
+               "day2_confirmation": "day-2 confirmation: a Skeptic 'wait' re-checked a day later"}
 # Swing-book cycle flags (`trace_rules.SWING_FLAG_CODES`; a test checks every key has words).
 SWING_FLAG_WORDS = {
     "swing_source_unavailable:*": "a swing data source had no credential, so the swing council did not run",
@@ -4250,6 +4257,11 @@ SWING_FLAG_WORDS = {
     "swing_brake_twice_60d": "the swing brake engaged twice in 60 days: a stop-at-once condition for review",
     "swing_exit_unapproved": "a time-stop exit went unapproved for several swing slots; the operator was alerted",
     "swing_canary_set_invalid": "the private canary event list was unreadable; the built-in past events were used",
+    "day2_catalyst_gone": "a waiting idea was dropped: the news it relied on is no longer available",
+    "day2_superseded": "a waiting idea was replaced by a fresh pitch on the same stock",
+    "swing_wide:*": "paper test run: the Scout was allowed more ideas than usual",
+    "llm_billing_error": "the model provider refused a call (billing or access); the operator was alerted",
+    "news_source_backoff:rss:*": "a news feed asked us to slow down, so it was skipped for the rest of the day",
 }
 
 
@@ -4337,7 +4349,7 @@ def swing_idea_view(i: Any) -> dict[str, Any]:
     stage_words, stage_css = SWING_STAGE.get(i.stage_reached, (i.stage_reached, "stone"))
     return {"i": i, "facts": facts, "withheld": sorted(withheld.items()), "cats": cats, "verdict": verdict, "stage": stage_words, "stage_css": stage_css,
             "drop": DROP_WORDS.get(i.drop_code or "", (i.drop_code or "").replace("_", " ")),
-            "setup": i.setup.replace("_", " "), "paper": not i.live_setup}
+            "setup": SETUP_WORDS.get(i.setup, i.setup.replace("_", " ")), "paper": not i.live_setup}
 
 
 def swing_trade_view(t: Any, geo: Geometry, scale: float) -> dict[str, Any]:

@@ -25,6 +25,11 @@
   `paper_unverified` (flag `swing_eligibility_unverified`), so the pipeline runs end to end on
   paper; it can never trade (no instrument id is saved, and live needs a broker and
   `invariants.SWING_BOOK_LIVE`).
+- Day-2 catalyst carry: every slot's reading list is kept in a private catalyst cache under
+  `<state>/licensed/swing_catalysts/` (0600; licensed text, so `council purge-licensed` deletes a
+  file after `invariants.LICENSED_RETENTION_DAYS` and a read ignores an older one). `carry_catalysts`
+  returns the cited items of the carried (pending) ideas from this slot's fetch or that cache, even
+  when the 48 h window or a quota cut them; a purged item stays gone (`day2_catalyst_gone`).
 - `fixture_swing_sources`: deterministic and offline (stub LLM, stub mode, the dress rehearsal):
   one fixture 8-K on the fixture ticker, a fixed fact card, a fixed reference price; pairs with the
   swing replies of `swing_stub_replies` / `fixture_skeptic_gateway`.
@@ -52,6 +57,7 @@ UNIVERSE_SECTOR_BUDGET_S = 240.0         # ~1,500 names (SEC fair access: <= 10/
 RECENT_DAYS = 7                         # ~5 sessions of recent ideas / rejections for the Scout
 SEC_TEXT_MAX_FETCHES = 15               # uncached filings read per slot (<= 3 EDGAR requests each)
 EVENT_HORIZON = timedelta(days=45)      # scheduled macro events shown as market context
+CATALYST_CACHE = ("licensed", "swing_catalysts")   # private reading-list cache (purged with licensed text)
 
 
 @dataclass
@@ -79,6 +85,7 @@ class SwingSources:
     matched_legs: Any = None
     prepare: Any = None
     canary_event: Any = None
+    carry_catalysts: Any = None          # (catalyst ids, slot) -> the carried ideas' cited NewsItems
     unavailable: tuple[str, ...] = ()
     flags: list[str] = field(default_factory=list)
 
@@ -168,7 +175,8 @@ def real_swing_sources(
                        reference_price=state.reference_price, candidate_extras=state.candidate_extras,
                        daily_bars=state.daily_bars if keys is not None else None,
                        benchmark_returns=state.benchmark_returns if keys is not None else None,
-                       matched_legs=None, prepare=state.prepare, unavailable=tuple(unavailable))
+                       matched_legs=None, prepare=state.prepare, carry_catalysts=state.carry_catalysts,
+                       unavailable=tuple(unavailable))
     state.flags = src.flags
     from council.swing.canary_set import provider as canary_provider
 
@@ -203,6 +211,7 @@ class _RealState:
     _closes: dict[str, float] = field(default_factory=dict)
     _filings: list[Any] = field(default_factory=list)
     _rss_memo: dict[Any, Any] = field(default_factory=dict)
+    _pool: dict[str, Any] = field(default_factory=dict)    # every item this slot fetched, by id
 
     # ---- clients
     def sec(self) -> Any:
@@ -421,6 +430,8 @@ class _RealState:
         rss = self.rss_items(rss, slot=slot, now=now, open_trades=open_trades, prefer=prefer, overnight=overnight)
         reading = overnight_first(reading_list(sec + wide, feed, gov, slot=slot, rss=rss), overnight)
         self._reading = {i.id: i for i in reading}
+        self._pool = {i.id: i for i in [*sec, *wide, *feed, *gov, *rss] if getattr(i, "id", None)}
+        self.cache_reading(slot, reading)
         try:
             context = self.context_rows(scr, session, slot)
         except Exception as exc:  # noqa: BLE001 - no context is not a reason to stop
@@ -431,6 +442,62 @@ class _RealState:
                            open_trades=tuple(open_trades), recent_ideas=recent, recent_rejections=rejected,
                            code_exits=tuple(code_exits), context=context,
                            screened=universe)
+
+    # ---- day-2 catalyst carry
+    def _cache_dir(self) -> Path:
+        return Path(self.state_dir).joinpath(*CATALYST_CACHE)
+
+    def cache_reading(self, slot: datetime, reading: Sequence[Any]) -> None:
+        """Keep this slot's reading list privately (one 0600 file per slot) so a carried idea's
+        catalyst can be found again after the window or a quota cut it. Never raises."""
+        from council.deliberation.capture import write_private
+
+        try:
+            items = [i.model_dump(mode="json") for i in reading if hasattr(i, "model_dump")]
+            if not items:
+                return
+            data = json.dumps({"cached_at": self.wall().isoformat(), "items": items}).encode()
+            path = self._cache_dir() / f"{slot.astimezone(UTC):%Y%m%dT%H%M}.json"
+            write_private(Path(self.state_dir), path, data)
+        except Exception as exc:  # noqa: BLE001 - no cache only weakens the day-2 carry
+            self.flags.append(_err("catalyst_cache", exc))
+
+    def cached_catalysts(self) -> dict[str, Any]:
+        """{id: NewsItem} from the private cache, files within the licensed retention only."""
+        from council.invariants import LICENSED_RETENTION_DAYS
+        from council.models.facts import NewsItem
+
+        out: dict[str, Any] = {}
+        folder = self._cache_dir()
+        if not folder.is_dir():
+            return out
+        cutoff = self.wall() - timedelta(days=LICENSED_RETENTION_DAYS)
+        for path in sorted(folder.glob("*.json")):
+            try:
+                doc = json.loads(path.read_text())
+                if datetime.fromisoformat(doc["cached_at"]) < cutoff:
+                    continue                      # purged by retention, whatever the file system says
+                for raw in doc.get("items") or []:
+                    item = NewsItem.model_validate(raw)
+                    out[item.id] = item
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+        return out
+
+    def carry_catalysts(self, ids: Sequence[str], slot: datetime) -> list[Any]:
+        """The cited items of the carried (pending) ideas, from this slot's fetch, else the private
+        cache; only items available before the slot. A purged or unknown id is left out."""
+        want = [c for c in dict.fromkeys(ids) if c not in self._reading]
+        if not want:
+            return []
+        cache = self.cached_catalysts() if any(c not in self._pool for c in want) else {}
+        out: list[Any] = []
+        for cid in want:
+            item = self._pool.get(cid) or cache.get(cid)
+            if item is not None and item.available_at < slot:
+                out.append(item)
+                self._reading[cid] = item                  # the gate's fact card sees it too
+        return out
 
     def rss_priority(self, open_trades: Sequence[Any], prefer: Mapping[str, int]) -> list[str]:
         """Line ids for the per-ticker RSS feed, in priority order: open swing trades, carried

@@ -189,6 +189,7 @@ SWING_FLAGS = [
     "swing_source_unavailable:alpaca", "swing_source_error:alpaca:RuntimeError", "swing_eligibility_unverified",
     "swing_paper_assumed_book", "paper_reference_last_close", "swing_screen_missing",
     "swing_drop:reproposal_limit", "swing_book_not_live",
+    "day2_catalyst_gone", "day2_superseded", "swing_wide:3", "llm_billing_error", "news_source_backoff:rss:reuters_markets",
 ]
 
 
@@ -200,6 +201,10 @@ def test_every_swing_flag_has_a_public_code_and_site_words(site):
         assert site.flag_words(flag), flag
     assert site.flag_words("expired:2") == ""
     assert site.SKIP_WORDS["swing_book_not_live"] and site.DROP_WORDS["reproposal_limit"]
+    for code in ("day2_unconfirmed", "net_rr_below_min", "S6:net_rr_below_min", "skeptic_wait_debated"):
+        assert site.DROP_WORDS[code], code
+    assert site.GROUP_WORDS["skeptic_wait_debated"] and site.SETUP_WORDS["day2_confirmation"]
+    assert site.flag_words("swing_wide:nope!") == ""
 
 
 def test_swing_source_flags_publish_plain_words_only():

@@ -76,7 +76,7 @@ import json
 import math
 import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
@@ -1901,6 +1901,23 @@ def carried_waits(ledger: Any, policy: Any, slot: datetime, now: datetime) -> li
     return out
 
 
+def with_carried_catalysts(src: Any, inputs: Any, carried: Sequence[Any]) -> list[Any]:
+    """The slot's reading list plus every catalyst item a carried (pending) idea cites that the 48 h
+    window or a quota left out, while the private fetch / catalyst cache still holds it
+    (`SwingSources.carry_catalysts`); a purged item stays out (`day2_catalyst_gone`). Never raises."""
+    reading = list(inputs.reading)
+    have = {i.id for i in reading}
+    want = [c for w in carried for c in w.idea.catalyst_ids if c not in have]
+    hook = getattr(src, "carry_catalysts", None)
+    if not want or hook is None:
+        return reading
+    try:
+        extra = hook(want, inputs.slot)
+    except Exception:  # noqa: BLE001 - no carry: the flag `day2_catalyst_gone` stands
+        return reading
+    return reading + [i for i in extra if i.id not in have]
+
+
 def _idea_sessions(row: Mapping[str, Any], now: datetime) -> int:
     from council.clock import NEW_YORK
     from council.swing.rules import sessions_until
@@ -1989,7 +2006,7 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
     if carried:
         from dataclasses import replace as _replace_carried
 
-        inputs = _replace_carried(inputs, carried=carried)
+        inputs = _replace_carried(inputs, carried=carried, reading=with_carried_catalysts(src, inputs, carried))
     if events:                                   # the cycle's scheduled macro events (CPI / NFP / PCE, FOMC)
         from dataclasses import replace as _replace
 
