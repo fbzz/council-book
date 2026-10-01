@@ -81,6 +81,7 @@ from council.swing.roles import (
     SwingIdea,
     VerdictOutcome,
     accept_actions,
+    accept_budget,
     accept_case,
     accept_ideas,
     accept_verdict,
@@ -174,6 +175,7 @@ class SwingInputs:
     max_entries: int | None = None                       # room S1-S4 leave
     screened: frozenset[str] | None = None               # the movers-screen universe (line ids); None = unknown
     carried: Sequence[CarriedWait] = ()                  # day-2 confirmation re-proposals (code-made)
+    book_map: Sequence[ContextRow] = ()                  # S18: the whole-book split (BK: ids), code-written
 
 
 # ---------------------------------------------------------------------------------- results
@@ -213,6 +215,8 @@ class SwingCouncilResult:
     skeptic_model: str = ""
     bull: SwingCase | None = None
     bear: SwingBearCase | None = None
+    budget_votes: list[int | None] = field(default_factory=list)   # S18: one per PM replicate (None: no vote)
+    budget_reasons: list[str] = field(default_factory=list)        # private: the voting replicates' reasons
 
     @property
     def calls_used(self) -> int:
@@ -307,6 +311,8 @@ def swing_prompt_context(policy: Policy, limits: SwingLimits | None = None) -> d
         "min_target_stop3": f"{min_target_for(0.03, sw) * 100:.1f}",
         "min_target_stop5": f"{min_target_for(0.05, sw) * 100:.1f}",
         "max_vol_mult": f"{sw.targets.max_vol_mult:g}",
+        "budget_max": sw.budget.max_pct,
+        "budget_step": sw.budget.step_pct,
     }
 
 
@@ -549,6 +555,10 @@ def full_input(ideas: Sequence[SwingIdea], trades: Sequence[OpenTrade], *, catal
     admissible |= {c[0] for c in ctx}
     parts.append(_block("MARKET AND SECTOR CONTEXT", ctx))
     parts.append(_block("OPEN SWING BOOK", _book_rows(inputs.open_trades)))
+    if inputs.book_map:
+        rows = [(c.id, c.text) for c in inputs.book_map]
+        admissible |= {r[0] for r in rows}
+        parts.append(_block("BOOK MAP (whole book, percent of NAV; the swing budget is yours to set)", rows))
     if bull is not None:
         parts.append("BULL CASE\n" + bull.model_dump_json() + "\n")
     if bear is not None:
@@ -743,9 +753,16 @@ async def run_swing_council(
     async def rep(k: int, seed: int) -> list[Any] | None:
         r = await run.call("swing_pm", SwingPMDecision, secs, seed=seed, replicate=k)
         dec = r.parsed if isinstance(r.parsed, SwingPMDecision) else None
+        votes[k] = accept_budget(dec, admissible=admissible, budget=policy.swing.budget)
+        if votes[k] is not None and dec is not None:
+            reasons[k] = dec.swing_budget_reason
         return accept_actions(dec, idea_refs=set(idea_refs), trade_refs=set(trade_refs), admissible=admissible)
 
+    votes: list[int | None] = [None] * len(seeds)
+    reasons: list[str] = [""] * len(seeds)
     reps = await asyncio.gather(*(rep(k, s) for k, s in enumerate(seeds)))
+    result.budget_votes = votes
+    result.budget_reasons = [x for x, v in zip(reasons, votes, strict=True) if v is not None]
     result.aggregate = aggregate_actions(reps, idea_refs=idea_refs, trade_refs=trade_refs,
                                          max_entries=inputs.max_entries)
     result.flags.extend(result.aggregate.flags)

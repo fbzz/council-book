@@ -231,6 +231,7 @@ class RiskEngine:
         copy_min_share: float = 0.0,
         cost_30d_fee_bps: float = 0.0,
         extra_lines: Sequence[Any] = (),
+        core_rescale: bool = False,
     ) -> RiskDecision:
         """Run the pipeline in the module docstring.
 
@@ -243,7 +244,10 @@ class RiskEngine:
         the current book) and `copy_min_share` the real-dollar trade floor as a NAV share (both
         private). `material_changed` is one flag, or {line: new material evidence} (MC per line).
         `extra_lines` are the swing book's pinned runtime lines (`swing.book.SwingLine`): see
-        `_with_swing`."""
+        `_with_swing`. `core_rescale` (S18, `swing.budget`): the unit weights were re-sized this
+        cycle because the swing exposure moved by >= its deadband; every core line is then ordered
+        to its re-sized reference target (like a reference level step) instead of waiting for the
+        R11 drift threshold; the minimum trade size, R12 and R13-R15 still apply."""
         kw = dict(
             levels=levels, ref=ref, bands=bands, states=states, snapshot=snapshot,
             unit_weights=unit_weights, kill_state=kill_state, cost_quotes=cost_quotes,
@@ -256,6 +260,7 @@ class RiskEngine:
             held_levels=None if held_levels is None else dict(held_levels),
             copy_min_share=max(float(copy_min_share), 0.0),
             cost_30d_fee_bps=max(float(cost_30d_fee_bps or 0.0), 0.0),
+            core_rescale=bool(core_rescale),
         )
         lines = list(extra_lines)
         if not lines:
@@ -506,6 +511,8 @@ class _Run:
             budget_lines=budget_lines,
             budget=float(sleeve.sleeve_weight) if sleeve is not None else math.inf,
         )
+        if self.core_rescale:       # S18: the core re-size trades now (swing-book budget, `swing.budget`)
+            self.rule_pending |= {s for s in lines if abs(self.ref_w[s] - self.base[s]) > EPS}
 
     def size_floor(self, s: str) -> float:
         """The hard size floor as a NAV share: the real-dollar trade floor and the broker minimum."""

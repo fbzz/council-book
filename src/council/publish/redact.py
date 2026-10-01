@@ -73,6 +73,7 @@ from council.publish.public_models import (
     PublicBand,
     PublicBook,
     PublicBookLine,
+    PublicBookSplit,
     PublicCall,
     PublicCard,
     PublicCheck,
@@ -1071,6 +1072,11 @@ def public_cycle(
         fields["swing"] = public_swing_section(
             swing, cycle_id=rec.cycle_id, licensed_texts=licensed_texts(pack), origin_texts=swing_texts,
             trades=swing_trades, today=rec.slot.astimezone(clock.NEW_YORK).date(), health=swing_health)
+    split = rec.extras.get("book_split") if isinstance(rec.extras, Mapping) else None
+    if isinstance(split, Mapping):          # S18: percent-only, code-computed (`swing.budget.Split`)
+        fields["split"] = PublicBookSplit(**{k: split[k] for k in
+                                             ("swing_budget_pct", "swing_pct", "core_pct", "budget_fallback")
+                                             if k in split})
     # Counters are complete only after every field above was built.
     if lm.unmapped:
         flags.append(f"unmapped_symbols_dropped:{lm.unmapped}")

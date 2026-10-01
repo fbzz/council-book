@@ -43,6 +43,7 @@ SWING_MIN_NET_RR = 1.2          # net reward/risk floor (the policy may demand m
 SWING_MAX_ENTRY_VALID_MIN = 60  # an approved entry is stale after this many minutes
 SWING_MAX_LLM_CALLS_PER_SLOT = 12   # 1 Scout + 5 Skeptic + bull + bear + 3 PM + 1 spare (user 2026-10-01)
 SWING_MIN_DECLARED_COST_PCT_PER_LEG = 1.25   # public R is net of at least this cost per leg
+SWING_MAX_BUDGET_PCT = 50       # S18: the council's swing budget, percent of NAV (user 2026-10-01)
 # S15 brake and S17 drawdown scaling are protections the swing book ADDS (design §3.7 "stricter than
 # today"): the policy may trigger them earlier or scale harder, never switch them off by moving the
 # threshold out of reach.
@@ -142,6 +143,8 @@ def check_swing_policy(swing: SwingPolicy) -> None:
     above("llm.max_calls_per_slot", s.llm.max_calls_per_slot, SWING_MAX_LLM_CALLS_PER_SLOT)
     below("public_record.declared_cost_pct_per_leg", s.public_record.declared_cost_pct_per_leg,
           SWING_MIN_DECLARED_COST_PCT_PER_LEG)
+    above("budget.max_pct", s.budget.max_pct, SWING_MAX_BUDGET_PCT)
+    above("budget.default_pct", s.budget.default_pct, SWING_MAX_BUDGET_PCT)
     below("brake.pnl_nav", s.brake.pnl_nav, SWING_BRAKE_MIN_PNL_NAV)
     below("brake.window_days", s.brake.window_days, SWING_BRAKE_MIN_WINDOW_DAYS)
     below("drawdown_scale.from_peak", s.drawdown_scale.from_peak, SWING_DD_SCALE_MIN_FROM_PEAK)

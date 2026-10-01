@@ -1,5 +1,39 @@
 # Changelog
 
+## Swing budget decided by the council; idle swing money goes to the core (S18) — policy change (2026-10-01)
+- **Policy change** (user decision 2026-10-01: "the council thinks what is better, an aggressive
+  one"): the council decides the swing share of NAV each swing slot, 0-50% in steps of 5; unused swing
+  budget is invested in the core, never idle cash. Hard caps unchanged (8% per trade, 6 open, 2 shorts,
+  gross <= 2.0x, kill -25%, operator approves every trade).
+- Who decides: the **swing PM** (3 replicates). It is the only role that sees both books at once: the
+  opportunity set (ideas, Skeptic verdicts, debate), the market/regime context, the open swing book and
+  a new code-written BOOK MAP block (`BK:swing_open`, `BK:core_share`, `BK:swing_budget`). The core
+  PM's desk is per-line core only and shares its schema with the single-agent control (C10), so
+  changing it would break the core's comparison. Prompt `council-swing_pm/v3` (manifest regenerated
+  for this role only); schema `SwingPMDecision` gains optional `swing_budget_pct`,
+  `swing_budget_reason`, `swing_budget_evidence_ids` (optional so a missing budget never voids the
+  replicate's actions).
+- Aggregation (`swing/budget.py`): a vote must be on the grid and cite an admissible id; median of the
+  votes, floored to the step, then clamped to [open swing exposure, 50]: it never forces a close, it
+  only limits new entries. No valid vote (PM not run / failed) -> the last budget (40 on the first
+  run), flag `swing_budget_fallback`.
+- New rule **S18** `swing_budget_full` (`swing/rules.py`): an entry is refused when the sized swing
+  exposure (active trades + entries accepted before it) would exceed the budget.
+- Core size: `policy/swing.yaml` `budget.idle: cash -> core`; the core is sized to NAV x (1 - open
+  swing exposure) (the room swing does not use now, not the budget), its reference gross capped at
+  `reference_gross_max - swing` (R7's cash reserve). Exposure is the sized exposure of the active
+  trades plus this slot's live entries. No churn: the core re-sizes only when that exposure moved by
+  >= `budget.core_rescale_deadband_nav` (0.04 = the smallest entry) since the last re-size (runtime
+  `swing_core_share`); on that cycle the engine orders core lines to their re-sized targets
+  (`RiskEngine.evaluate(core_rescale=True)`, like a reference level step) through the minimum trade
+  size, R12, R13-R15 and the fee gates; between re-sizes the normal R11 drift rule applies.
+- Supersedes the static go-live re-base of the core (x 0.45/0.95) planned in the swing-book design
+  §3.2 / SW-8: there is no re-base step at go-live any more.
+- Public: the cycle document gains an optional `split` (`swing_budget_pct`, `swing_pct`, `core_pct`,
+  `budget_fallback`; percent of NAV only); the home page's book map shows "Swing x% / Core y%" and the
+  budget. New code `S18:swing_budget_full` and flag `swing_budget_fallback` have site words.
+- `invariants.SWING_MAX_BUDGET_PCT = 50` (the policy may be stricter, never looser).
+
 ## Day-2 confirmation, slot-price paper entries, early economics gate, 5 Skeptic reviews — policy change (2026-10-01)
 - **Policy change** (user decision 2026-10-01, "do everything", after 7 real paper runs: 32 ideas, 0
   entries; most ideas were same-session news already traded for hours, and the PM passed geometry

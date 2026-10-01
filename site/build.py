@@ -3267,6 +3267,17 @@ def _pct(r: tuple[float, float, float, float], box: tuple[float, float]) -> tupl
     return (100 * r[0] / box[0], 100 * r[1] / box[1], 100 * r[2] / box[0], 100 * r[3] / box[1])
 
 
+def book_split(latest: Any) -> dict[str, Any] | None:
+    """S18: the latest run's split for the book map's caption ("Swing x% / Core y%") and the swing
+    budget the council set; percent of NAV only. None before the first run that published one."""
+    sp = getattr(getattr(latest, "doc", None), "split", None)
+    if sp is None:
+        return None
+    return {"swing": fmt_pct1(sp.swing_pct), "core": fmt_pct1(sp.core_pct), "budget": fmt_pct1(sp.swing_budget_pct),
+            "fallback": bool(sp.budget_fallback),
+            "text": f"Swing {fmt_pct1(sp.swing_pct)} / Core {fmt_pct1(sp.core_pct)}"}
+
+
 def book_map(holdings: dict[str, Any], geo: Geometry) -> dict[str, Any] | None:
     """The home page's map of the book, a two-level treemap: one box per asset class (a header strip
     with its name and share), inside it one tile per held line sized by |weight|, plus a cash tile.
@@ -4237,6 +4248,8 @@ DROP_WORDS = {
     "net_rr_below_min": "the reward is too small for the risk once trading costs are counted",
     "S6:net_rr_below_min": "the reward is too small for the risk once trading costs are counted",
     "skeptic_wait_debated": "the Skeptic said wait; the bull, bear and manager heard it and did not enter",
+    "swing_budget_full": "the swing budget the council set this slot is full: no room for another entry",
+    "S18:swing_budget_full": "the swing budget the council set this slot is full: no room for another entry",
 }
 SETUP_WORDS = {"news_continuation": "news continuation", "post_earnings_drift": "post-earnings drift",
                "second_order": "second-order effect",
@@ -4262,6 +4275,7 @@ SWING_FLAG_WORDS = {
     "swing_wide:*": "paper test run: the Scout was allowed more ideas than usual",
     "llm_billing_error": "the model provider refused a call (billing or access); the operator was alerted",
     "news_source_backoff:rss:*": "a news feed asked us to slow down, so it was skipped for the rest of the day",
+    "swing_budget_fallback": "the manager gave no usable swing budget, so the last budget was kept",
 }
 
 
@@ -4694,6 +4708,7 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     roster = build_roster(latest, runs[latest.doc.cycle_id] if latest else None,
                           transcripts[latest.doc.cycle_id] if latest else None, lines)
     render("index.html.j2", "index.html", "", "portfolio", latest=latest, bmap=book_map(holdings, geo),
+           split=book_split(latest),
            roster=roster,
            pending=[dict(x, chip=chip(DECISION_CHIP, x["state"] or "awaiting_publication")) for x in sealed if x["state"] in PENDING_STATES],
            executing=[x for x in sealed if x["state"] in EXECUTING_STATES],

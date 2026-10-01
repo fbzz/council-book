@@ -367,3 +367,17 @@ def accept_actions(
             continue
         out.append(a.model_copy(update={"evidence_ids": ids}))
     return out
+
+
+def accept_budget(decision: SwingPMDecision | None, *, admissible: set[str], budget: Any) -> int | None:
+    """S18: one PM replicate's `swing_budget_pct` vote, or None (no decision, no value, off the
+    policy grid, or no admissible evidence id behind its reason: H6, an uncited budget is no vote)."""
+    from council.swing.budget import valid_vote
+
+    if decision is None or decision.swing_budget_pct is None:
+        return None
+    if not valid_vote(decision.swing_budget_pct, budget):
+        return None
+    if not any(e in admissible for e in decision.swing_budget_evidence_ids):
+        return None
+    return int(decision.swing_budget_pct)

@@ -42,6 +42,9 @@
 {% call m.alert("run", "rocket", plural(executing | length, "proposal") ~ " approved, executing") %}<p>Revealed once the execution is final.</p>{% endcall %}
 {% endif %}
 
+{% if split %}
+<p class="bmap-split" title="Percent of NAV. The council sets the swing budget each swing slot (0–50%); the money swing does not use is invested in the core, never left as idle cash."><strong>{{ split.text }}</strong> · swing budget {{ split.budget }}, set by the council{% if split.fallback %} (kept from the last slot){% endif %}</p>
+{% endif %}
 {% if bmap %}
 <figure class="bmap-fig">
   {# "Colour by": radio inputs and CSS, no script. The inputs come first so that ":checked ~"

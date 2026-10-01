@@ -111,8 +111,14 @@ llm:                           # §5
   skeptic_model: deepseek-v4.1-flash:cloud   # user 2026-09-29: GLM could not return JSON reliably
   skeptic_model_family: same                  # same model as the Scout; blindness is by input only
 
-budget:
-  idle: cash                   # Q-S1: idle swing budget stays in cash
+budget:                        # S18 (user decision 2026-10-01: the council decides the swing share)
+  idle: core                   # unused swing budget is invested in the core, never idle cash (was: cash)
+  decided_by: swing_pm         # the swing PM's replicates output swing_budget_pct; median, then clamped
+  max_pct: 50                  # the budget is 0-50% of NAV ...
+  step_pct: 5                  # ... in integer steps of 5
+  default_pct: 40              # first run, before any valid PM budget (later: the last budget is kept)
+  core_rescale_deadband_nav: 0.04   # the core is re-sized to NAV x (1 - open swing exposure) only when
+                                    # that exposure moved >= 4% of NAV since the last re-size (= size.min_nav)
 
 public_record:                 # §7.3
   declared_cost_pct_per_leg: 1.25   # public R is net of this declared cost per leg (percent of position)

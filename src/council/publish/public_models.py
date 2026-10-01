@@ -640,6 +640,19 @@ class PublicSkepticHealth(PublicModel):
     alarm: bool = False
 
 
+class PublicBookSplit(PublicModel):
+    """S18 (user decision 2026-10-01): the swing budget the council set and the book's split, percent
+    of NAV. `swing_pct`: the sized exposure of the active swing trades (this slot's entries included);
+    `core_pct`: the NAV share the core is sized to (1 - the swing exposure it was last re-sized for;
+    the core is re-sized only when the swing exposure moves >= 4% of NAV); `budget_fallback`: no
+    usable manager budget, the last one was kept."""
+
+    swing_budget_pct: Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]
+    swing_pct: Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]
+    core_pct: Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]
+    budget_fallback: bool = False
+
+
 class PublicSwingSection(PublicModel):
     """The swing book's part of one cycle (a swing slot), sealed with the cycle."""
 
@@ -721,9 +734,9 @@ class PublicCycleV1(PublicModel):
 
     Added after the first cycles were sealed (omitted while empty): `macro`, the macro analyst's
     output; `facts`, the evidence table of the pack the agents saw; `swing`, the swing book's part
-    of a swing slot."""
+    of a swing slot; `split`, the swing budget and the swing / core split (S18)."""
 
-    OMIT_WHEN_DEFAULT = frozenset({"macro", "facts", "swing"})
+    OMIT_WHEN_DEFAULT = frozenset({"macro", "facts", "swing", "split"})
 
     schema_id: Literal["council-book/cycle/v1"] = "council-book/cycle/v1"
     cycle_id: CycleId
@@ -755,6 +768,7 @@ class PublicCycleV1(PublicModel):
     flags: list[Code] = Field(default_factory=list)
     facts: list[PublicFact] = Field(default_factory=list, max_length=4000)
     swing: PublicSwingSection | None = None
+    split: PublicBookSplit | None = None           # S18: swing budget and the swing / core split
 
 
 # ----------------------------------------------------------------------------- commit and reveal

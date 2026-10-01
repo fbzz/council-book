@@ -44,7 +44,7 @@ def test_swing_roles_render_with_the_swing_brief(reg, ctx):
         assert "THE SWING BOOK" in text and "ONE JSON object" in text and "JSON FIELDS" in text
         assert "THE BOOK\n" not in text                    # not the core desk brief
         assert "{{" not in text and "{%" not in text
-        assert reg.prompt_id(role) == f"council-{role}/v{ {'scout': 3, 'skeptic': 4, 'swing_pm': 2}.get(role, 1)}"
+        assert reg.prompt_id(role) == f"council-{role}/v{ {'scout': 3, 'skeptic': 4, 'swing_pm': 3}.get(role, 1)}"
 
 
 def test_examples_satisfy_the_schemas(reg, ctx):

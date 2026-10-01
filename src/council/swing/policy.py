@@ -212,7 +212,22 @@ class Llm(_Section):
 
 
 class Budget(_Section):
-    idle: Literal["cash", "spx"]
+    """S18: the swing budget the council decides each slot (user decision 2026-10-01)."""
+
+    idle: Literal["cash", "spx", "core"]
+    decided_by: Literal["swing_pm"] = "swing_pm"
+    max_pct: Annotated[int, Field(strict=True, ge=0, le=100)] = 50
+    step_pct: PosInt = 5
+    default_pct: Annotated[int, Field(strict=True, ge=0, le=100)] = 40
+    core_rescale_deadband_nav: Annotated[float, Field(ge=0, le=1)] = 0.04
+
+    @model_validator(mode="after")
+    def _steps(self) -> Budget:
+        if self.max_pct % self.step_pct or self.default_pct % self.step_pct:
+            raise ValueError("budget.max_pct and budget.default_pct must be multiples of step_pct")
+        if self.default_pct > self.max_pct:
+            raise ValueError("budget.default_pct above budget.max_pct")
+        return self
 
 
 class PublicRecord(_Section):
@@ -265,6 +280,8 @@ class SwingPolicy(_Section):
             errors.append("drawdown_scale.size_nav below size.min_nav (every scaled entry would drop)")
         if self.drawdown_scale.max_open > self.capacity.max_open:
             errors.append("drawdown_scale.max_open above capacity.max_open")
+        if self.budget.core_rescale_deadband_nav > self.size.min_nav + 1e-12:
+            errors.append("budget.core_rescale_deadband_nav above size.min_nav (an entry would not re-size the core)")
         if self.correlation.max_open_per_bucket > self.capacity.max_open:
             errors.append("correlation.max_open_per_bucket above capacity.max_open")
         if errors:

@@ -1,4 +1,4 @@
-"""Swing risk rules S1-S17 (design swing-book.md rev 2, §3; SW-4). Pure: no I/O, no broker, no LLM.
+"""Swing risk rules S1-S18 (design swing-book.md rev 2, §3; SW-4). Pure: no I/O, no broker, no LLM.
 
 Every number comes from `policy/swing.yaml` (`Policy.swing`), each bounded again here by the code
 ceilings in `council.invariants` (the policy may be stricter, never looser). The rules run twice:
@@ -30,6 +30,7 @@ Reason codes (public; the numbers behind them are not):
 | S15 brake | `brake_on` (30-day net loss), `brake_engaged` (the Skeptic canary pause), `brake_unknown` (no S15 figure: fail closed); all lifted only by the operator (`swing.brake`) |
 | S16 entry guard | at approval: `swing_entry_ran`, `swing_entry_stopped`, `expired` (`entry_guard`) |
 | S17 drawdown | flag `drawdown_scaled`; WARN / HALTED / FLAT -> `kill_state`; an unknown drawdown -> `drawdown_unknown` (fail closed: no entry) |
+| S18 budget | `swing_budget_full`: the entry would push the sized swing exposure (active trades + entries accepted before it) above the council's budget (`swing.budget`) |
 | other | `setup_paper_only`, `swing_blocker`, `vehicle_owned_by_core` |
 """
 
@@ -74,6 +75,7 @@ RULE_OF: dict[str, str] = {
     "brake_on": "S15", "brake_engaged": "S15", "brake_unknown": "S15",
     "swing_entry_ran": "S16", "swing_entry_stopped": "S16", "expired": "S16",
     "kill_state": "S17", "drawdown_unknown": "S17",
+    "swing_budget_full": "S18",
     "setup_paper_only": "SB16", "swing_blocker": "R20", "vehicle_owned_by_core": "S0",
 }
 SWING_DROP_CODES: frozenset[str] = frozenset(RULE_OF)
@@ -271,6 +273,7 @@ class BookState:
     recent_exits: Sequence[RecentExit] = ()
     core_overweight: frozenset[str] = frozenset()   # core lines held above their reference weight
     fee_30d_nav_bps: float = 0.0             # S12 (private)
+    budget_nav: float | None = None          # S18: the council's swing budget (NAV fraction); None = not set
 
 
 CostFn = Callable[[Side, float, int], float | None]    # (side, size_nav, sessions) -> percent
@@ -543,7 +546,14 @@ def book_check(c: Candidate, v: Verdict, book: BookState, sp: SwingPolicy) -> st
             return "bucket_full"
     if abs(net_beta([*trades, mine])) > sp.correlation.max_swing_net_beta + EPS:
         return "swing_net_beta"
+    if book.budget_nav is not None and budget_used([*trades, mine]) > book.budget_nav + 1e-9:
+        return "swing_budget_full"
     return None
+
+
+def budget_used(trades: Iterable[BookTrade]) -> float:
+    """S18: sized swing exposure (sum of |size at entry|), NAV fraction."""
+    return sum(abs(t.size_nav) for t in trades)
 
 
 def final_pass(cands: Sequence[Candidate], book: BookState, sp: SwingPolicy,

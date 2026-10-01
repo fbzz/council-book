@@ -431,6 +431,7 @@ a.chip:hover { background: color-mix(in srgb, var(--c) 24%, var(--card)); }
 
 /* the book map: a two-level squarified treemap (asset-class boxes, then line tiles), positions
    from geometry.css; the tiles' fill follows the "Colour by" toggle (below) */
+.bmap-split { margin: 0 0 var(--sp-2); font-size: .95em; }
 .bmap-fig { position: relative; margin: 0 0 var(--sp-3); }
 .bmap { position: relative; list-style: none; margin: 0; padding: 0; aspect-ratio: 12 / 5; }
 .tgrp { position: absolute; container: tgroup / size; }

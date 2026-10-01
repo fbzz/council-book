@@ -23,8 +23,11 @@ happened next. It is judged only on trades opened after go-live.
 
 - Live directly, without the 6–8 week paper run. Every idea is still paper-tracked (§4), so the
   funnel exists from day one.
-- At most 6 new swing trades per 7 days; at most 6 open positions, about 8% of NAV each; idle budget
-  stays cash.
+- At most 6 new swing trades per 7 days; at most 6 open positions, about 8% of NAV each. Superseded
+  2026-10-01 (S18): the swing budget is set by the council (the swing PM) each slot, 0-50% of NAV in
+  steps of 5, and idle swing money is invested in the core (sized to NAV x (1 - open swing
+  exposure), re-sized only when that exposure moves >= 4% of NAV), never left as cash; there is no
+  static core re-base at go-live.
 - Net reward / risk at entry >= 1.2 after the round-trip cost.
 - One swing slot per US session (winter 18:40 UTC); an entry's approval is valid 60 minutes.
 - Earnings exits are proposals for the human, never automatic.

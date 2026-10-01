@@ -58,7 +58,8 @@ def test_repository_swing_policy_loads_with_the_users_decisions():
     assert swing.slots.winter_utc == ["18:40"]
     assert swing.slots.summer_utc == ["14:40", "18:40"]
     assert swing.earnings.exit_mode == "proposal"
-    assert swing.budget.idle == "cash"
+    assert swing.budget.idle == "core"            # user 2026-10-01: idle swing budget goes to the core (S18)
+    assert (swing.budget.max_pct, swing.budget.step_pct, swing.budget.default_pct) == (50, 5, 40)
     assert swing.llm.skeptic_model == "deepseek-v4.1-flash:cloud"
     assert swing.llm.skeptic_model_family == "same"
     assert swing.llm.skeptic_model == policy.council["model"]  # user 2026-09-29: the Scout's model

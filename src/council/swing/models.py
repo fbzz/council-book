@@ -211,6 +211,12 @@ class SwingPMDecision(Strict):
     actions: list[SwingAction] = Field(default_factory=list, max_length=12)  # <= 5 ideas + 6 trades
     decisive_fact: DecisiveFact
     dismissed: list[Dismissal] = Field(default_factory=list, max_length=6)
+    # S18 (council-swing_pm/v3): the swing share of NAV this replicate wants, 0-50 in steps of 5. Optional
+    # so a missing budget never voids the replicate's actions; the grid is checked in code
+    # (`swing.budget.valid_vote`), an off-grid value is no vote.
+    swing_budget_pct: int | None = None
+    swing_budget_reason: str = Field(default="", max_length=200)
+    swing_budget_evidence_ids: list[str] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def _one_action_per_ref(self) -> SwingPMDecision:

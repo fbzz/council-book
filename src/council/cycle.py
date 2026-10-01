@@ -262,6 +262,10 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     ref_flags: list[str] = []
     ref = build_reference(cycle_id=cycle_id, lines=lines, states=states, returns=returns,
                           policy=policy, flags=ref_flags)
+    # S18 (`swing.budget`): the core is sized to NAV x (1 - the swing exposure it was last re-sized for)
+    ref0, unit0 = ref, {s: e.unit_weight for s, e in ref.entries.items()}
+    sizing = core_sizing_start(ledger, policy, ref0)
+    ref = sizing.ref
     unit = {s: e.unit_weight for s, e in ref.entries.items()}
     ref_levels = {s: e.level_ref for s, e in ref.entries.items()}
     current_levels = _current_levels(snapshot, unit)
@@ -346,6 +350,10 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     if swing.live and swing.slot_ok and ledger.get_runtime(SWING_LIVE_SINCE_KEY) is None:
         ledger.set_runtime(SWING_LIVE_SINCE_KEY, slot.astimezone(clock.NEW_YORK).date().isoformat(), now=now)
 
+    # ---- S18: re-size the core when the swing exposure moved >= its deadband; publish the split
+    unit, core_rescale = core_sizing_after_swing(ctx, rec, sizing, swing, ref0=ref0, unit0=unit0,
+                                                 unit=unit, now=now)
+
     # ---- risk engine
     fps, material_changed = _material(ledger, pack, rec.cards, kill_state)
     rec.material_fingerprint = fingerprints_digest(fps)
@@ -358,7 +366,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
                          states=states, snapshot=snapshot, unit=unit, kill_state=kill_state,
                          quotes=quotes, pack=pack, material_changed=material_changed, basis=basis,
                          slot=slot, returns=returns, nav=nav, econ=econ, extra_blockers=corporate_blockers,
-                         extra_lines=swing.lines, broker_min_share=broker_min)
+                         extra_lines=swing.lines, broker_min_share=broker_min, core_rescale=core_rescale)
     rec.risk = decision
 
     # ---- plan (connected account only)
@@ -821,7 +829,8 @@ def _council_extras(code_cards, bands_fn, call_log: list | None = None, sink: An
 # ------------------------------------------------------------------------------- risk
 def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands, states, snapshot, unit,
               kill_state, quotes, pack, material_changed, basis, slot, returns, nav,
-              econ=None, extra_blockers=(), extra_lines=(), broker_min_share=None) -> RiskDecision:
+              econ=None, extra_blockers=(), extra_lines=(), broker_min_share=None,
+              core_rescale: bool = False) -> RiskDecision:
     from council.risk.engine import RiskEngine
     from council.risk.held_levels import ledger_held_levels
 
@@ -852,6 +861,7 @@ def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands,
         broker_min_share=broker_min_share or None,
         cost_30d_fee_bps=float(fee_30d),
         extra_lines=extra_lines,          # swing-book §1.1: the pinned swing lines (none until run_swing)
+        core_rescale=core_rescale,        # S18: the core re-size trades this cycle (`swing.budget`)
     )
 
 
@@ -1452,6 +1462,7 @@ class SwingRun:
     calls: list[Any] = field(default_factory=list)
     private_calls: list[Any] = field(default_factory=list)    # the weekly canary (H11: ledger only)
     paper: list[str] = field(default_factory=list)            # paper ids tracked this slot
+    budget: Any = None                                        # S18: `swing.budget.BudgetDecision` (swing slot)
 
 
 def _swing_short(cycle_id: str) -> str:
@@ -2016,6 +2027,7 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
         extra = [r for r in event_rows(list(events), slot) if r.id not in have]
         if extra:
             inputs = _replace(inputs, context=[*inputs.context, *extra])
+    inputs = with_book_map(inputs, ledger, policy)       # S18: the whole-book split for the swing PM
     result = await run_swing_stage(ctx.gateway, ctx.registry, policy, inputs, gate=src.gate,
                                    skeptic_gw=src.skeptic_gateway, sink=sink, wide=wide)
     out.flags += [f for f in result.flags if f not in out.flags]
@@ -2029,6 +2041,7 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
         nav = SimpleNamespace(drawdown=0.0)
         out.flags.append("swing_paper_assumed_book")
     book = _book_state(ledger, policy, kill_state=kill_state, nav=nav, slot=slot, now=now)
+    book = apply_swing_budget(ledger, policy, out, book, result.budget_votes, cycle_id=rec.cycle_id, now=now)
     cost_fn = _swing_cost_fn(ctx, snapshot, slot)
     imap = InstrumentMap.load(ctx.state_dir / "instruments.json")
     cands, aggs = [], {}
@@ -2382,3 +2395,148 @@ def _sq8_day(ctx: CycleContext, src: Any, day: Any) -> list[str]:
     sq8.record_day(ctx.ledger, sq8.benchmark_row(book, result, matched_idx_ret=matched, idx_hold_ret=hold))
     sq8.save_book(ctx.state_dir, book)
     return []
+
+
+# ------------------------------------------------------------------------------ S18 swing budget
+@dataclass(frozen=True)
+class CoreSizing:
+    """The core's size at the start of a cycle (`swing.budget`): the swing exposure it is sized for
+    (the last re-size), the unscaled reference gross and the scaled reference book."""
+
+    ref: Any
+    applied: float | None
+    gross0: float
+    gross_max: float
+    deadband: float
+
+
+def swing_exposure_nav(ledger: Any) -> float:
+    """Sized exposure (|size at entry|, NAV fraction) of the active swing trades; 0 on an old ledger."""
+    from council.swing.budget import open_exposure
+    from council.swing.models import ACTIVE_STATES
+
+    try:
+        rows = ledger.swing_trades(states=sorted(ACTIVE_STATES))
+    except Exception:  # noqa: BLE001 - no swing tables: no swing exposure
+        return 0.0
+    return open_exposure((r.detail or {}).get("size_nav") for r in rows)
+
+
+def _applied_swing(ledger: Any) -> float | None:
+    from council.swing.budget import CORE_SHARE_KEY
+
+    raw = ledger.get_runtime(CORE_SHARE_KEY)
+    v = raw.get("swing_nav") if isinstance(raw, Mapping) else None
+    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v) else None
+
+
+def core_sizing_start(ledger: Any, policy: Any, ref: Any) -> CoreSizing:
+    from council.swing.budget import core_factor, scale_reference
+
+    gross_max = float(policy.universe.reference_gross_max)
+    sp = getattr(policy, "swing", None)
+    deadband = float(sp.budget.core_rescale_deadband_nav) if sp is not None else 0.04
+    applied = _applied_swing(ledger) if sp is not None and sp.budget.idle == "core" else None
+    swing = applied or 0.0
+    f = core_factor(swing, ref_gross=float(ref.gross), gross_max=gross_max)
+    return CoreSizing(ref=scale_reference(ref, f, swing_nav=swing), applied=applied, gross0=float(ref.gross),
+                      gross_max=gross_max, deadband=deadband)
+
+
+def core_sizing_after_swing(ctx: CycleContext, rec: CycleRecord, sizing: CoreSizing, swing: SwingRun, *,
+                            ref0: Any, unit0: Mapping[str, float], unit: dict[str, float],
+                            now: datetime) -> tuple[dict[str, float], bool]:
+    """Phase B of the core size (`swing.budget`): the swing exposure now (active trades plus this
+    slot's live entries); when it moved >= the deadband from the applied one, the core is re-sized
+    (unit weights and the recorded reference book) and the engine trades the re-size this cycle.
+    Records the public split in `rec.extras["book_split"]`. Never raises (a failure keeps the
+    start-of-cycle size and flags `swing_budget_error:<type>`)."""
+    from council.swing.budget import (
+        BUDGET_KEY,
+        CORE_SHARE_KEY,
+        core_factor,
+        scale_reference,
+        split,
+        sticky_exposure,
+    )
+
+    policy, ledger = ctx.policy, ctx.ledger
+    sp = getattr(policy, "swing", None)
+    if sp is None:
+        return unit, False
+    try:
+        entries = sum(abs(float(ln.pinned_w)) for ln in swing.lines if getattr(ln, "action", "") == "enter")
+        now_nav = swing_exposure_nav(ledger) + entries
+        rescale = False
+        applied = sizing.applied or 0.0
+        if sp.budget.idle == "core":
+            new, rescale = sticky_exposure(now_nav, sizing.applied, sizing.deadband)
+            if rescale or sizing.applied is None:
+                ledger.set_runtime(CORE_SHARE_KEY, {"swing_nav": round(new, 6), "at": rec.cycle_id}, now=now)
+            if rescale:
+                f = core_factor(new, ref_gross=sizing.gross0, gross_max=sizing.gross_max)
+                unit = {s: float(u) * f for s, u in unit0.items()}
+                rec.reference = scale_reference(ref0, f, swing_nav=new)
+            applied = new
+        core_share = (1.0 - min(max(applied, 0.0), 1.0)) if sp.budget.idle == "core" else 1.0
+        bd = swing.budget
+        if bd is not None:
+            pct, fallback = bd.pct, bd.fallback
+        else:
+            last = ledger.get_runtime(BUDGET_KEY)
+            v = last.get("pct") if isinstance(last, Mapping) else None
+            pct = float(v) if isinstance(v, int | float) and not isinstance(v, bool) else float(sp.budget.default_pct)
+            fallback = bool(last.get("fallback")) if isinstance(last, Mapping) else False
+        rec.extras["book_split"] = split(pct, now_nav, core_share, fallback=fallback).public()
+        return unit, rescale
+    except Exception as exc:  # noqa: BLE001 - the core keeps its start-of-cycle size
+        rec.flags.append(f"swing_budget_error:{type(exc).__name__}")
+        return unit, False
+
+
+def apply_swing_budget(ledger: Any, policy: Any, out: SwingRun, book: Any, votes: Sequence[Any], *,
+                       cycle_id: str, now: datetime) -> Any:
+    """S18 at a swing slot: the council's budget (median of the PM replicates' votes, clamped to
+    [open swing exposure, max]; none -> the last budget, flag `swing_budget_fallback`) becomes the
+    book's `budget_nav`, so the final pass refuses entries above it (`S18:swing_budget_full`)."""
+    from dataclasses import replace as _replace
+
+    from council.swing import rules as R
+    from council.swing.budget import BUDGET_KEY, decide_budget
+
+    last = ledger.get_runtime(BUDGET_KEY)
+    v = last.get("pct") if isinstance(last, Mapping) else None
+    last_pct = float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+    bd = decide_budget(votes, open_pct=R.budget_used(book.trades) * 100.0, last_pct=last_pct,
+                       budget=policy.swing.budget)
+    out.budget = bd
+    out.flags += [f for f in bd.flags() if f not in out.flags]
+    ledger.set_runtime(BUDGET_KEY, {"pct": bd.pct, "at": cycle_id, "fallback": bd.fallback,
+                                    "votes": bd.votes}, now=now)
+    return _replace(book, budget_nav=bd.nav)
+
+
+def with_book_map(inputs: Any, ledger: Any, policy: Any) -> Any:
+    """The swing PM's BOOK MAP rows (`BK:` ids, percent of NAV, code-written): the open swing
+    exposure, the core's share and the current budget with its range (S18)."""
+    from dataclasses import replace as _replace
+
+    from council.swing.budget import BUDGET_KEY
+    from council.swing.council import ContextRow
+
+    b = policy.swing.budget
+    swing = swing_exposure_nav(ledger)
+    applied = _applied_swing(ledger) or 0.0
+    last = ledger.get_runtime(BUDGET_KEY)
+    v = last.get("pct") if isinstance(last, Mapping) else None
+    pct = float(v) if isinstance(v, int | float) and not isinstance(v, bool) else float(b.default_pct)
+    core = (1.0 - min(max(applied, 0.0), 1.0)) * 100.0 if b.idle == "core" else 100.0
+    rows = [
+        ContextRow("BK:swing_open", f"swing book open exposure {round(swing * 100, 1):g}% of NAV "
+                                    f"(entries count at their size)"),
+        ContextRow("BK:core_share", f"core sized to {round(core, 1):g}% of NAV; unused swing budget is "
+                                    "invested in the core, never idle cash"),
+        ContextRow("BK:swing_budget", f"current swing budget {round(pct, 1):g}% of NAV; you set it each slot, "
+                                      f"0 to {b.max_pct} in steps of {b.step_pct}; it never closes an open trade"),
+    ]
+    return _replace(inputs, book_map=rows)
