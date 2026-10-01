@@ -62,6 +62,7 @@ from council.publish.labels import (
 )
 from council.publish.paper import (
     PaperReveal,
+    PublicPaperBookAfter,
     PublicPaperCycle,
     PublicPaperDecisionRow,
     PublicPaperLatest,
@@ -583,6 +584,7 @@ class JournalView:
     paper_cycles: dict[int, PublicPaperCycle] = field(default_factory=dict)
     paper_verified: dict[int, bool] = field(default_factory=dict)
     paper_latest: PublicPaperLatest | None = None
+    paper_books: dict[int, PublicPaperBookAfter] = field(default_factory=dict)   # journal/paper/books/<n>.json
 
     @property
     def has_swing(self) -> bool:
@@ -692,6 +694,12 @@ def load_paper(journal_dir: Path, view: JournalView) -> None:
     if (paper / "latest.json").exists():
         view.paper_latest = PublicPaperLatest.model_validate_json((paper / "latest.json").read_text())
         view.copies["journal/paper/latest.json"] = paper / "latest.json"
+    for f in sorted((paper / "books").glob("*.json")) if (paper / "books").is_dir() else []:
+        b = PublicPaperBookAfter.model_validate_json(f.read_text())
+        if f.stem != str(b.decision_no):
+            raise SiteBuildError(f"paper book {f.name} does not match its decision number")
+        view.paper_books[b.decision_no] = b
+        view.copies[f"journal/paper/books/{f.name}"] = f
 
 
 def load_manifest(prompts_dir: Path) -> dict[str, list[dict[str, str]]]:
@@ -4624,11 +4632,64 @@ def paper_core_view(c: PublicCycleV1, lines: Lines) -> dict[str, Any]:
             "valid": pm.valid_replicates, "cards": len(c.cards)}
 
 
+# live-only stage codes: on a paper decision the idea card shows the paper stage instead
+LIVE_ONLY_DROPS = frozenset({"swing_book_paper_only", "swing_book_not_live"})
+
+
+def paper_idea_view(p: Any) -> dict[str, Any]:
+    """`swing_idea_view` for an idea of a paper decision: the stage chip is the paper outcome (the
+    idea's real outcome on this paper run), and the live-only "the swing book is paper-only" stage is
+    not shown (every paper decision is paper)."""
+    v = swing_idea_view(p.idea)
+    out = outcome_view(p.real_outcome)
+    if p.real_outcome is not None:
+        v["stage"], v["stage_css"] = f"paper: {out['text']}", out["css"]
+    if (p.idea.drop_code or "") in LIVE_ONLY_DROPS:
+        v["drop"] = ""
+        if p.real_outcome is None:
+            v["stage"], v["stage_css"] = "paper: accepted", "proposed"
+    return v
+
+
+def paper_book_home(book: Any, as_of: datetime | None, geo: Geometry) -> dict[str, Any] | None:
+    """The paper BOOK (`PaperBookView`) as THE portfolio: one holdings table (core lines + open swing
+    trades, weight bars), the core / swing / cash split bar, the paper return since start and the
+    closed paper swing trades. Percent only; widths are Geometry classes (no inline style)."""
+    if book is None:
+        return None
+    open_ = [t for t in book.swing_trades if t.status == "open"]
+    weights = [abs(h.weight_pct) for h in book.core] + [abs(t.weight_pct) for t in open_]
+    scale = max([*weights, 1.0])
+    rows = []
+    for h in sorted(book.core, key=lambda h: -abs(h.weight_pct)):
+        rows.append({"kind": "core", "seat": "pm", "line": h.line, "side": "long" if h.weight_pct >= 0 else "short",
+                     "weight": fmt_pct1(h.weight_pct), "bar": geo.cls("width", 100.0 * abs(h.weight_pct) / scale),
+                     "detail": "core line", "ret": None})
+    for t in sorted(open_, key=lambda t: -abs(t.weight_pct)):
+        rows.append({"kind": "swing", "seat": "scout", "line": t.ticker, "side": t.side,
+                     "weight": fmt_pct1(t.weight_pct), "bar": geo.cls("width", 100.0 * abs(t.weight_pct) / scale),
+                     "detail": " · ".join(x for x in (SETUP_WORDS.get(t.setup or "", (t.setup or "").replace("_", " ")),
+                                                      f"stop {t.stop_pct:g}%", f"target {t.target_pct:g}%",
+                                                      plural(t.days_held, "day") + " held") if x),
+                     "ret": fmt_signed(t.return_net_pct)})
+    parts = [("core", "Core", max(book.core_pct, 0.0)), ("swing", "Swing", max(book.swing_pct, 0.0)),
+             ("cash", "Cash", max(book.cash_pct, 0.0))]
+    total = sum(v for _, _, v in parts) or 1.0
+    split = [{"key": k, "label": label, "text": fmt_pct1(v), "w": geo.cls("width", 100.0 * v / total)}
+             for k, label, v in parts]
+    closed = [{"line": t.ticker, "side": t.side, "ret": fmt_signed(t.return_net_pct), "days": t.days_held,
+               "why": EXIT_WORDS.get(t.exit_reason or "", (t.exit_reason or "closed").replace("_", " "))}
+              for t in book.swing_trades if t.status == "closed"]
+    return {"rows": rows, "split": split, "closed": closed[-10:][::-1], "ret": fmt_signed(book.paper_return_pct),
+            "up": book.paper_return_pct >= 0, "since": fmt_day(book.started) if book.started else "—",
+            "as_of": as_of}
+
+
 def decision_view(doc: PublicPaperCycle, verified: bool, lines: Lines) -> dict[str, Any]:
     sw = doc.swing
     ideas = []
     for i in (sw.ideas if sw else []):
-        ideas.append({"p": i, "v": swing_idea_view(i.idea), "real": outcome_view(i.real_outcome),
+        ideas.append({"p": i, "v": paper_idea_view(i), "real": outcome_view(i.real_outcome),
                       "traced": outcome_view(i.traced_outcome), "leg": leg_view(i.leg),
                       "tleg": leg_view(i.traced_leg)})
     chosen = [x for x in ideas if x["p"].chosen]
@@ -4652,10 +4713,11 @@ def decision_view(doc: PublicPaperCycle, verified: bool, lines: Lines) -> dict[s
             "differ": sum(1 for x in ideas if not x["p"].same)}
 
 
-def paper_home(view: JournalView, lines: Lines) -> dict[str, Any] | None:
+def paper_home(view: JournalView, lines: Lines, geo: Geometry | None = None) -> dict[str, Any] | None:
     if view.paper_latest is None and not view.paper_rows:
         return None
     latest = view.paper_latest
+    pbook = paper_book_home(latest.book, latest.as_of, geo or Geometry()) if latest is not None else None
     last = view.paper_rows[-1] if view.paper_rows else None
     doc = view.paper_cycles.get(last.decision_no) if last else None
     ideas = []
@@ -4663,7 +4725,8 @@ def paper_home(view: JournalView, lines: Lines) -> dict[str, Any] | None:
         ideas.append({"ticker": i.idea.ticker, "side": i.idea.side, "chosen": i.chosen, "why": i.why,
                       "out": outcome_view(i.real_outcome)})
     perf = latest.performance if latest else None
-    return {"latest": latest, "last": last, "ideas": ideas, "href": paper_href(last.decision_no) if last else "",
+    return {"latest": latest, "last": last, "ideas": ideas, "book": pbook,
+            "href": paper_href(last.decision_no) if last else "",
             "chosen": chosen_words(list(last.chosen)) if last else "",
             "perf": {"swing": fmt_signed(perf.swing_return_pct), "legs": perf.swing_closed_legs,
                      "since": fmt_day(perf.since) if perf.since else "—", "note": perf.note} if perf else None}
@@ -4883,7 +4946,7 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     roster = build_roster(latest, runs[latest.doc.cycle_id] if latest else None,
                           transcripts[latest.doc.cycle_id] if latest else None, lines)
     render("index.html.j2", "index.html", "", "portfolio", latest=latest, bmap=book_map(holdings, geo),
-           paper=paper_home(view, lines),
+           paper=paper_home(view, lines, geo),
            split=book_split(latest),
            roster=roster,
            pending=[dict(x, chip=chip(DECISION_CHIP, x["state"] or "awaiting_publication")) for x in sealed if x["state"] in PENDING_STATES],
@@ -4922,10 +4985,14 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
         render("swing.html.j2", "swing/index.html", "../", "swing", sp=swing_page_view(view, geo))
     if view.paper_rows or view.has_swing:
         render("decisions.html.j2", "decisions/index.html", "../", "decisions", rows=decision_rows(view),
-               paper=paper_home(view, lines))
+               paper=paper_home(view, lines, geo))
         for no, doc in sorted(view.paper_cycles.items()):
+            after = view.paper_books.get(no)
+            if after is None and view.paper_latest is not None and view.paper_latest.decision_no == no:
+                after = SimpleNamespace(book=view.paper_latest.book, as_of=view.paper_latest.as_of)
             render("decision.html.j2", paper_href(no), "../../", "decisions",
-                   d=decision_view(doc, view.paper_verified.get(no, False), lines))
+                   d=decision_view(doc, view.paper_verified.get(no, False), lines),
+                   book=paper_book_home(after.book, after.as_of, geo) if after is not None else None)
     render("how.html.j2", "how.html", "", "how", roster=load_roster(prompts_dir, policy_dir))
     render("rules.html.j2", "rules.html", "", "rules", rules=load_rules(policy_dir))
     render("record.html.j2", "record.html", "", "record", incidents=view.incidents, withdrawn=load_withdrawn())

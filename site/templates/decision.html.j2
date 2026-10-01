@@ -18,6 +18,7 @@
 {{ m.toc_item("d-trace", "Real vs traced", "skeptic") }}
 {% endif %}
 {{ m.toc_item("d-core", "Core council", "macro") }}
+{% if book %}{{ m.toc_item("d-book", "The book after this decision", "pm") }}{% endif %}
 {% endblock %}
 {% block hero %}
 <header class="hero">
@@ -27,6 +28,12 @@
 </header>
 {% endblock %}
 {% block main %}
+
+{% if book %}
+<section class="card accent-pm paper-panel" id="d-book" aria-label="The book after this decision">
+{{ pm.book(book, "../../", "The book after this decision") }}
+</section>
+{% endif %}
 
 {% call m.section("d-chose", 1, "What we chose", "pm") %}
 {% if d.chosen %}

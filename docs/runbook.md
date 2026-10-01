@@ -201,9 +201,13 @@ The swing pipeline on real data and real models, with no broker token and nothin
    bars, `swing.paper` conventions), hands it to the engine as the snapshot (flag `paper_book`; no
    more "current book taken as flat") and then executes the decision on paper at once (core legs at
    the declared policy cost, kept swing entries at the paper reference with 1.25% per leg; flag
-   `paper_book_filled:<core legs>+<swing entries>`). The first build of an empty book carries
-   `initial_build` (R13 / R14 cycle and 30-day cost / R15 exempt for that one cycle; carry, gross,
-   net, margin, R7, vol and R21 still apply); every later cycle trades deltas within R14.
+   `paper_book_filled:<core legs>+<swing entries>`). The BUILD PHASE opens on an empty book and
+   carries `initial_build` while open: R13 / R14 cycle and 30-day cost / R15 are exempt for the core
+   lines never filled since the phase opened (carry, gross, net, margin, R7, vol and R21 still
+   apply), so a first build split across sessions (London ETFs closed at 18:40, crypto open) finishes
+   at the next 14:40. It closes once every line with a non-zero target was filled at least once or
+   after `initial_build.max_cycles` (5) cycles; state in `book.json` `build_phase` (paper) or the
+   ledger runtime key `initial_build_phase` (live). After it, every cycle trades deltas within R14.
    `council paper status` prints it (percent only). `council.paperbook.paper_book_public(state)` is
    the percent-only dict the public paper record / site renders as "the portfolio":
    `paper_return_pct` (since start), `core_weights_pct` {line: %}, `swing_trades` [{ticker, side,

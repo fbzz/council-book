@@ -112,3 +112,72 @@ def test_nothing_licensed_or_in_money_terms_in_any_paper_output(built):
     for p in files:
         assert leakscan.scan_bytes(p.name, p.read_bytes(), licensed_texts=[SYNTH_RSS]) == [], p
         assert "$" not in p.read_text()
+
+
+# ------------------------------------------------------------------ the paper BOOK as the portfolio
+@pytest.fixture(scope="module")
+def built_book(published, tmp_path_factory, _core_policy):  # noqa: F811
+    from council.paperbook import PaperBook, paper_book_public
+
+    ctx, out, repo = published
+    root = tmp_path_factory.mktemp("paper_site_book")
+    journal = F.make_swing_journal(root, _core_policy)
+    state = root / "state" / "paper"
+    book = PaperBook.start(state, 2000.0, at=NOW)
+    book.trade_core({"NDX": 0.3, "SEMIS": 0.2, "BTC": 0.13}, {"NDX": 400.0, "SEMIS": 250.0, "BTC": 60000.0},
+                    lambda s, b, a: 4.0, at=NOW, cycle_id="c1")
+    book.enter_swing(trade_id="trade:x", ticker="ACME", side="long", line="SW_ACME", size_nav=0.08, entry_ref=50.0,
+                     stop_pct=0.05, target_pct=0.08, entry_day="2026-10-01", time_stop_day="2026-10-15",
+                     setup="news_continuation", at=NOW, cycle_id="c1")
+    book.save()
+    rec = CycleRecord.model_validate(ctx.ledger.get_cycle(out.cycle_id))
+    files, _ = P.paper_files(lambda no: P.build_paper_cycle(rec, None, lines=ctx.policy.universe, decision_no=no,
+                                                            own_texts=[]), journal.parent, rec.cycle_id,
+                             sealed_at=NOW, book=paper_book_public(state))
+    assert P.book_file(1) in files
+    P.write(journal.parent, files)
+    site = _load_site()
+    dest = root / "site"
+    site.build(journal, PROMPTS_DIR, POLICY_DIR, dest, now=NOW)
+    return dest, {p.relative_to(dest).as_posix(): p.read_text() for p in dest.rglob("*.html")}
+
+
+def test_home_renders_the_paper_book_as_the_portfolio(built_book):
+    dest, pages = built_book
+    html = pages["index.html"]
+    home = _text(html)
+    assert "The paper portfolio" in home and "as of" in home and "PAPER" in home
+    assert "paper return since" in home
+    for line in ("NDX", "SEMIS", "BTC", "ACME"):
+        assert line in home, line
+    assert "Core 6" in home or "Core" in home
+    assert "pbook-split" in html and "seg-core" in html and "seg-swing" in html and "seg-cash" in html
+    assert "accent-scout" in html and "accent-pm" in html                    # seat colours
+    assert home.index("The paper portfolio") < home.index("The book")
+    assert f'content="{CSP}"' in html and "<script" not in html.lower() and 'style="' not in html
+    assert "Core lines (target weight)" not in home                          # the book replaces the target list
+
+
+def test_decision_page_shows_the_book_after_it(built_book):
+    _, pages = built_book
+    t = _text(pages["decisions/1/index.html"])
+    assert "The book after this decision" in t and "NDX" in t and "ACME" in t
+
+
+def test_paper_book_output_is_percent_only(built_book):
+    dest, pages = built_book
+    raw = (dest / "journal" / "paper" / "books" / "1.json")
+    assert raw.exists()
+    for blob in (pages["index.html"], pages["decisions/1/index.html"], raw.read_text(),
+                 (dest / "journal" / "paper" / "latest.json").read_text()):
+        assert "$" not in blob and "2000" not in blob and "60000" not in blob and "position_id" not in blob
+        assert not re.search(r"\b(usd|units)\b", blob, re.I)
+
+
+def test_paper_idea_cards_hide_the_live_only_stage(built, built_book):
+    for pages in (built[2], built_book[1]):
+        html = pages["decisions/1/index.html"]
+        t = _text(html)
+        assert "swing book is paper-only" not in t and "swing_book_paper_only" not in html
+        assert "paper: " in t                                                 # the paper stage chip instead
+

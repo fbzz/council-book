@@ -3,17 +3,41 @@
 
 {% macro side(s) %}<span class="chip pos-chip pc-{{ s }}">{{ s }}</span>{% endmacro %}
 
+{% macro book(b, root, title="The paper portfolio") %}
+<div class="pbook" aria-label="{{ title }}">
+  <div class="pbook-head">
+    <p class="pbook-title">{{ badge() }} <strong>{{ title }}</strong>{% if b.as_of %} <span class="muted small">as of {{ b.as_of | when }}</span>{% endif %}</p>
+    <p class="pbook-ret"><span class="pbook-ret-v {{ 'up' if b.up else 'down' }}">{{ b.ret }}</span> <span class="small muted">paper return since {{ b.since }}, after the declared costs</span></p>
+  </div>
+  <div class="pbook-split" role="img" aria-label="Split: {% for x in b.split %}{{ x.label }} {{ x.text }}{% if not loop.last %}, {% endif %}{% endfor %}">{% for x in b.split %}<span class="pbook-seg seg-{{ x.key }} {{ x.w }}"></span>{% endfor %}</div>
+  <ul class="pbook-legend">{% for x in b.split %}<li><span class="pbook-sw seg-{{ x.key }}" aria-hidden="true"></span>{{ x.label }} <strong class="n">{{ x.text }}</strong></li>{% endfor %}</ul>
+  {% if b.rows %}
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Paper book holdings"><table class="wide pbook-table"><caption class="sr">Holdings of the paper book</caption>
+  <thead><tr><th>Holding</th><th>Book</th><th class="n">Weight</th><th>Detail</th><th class="n">Net return</th></tr></thead><tbody>
+  {% for r in b.rows %}<tr class="accent-{{ r.seat }}"><td><span class="dot accent-{{ r.seat }}" aria-hidden="true"></span> <span class="mono">{{ r.line | ticker }}</span> {{ side(r.side) }}</td><td class="small">{{ r.kind }}</td><td class="n h-weight"><span class="wv">{{ r.weight }}</span><span class="wbar" aria-hidden="true"><span class="wfill {{ r.side }} {{ r.bar }}"></span></span></td><td class="small">{{ r.detail }}</td><td class="n">{{ r.ret or "—" }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}<p class="muted small">The paper book holds nothing yet: all cash.</p>{% endif %}
+  {% if b.closed %}
+  <h3 class="small">Closed paper swing trades</h3>
+  <ul class="paper-list">{% for t in b.closed %}<li><span class="mono">{{ t.line | ticker }}</span> {{ side(t.side) }} <strong class="n">{{ t.ret }}</strong> <span class="muted small">{{ t.why }} · {{ t.days }} day(s) held</span></li>{% endfor %}</ul>
+  {% endif %}
+  <p class="small muted">Every figure is a share of the paper portfolio. Core lines carry the policy's cost per side; swing trades a declared cost per leg, never the actual one.</p>
+</div>
+{% endmacro %}
+
 {% macro panel(p, root) %}
 {% set lt = p.latest %}
 <section class="card accent-pm paper-panel" id="paper" aria-labelledby="paper-h">
   <h2 id="paper-h">{{ badge() }} The paper portfolio{% if lt %} <span class="muted small">after decision #{{ lt.decision_no }} · {{ lt.as_of | when }}</span>{% endif %}</h2>
   <p class="small">Paper runs use real data and the real agents, trade nothing and need no approval, so each one is published at once. Every figure is a share of the paper portfolio.</p>
+  {% if p.book %}{{ book(p.book, root) }}{% endif %}
   {% if lt %}
   <dl class="strip paper-strip">
     <div class="st"><dt>Swing / core</dt><dd class="st-v st-v-sm">{{ "%g" | format(lt.swing_pct) }}% / {{ "%g" | format(lt.core_pct) }}%</dd><dd class="st-sub">swing budget {{ "—" if lt.swing_budget_pct is none else ("%g%%" | format(lt.swing_budget_pct)) }}, set by the council</dd></div>
     <div class="st"><dt>Open paper swing trades</dt><dd class="st-v">{{ lt.swing_open | length }}</dd><dd class="st-sub">{{ lt.decisions }} decision(s) published</dd></div>
     {% if p.perf %}<div class="st"><dt>Paper swing P/L</dt><dd class="st-v st-v-sm">{{ p.perf.swing }}</dd><dd class="st-sub">since {{ p.perf.since }} · {{ p.perf.legs }} closed leg(s), after a declared cost per leg</dd></div>{% endif %}
   </dl>
+  {% if not p.book %}
   <div class="paper-cols">
     <div>
       <h3 class="small">Core lines (target weight)</h3>
@@ -24,6 +48,7 @@
       {% if lt.swing_open %}<ul class="paper-list">{% for t in lt.swing_open %}<li><span class="mono">{{ t.ticker | ticker }}</span> {{ side(t.side) }} <strong class="n">{{ "%g" | format(t.size_nav_pct) }}%</strong> <span class="muted small">stop {{ "—" if t.stop_pct is none else ("%g%%" | format(t.stop_pct)) }} · target {{ "—" if t.target_pct is none else ("%g%%" | format(t.target_pct)) }} · until {{ t.time_stop_date | day }} · <a href="{{ root }}decisions/{{ t.decision_no }}/index.html">#{{ t.decision_no }}</a></span></li>{% endfor %}</ul>{% else %}<p class="muted small">None open: idle swing money stays in the core.</p>{% endif %}
     </div>
   </div>
+  {% endif %}
   {% if p.perf %}<p class="small muted">{{ p.perf.note | cap }}.</p>{% endif %}
   {% endif %}
   {% if p.last %}

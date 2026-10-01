@@ -122,6 +122,7 @@ class PaperBook:
     funding: str = "funded"
     declared_swing_pct_per_leg: float = 1.25
     peak_nav: float = 0.0                 # PRIVATE (the paper lifetime peak, for S17 / the engine)
+    build_phase: dict[str, Any] | None = None   # the initial-build phase (`cycle.build_phase_open`)
 
     # ------------------------------------------------------------------ persistence
     @classmethod
@@ -142,7 +143,8 @@ class PaperBook:
                    last_cycle=raw.get("last_cycle"), marked_at=raw.get("marked_at"),
                    funding=raw.get("funding") or "funded",
                    declared_swing_pct_per_leg=float(raw.get("declared_swing_pct_per_leg") or 1.25),
-                   peak_nav=float(raw.get("peak_nav") or raw.get("start_nav") or 0.0))
+                   peak_nav=float(raw.get("peak_nav") or raw.get("start_nav") or 0.0),
+                   build_phase=raw.get("build_phase") if isinstance(raw.get("build_phase"), dict) else None)
         return book
 
     @classmethod
@@ -160,7 +162,8 @@ class PaperBook:
         return {"version": VERSION, "started_at": self.started_at, "start_nav": self.start_nav, "cash": self.cash,
                 "core": self.core, "swing": {k: vars(v) for k, v in self.swing.items()},
                 "last_cycle": self.last_cycle, "marked_at": self.marked_at, "funding": self.funding,
-                "declared_swing_pct_per_leg": self.declared_swing_pct_per_leg, "peak_nav": self.peak_nav}
+                "declared_swing_pct_per_leg": self.declared_swing_pct_per_leg, "peak_nav": self.peak_nav,
+                "build_phase": self.build_phase}
 
     def drawdown(self) -> float:
         """Fractional distance below the paper peak (0 at the peak), like `risk.nav.NavState`; the

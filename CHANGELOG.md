@@ -1,5 +1,20 @@
 # Changelog
 
+## Initial build across market sessions: the build phase — policy change (2026-10-01)
+- **Problem**: the initial funding allowance applied only to an EMPTY book. Core ETFs trade in the
+  London session (frozen `market_closed` at the 18:40 UTC slot) while crypto trades 24/7, so a first
+  build at 18:40 bought only BTC / ETH, the next 14:40 slot no longer saw an empty book, and R14
+  blocked the rest of the build.
+- **Policy change** `policy/risk.yaml initial_build: {exempt: [R13, R14, R15], max_cycles: 5}`: a
+  BUILD PHASE opens on an empty book (funding, a new paper book). While it is open the exempt rules
+  apply PER LINE, only to core lines never filled since the phase opened (and still empty: no weight,
+  no held order); held lines keep every rule. The phase closes once every line with a non-zero
+  target (reference or proposed weight) has been filled at least once, or after `max_cycles` build
+  cycles. Kill state other than NORMAL grants nothing. State: `book.json` `build_phase` (paper) or
+  the ledger runtime key `initial_build_phase` (live; with no stored phase it opens only on an empty
+  book, so an already-built live account stays closed). Every other rule is unchanged
+  (`cycle.build_phase_open` / `build_phase_record`, `RiskEngine.evaluate(initial_build=<lines>)`).
+
 ## Paper book and the initial funding allowance — policy change (2026-10-01)
 - **Problem** (trace-all paper run 2026-10-01): a paper run has no broker snapshot, so every paper
   cycle took the book as flat; building the proposed core from zero tripped R14, SPX / BTC / ETH were

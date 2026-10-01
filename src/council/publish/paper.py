@@ -54,6 +54,7 @@ from council.publish.public_models import (
 PAPER_DIR = "journal/paper"
 DECISIONS_PATH = f"{PAPER_DIR}/decisions.jsonl"
 LATEST_PATH = f"{PAPER_DIR}/latest.json"
+BOOKS_DIR = f"{PAPER_DIR}/books"             # books/<decision_no>.json: the paper book after that decision
 DECLARED_COST_PCT_PER_LEG = 1.25
 Stage = Literal["scout", "gate", "skeptic", "pm", "rules", "leg", "unknown"]
 Share = Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]
@@ -342,6 +343,21 @@ class PublicPaperLatest(PublicModel):
     swing_budget_pct: Share | None = None
     performance: PaperPerformance = Field(default_factory=PaperPerformance)
     book: PaperBookView | None = None     # the paper book after its fills (`council.paperbook`)
+
+
+class PublicPaperBookAfter(PublicModel):
+    """The paper book right after one paper decision's fills (`journal/paper/books/<n>.json`), so
+    each /decisions/<n>/ page shows the portfolio that decision left. Percent only."""
+
+    schema_id: Literal["council-book/paper-book/v1"] = "council-book/paper-book/v1"
+    decision_no: int = Field(ge=1)
+    cycle_id: CycleId
+    as_of: UtcDatetime
+    book: PaperBookView
+
+
+def book_file(decision_no: int) -> str:
+    return f"{BOOKS_DIR}/{int(decision_no)}.json"
 
 
 # ------------------------------------------------------------------------------------- helpers
@@ -762,6 +778,9 @@ def paper_files(doc_for: Any, root: Path, cycle_id: str, *, paper_rows: Sequence
     latest = paper_latest(doc, all_rows, paper_rows, today=today or doc.slot.date(), book=book)
     files = {cycle_file(cycle_id): sealed, reveal_file(cycle_id): dump(reveal), DECISIONS_PATH: dec,
              LATEST_PATH: dump(latest)}
+    if latest.book is not None:
+        files[book_file(no)] = dump(PublicPaperBookAfter(decision_no=no, cycle_id=cycle_id, as_of=doc.slot,
+                                                         book=latest.book))
     return files, doc
 
 
@@ -829,6 +848,7 @@ def publish_paper(rec: Any, pack: Any, *, state_dir: Path, root: Path, lines: An
     return doc.decision_no, write(root, files)
 
 
-__all__ = ["DECISIONS_PATH", "LATEST_PATH", "PAPER_DIR", "PaperPublishError", "PublicPaperCycle",
+__all__ = ["BOOKS_DIR", "DECISIONS_PATH", "LATEST_PATH", "PAPER_DIR", "PaperPublishError", "PublicPaperBookAfter",
+           "book_file", "PublicPaperCycle",
            "PublicPaperDecisionRow", "PublicPaperLatest", "build_paper_cycle", "decisions_bytes", "number_for",
            "paper_files", "paper_latest", "paper_swing", "publish_paper", "read_rows", "scan_files"]

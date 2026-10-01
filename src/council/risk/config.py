@@ -151,13 +151,16 @@ INITIAL_BUILD_EXEMPTABLE: frozenset[str] = frozenset({"R13", "R14", "R15"})
 
 
 class InitialBuildConfig(Frozen):
-    """The initial funding allowance: on the ONE build cycle of an empty book (a paper book's first
-    build, a live account's funding day) the listed churn/cost rules do not apply. Only R13 (churn),
+    """The initial funding allowance: during the BUILD PHASE that opens on an empty book (a paper
+    book's start, a live account's funding) the listed churn/cost rules do not apply to the lines never
+    filled since; the phase closes once every line with a non-zero target was filled, or after
+    `max_cycles` build cycles (`cycle.build_phase_open`). Only R13 (churn),
     R14 (cycle and 30-day cost; the carry budget still applies) and R15 (net-of-cost gate) may be
     listed (`invariants.check_policy`); every other rule (gross, net, margin, R7 reserve, vol, R21 ...)
     applies. Empty = no allowance."""
 
     exempt: tuple[str, ...] = ()
+    max_cycles: int = Field(default=5, ge=1, le=20)   # the build phase closes after this many build cycles
 
 
 class EventBlockConfig(Frozen):

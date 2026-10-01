@@ -111,7 +111,7 @@ def test_cycle1_initial_build_mounts_the_core(three_cycles):
     rec = _rec(ctx, outs[0])
     assert "initial_build" in rec["flags"] and "paper_book" in rec["flags"], rec["flags"]
     assert not any("current book taken as flat" in r for r in rec["risk"]["hold_reasons"])
-    assert _check(rec, "R14", "cycle_cost_bps")["detail"].startswith("initial build")
+    assert "initial build" in _check(rec, "R14", "cycle_cost_bps")["detail"]
     final = {s: w for s, w in rec["risk"]["final_w"].items() if abs(w) > 1e-9}
     assert not any("R14 cycle cost budget" in r or r.startswith("R13") for r in rec["risk"]["hold_reasons"])
     book = PaperBook.load(ctx.state_dir)
@@ -126,7 +126,9 @@ def test_cycle1_initial_build_mounts_the_core(three_cycles):
 def test_cycle2_sees_the_held_book_and_opens_the_swing_entry(three_cycles):
     ctx, outs, books = three_cycles
     rec = _rec(ctx, outs[1])
-    assert "initial_build" not in rec["flags"]
+    # build phase: the lines held since cycle 1 are no longer exempt (ETH, below the minimum trade
+    # size, was never filled and keeps the phase open until max_cycles)
+    assert set(books[1]["build_phase"]["filled"]) >= {"BTC", "NDX", "SEMIS", "SPX"}
     r14 = _check(rec, "R14", "cycle_cost_bps")
     assert r14["passed"] and "initial build" not in (r14["detail"] or "")
     assert rec["risk"]["base_w"]          # the held paper book, not flat
@@ -291,3 +293,81 @@ def test_public_paper_record_carries_the_book(tmp_path):
     text = view.model_dump_json()
     assert not MONEY.search(text) and "400" not in text
     assert paper_book_view({}) is None
+
+
+
+# ------------------------------------------------------------------ the build phase (across sessions)
+EVENING = datetime(2026, 10, 1, 18, 40, tzinfo=UTC)     # Thursday 18:40: London ETFs closed, crypto open
+NEXT_DAY = datetime(2026, 10, 2, 14, 40, tzinfo=UTC)    # Friday 14:40: London open
+
+
+def test_build_phase_spans_market_sessions(tmp_path, monkeypatch):
+    async def no_swing(ctx, rec, **kw):
+        return C.SwingRun()
+
+    monkeypatch.setattr(C, "run_swing", no_swing)
+    clk = _Clock(EVENING + timedelta(minutes=3))
+    ctx = _ctx(tmp_path, clk)
+    out1 = C.run_cycle(ctx)
+    rec1 = _rec(ctx, out1)
+    held1 = {s for s, w in PaperBook.load(ctx.state_dir).signed_w().items() if abs(w) > 1e-6}
+    assert "initial_build" in rec1["flags"]
+    assert "BTC" in held1 and not held1 & {"NDX", "SEMIS", "SPX"}, held1      # crypto only at 18:40
+
+    clk.t = NEXT_DAY + timedelta(minutes=3)
+    out2 = C.run_cycle(ctx)
+    rec2 = _rec(ctx, out2)
+    book = PaperBook.load(ctx.state_dir)
+    held2 = {s for s, w in book.signed_w().items() if abs(w) > 1e-6}
+    assert "initial_build" in rec2["flags"], rec2["flags"]       # the next session still builds
+    assert {"NDX", "SEMIS", "SPX"} <= held2, (held2, rec2["risk"]["hold_reasons"])
+    assert not any(r.startswith(("R13", "R14 cycle", "R14 30-day")) for r in rec2["risk"]["hold_reasons"])
+    assert "initial build" in _check(rec2, "R14", "cycle_cost_bps")["detail"]
+    assert "BTC" in book.build_phase["filled"] and book.build_phase["open"] is True
+
+
+def _snap(w):
+    from council.models.broker import ExposureSnapshot
+
+    return ExposureSnapshot(taken_at=NOW, equity_usd=1.0, credit_usd=1.0, positions=[], signed_w=w,
+                            gross=0, net=0, margin_use=0)
+
+
+def test_build_phase_exempts_only_never_filled_lines_and_closes():
+    policy = Policy.load(include_sleeve=False)
+    led = SimpleNamespace(pending_open_weights=lambda: {})
+    pb = SimpleNamespace(build_phase={"open": True, "filled": ["ETH"], "cycles": 1,
+                                      "targets": ["BTC", "ETH", "NDX", "SPX"]})
+    phase, lines = C.build_phase_open(None, policy, _snap({"BTC": 0.13}), "NORMAL", led, pb)
+    assert phase["open"] and {"NDX", "SPX", "SEMIS"} <= lines and not lines & {"BTC", "ETH"}
+    assert C.build_phase_open(None, policy, _snap({"BTC": 0.13}), "WARN", led, pb)[1] == frozenset()
+    # closes once every target line was filled at least once ...
+    pb.build_phase = {"open": True, "filled": ["ETH", "NDX", "SPX"], "cycles": 2, "targets": ["BTC", "ETH", "NDX", "SPX"]}
+    phase, lines = C.build_phase_open(None, policy, _snap({"BTC": 0.13}), "NORMAL", led, pb)
+    assert phase["open"] is False and lines == frozenset()
+    # ... or after max_cycles (policy key)
+    pb.build_phase = {"open": True, "filled": [], "cycles": 5, "targets": ["NDX"]}
+    assert C.build_phase_open(None, policy, _snap({}), "NORMAL", led, pb)[1] == frozenset()
+    assert policy.risk["initial_build"]["max_cycles"] == 5
+    # live: no stored phase -> open only on an empty book (ledger runtime key)
+    store: dict = {}
+    live = SimpleNamespace(pending_open_weights=lambda: {}, get_runtime=lambda k, d=None: store.get(k, d))
+    assert C.build_phase_open(None, policy, _snap({"NDX": 0.2}), "NORMAL", live)[1] == frozenset()
+    phase, lines = C.build_phase_open(None, policy, _snap({}), "NORMAL", live)
+    assert phase["open"] and "NDX" in lines
+
+
+def test_engine_build_lines_are_per_line():
+    from council.risk.engine import RiskEngine, _Run
+
+    eng = RiskEngine(Policy.load(include_sleeve=False))
+    base = dict(levels={}, ref={}, bands={}, states={}, unit_weights={}, kill_state="NORMAL", cost_quotes={},
+                events=[], last_change={}, turnover_7d=0.0, material_changed=False, basis="code_only", now=NOW,
+                vol_fn=None, turnover_30d=None, cost_30d_bps=None, book_vol_ratio=None, stop_hits={},
+                blockers=[], broker_min_share={}, nav_drawdown=None, pending_w={}, held_levels=None,
+                copy_min_share=0.0, cost_30d_fee_bps=0.0, core_rescale=False, swing_lines=())
+    run = _Run(eng, snapshot=_snap({"BTC": 0.13}), initial_build=frozenset({"NDX", "BTC"}), **base)
+    assert run.build_lines == {"NDX"}                       # a held line is never exempt
+    assert run.ib("R14", "NDX") and not run.ib("R14", "BTC") and not run.ib("R14", "SPX")
+    closed = _Run(eng, snapshot=_snap({"BTC": 0.13}), initial_build=frozenset(), **base)
+    assert closed.initial_exempt == frozenset() and not closed.ib("R14", "NDX")   # after closure R14 applies

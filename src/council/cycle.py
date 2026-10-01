@@ -241,7 +241,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
             snapshot = paper_book.snapshot(now)
             econ = cycle_trade_economics(policy, ctx.state_dir, snapshot.equity_usd)
     ctx.paper_book = paper_book  # type: ignore[attr-defined]
-    initial_build = initial_build_of(policy, snapshot, kill_state, ledger)
+    build_phase, initial_build = build_phase_open(ctx, policy, snapshot, kill_state, ledger, paper_book)
     if initial_build:
         flags.append(INITIAL_BUILD_FLAG)
     raw_states = market_states(policy, history, now=slot, sources=history_sources(policy) or None)
@@ -386,6 +386,7 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
                          extra_lines=swing.lines, broker_min_share=broker_min, core_rescale=core_rescale,
                          initial_build=initial_build)
     rec.risk = decision
+    rec.flags += build_phase_record(ctx, build_phase, decision, ref_levels, unit, bool(initial_build), paper_book, now)
     if paper_book is not None:          # paper: execute the decision at once (no approval: paper)
         rec.flags += paper_execute(ctx, paper_book, decision, swing, history=history, quotes=quotes,
                                    slot=slot, now=now, cycle_id=cycle_id)
@@ -857,7 +858,7 @@ def _council_extras(code_cards, bands_fn, call_log: list | None = None, sink: An
 def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands, states, snapshot, unit,
               kill_state, quotes, pack, material_changed, basis, slot, returns, nav,
               econ=None, extra_blockers=(), extra_lines=(), broker_min_share=None,
-              core_rescale: bool = False, initial_build: bool = False) -> RiskDecision:
+              core_rescale: bool = False, initial_build: Any = False) -> RiskDecision:
     from council.risk.engine import RiskEngine
     from council.risk.held_levels import ledger_held_levels
 
@@ -889,7 +890,7 @@ def _evaluate(ctx: CycleContext, rec: CycleRecord, *, levels, ref_levels, bands,
         cost_30d_fee_bps=float(fee_30d),
         extra_lines=extra_lines,          # swing-book §1.1: the pinned swing lines (none until run_swing)
         core_rescale=core_rescale,        # S18: the core re-size trades this cycle (`swing.budget`)
-        initial_build=initial_build,      # the initial funding allowance (empty book only)
+        initial_build=initial_build,      # the initial funding allowance (build-phase lines)
     )
 
 
@@ -2667,6 +2668,83 @@ def initial_build_of(policy: Any, snapshot: Any, kill_state: str, ledger: Any) -
     except Exception:  # noqa: BLE001 - an unreadable pending state is not an empty book
         return False
     return bool(risk_limits(policy).initial_build.exempt)
+
+
+BUILD_PHASE_KEY = "initial_build_phase"       # live: the ledger runtime key; paper: `PaperBook.build_phase`
+
+
+def _held_lines(snapshot: Any, ledger: Any) -> set[str]:
+    """Lines with a snapshot weight or a held order. Raises on an unreadable pending state (the
+    caller then grants no exemption)."""
+    held = {s for s, w in (snapshot.signed_w or {}).items() if abs(float(w)) > 1e-9}
+    held |= {s for s, w in (ledger.pending_open_weights() or {}).items() if abs(float(w)) > 1e-9}
+    return held
+
+
+def build_phase_open(ctx: Any, policy: Any, snapshot: Any, kill_state: str, ledger: Any,
+                     paper_book: Any = None) -> tuple[dict[str, Any] | None, frozenset[str]]:
+    """The BUILD PHASE of the initial funding allowance (`policy/risk.yaml initial_build`).
+
+    The phase opens on an empty book (funding, or a new paper book) and stays open until every core
+    line with a non-zero target has been filled at least once, or after `max_cycles` cycles. While it
+    is open, the policy's exempt rules (R13/R14/R15) apply only to core lines never filled since the
+    phase opened (`RiskEngine.evaluate(initial_build=...)`), so a first build split across market
+    sessions (London ETFs closed at an evening slot while crypto trades) completes in the next slot.
+    State: `PaperBook.build_phase` on paper, the ledger runtime key `initial_build_phase` live.
+    Missing state: live opens the phase only on an empty book (`initial_build_of`); a paper book
+    opens it with the lines it already holds counted as filled. Returns (phase, exempt lines)."""
+    from council.risk.config import risk_limits
+
+    if snapshot is None:
+        return None, frozenset()
+    cfg = risk_limits(policy).initial_build
+    try:
+        held = _held_lines(snapshot, ledger)
+        if paper_book is not None:
+            phase = getattr(paper_book, "build_phase", None)
+            if not isinstance(phase, dict):
+                phase = {"open": True, "filled": [], "cycles": 0, "targets": []}
+        else:
+            phase = ledger.get_runtime(BUILD_PHASE_KEY)
+            if not isinstance(phase, dict):
+                phase = {"open": initial_build_of(policy, snapshot, "NORMAL", ledger),
+                         "filled": [], "cycles": 0, "targets": []}
+        phase = {"open": bool(phase.get("open")), "filled": sorted(set(phase.get("filled") or ()) | held),
+                 "cycles": int(phase.get("cycles") or 0), "targets": list(phase.get("targets") or ())}
+        if phase["open"]:
+            targets = set(phase["targets"])
+            if (targets and targets <= set(phase["filled"])) or phase["cycles"] >= int(cfg.max_cycles):
+                phase["open"] = False
+        if not phase["open"] or kill_state != "NORMAL" or not cfg.exempt:
+            return phase, frozenset()
+        core = [ln.symbol for ln in policy.universe.lines]
+        return phase, frozenset(s for s in core if s not in phase["filled"] and s not in held)
+    except Exception:  # noqa: BLE001 - an unreadable phase never grants an exemption
+        return None, frozenset()
+
+
+def build_phase_record(ctx: Any, phase: dict[str, Any] | None, decision: Any, ref_levels: Mapping[str, float],
+                       unit: Mapping[str, float], used: bool, paper_book: Any, now: datetime) -> list[str]:
+    """Persist the build phase after the decision: the cycle count (when the phase is open) and the
+    lines with a non-zero target this cycle (reference or proposed weight), which close the phase at
+    the next cycle start once all of them have been filled."""
+    if phase is None:
+        return []
+    try:
+        if phase["open"]:
+            phase["cycles"] = int(phase["cycles"]) + (1 if used else 0)
+            core = [ln.symbol for ln in ctx.policy.universe.lines]
+            prop = getattr(decision, "proposed_w", None) or {}
+            phase["targets"] = sorted(s for s in core if abs(float(ref_levels.get(s, 0.0)) * float(unit.get(s, 0.0))) > 1e-9
+                                      or abs(float(prop.get(s, 0.0))) > 1e-9)
+        if paper_book is not None:
+            paper_book.build_phase = phase
+            paper_book.save()
+        else:
+            ctx.ledger.set_runtime(BUILD_PHASE_KEY, phase, now=now)
+        return []
+    except Exception as exc:  # noqa: BLE001 - the phase record never stops a cycle
+        return [f"build_phase_error:{type(exc).__name__}"]
 
 
 def paper_exposure(ctx: Any) -> float:
