@@ -1,0 +1,43 @@
+{% extends "base.html.j2" %}
+{% import "macros.html.j2" as m %}
+{% import "paper_macros.html.j2" as pm %}
+{% block title %}Decisions{% endblock %}
+{% block toc %}
+{{ m.toc_item("dec-list", "Every decision", "pm") }}
+{% if paper %}{{ m.toc_item("paper", "The paper portfolio", "pm") }}{% endif %}
+{% endblock %}
+{% block hero %}
+<header class="hero">
+  <p class="eyebrow">Decisions</p>
+  <h1>What the council chose, decision by decision</h1>
+  <p class="lede">Each paper run is numbered in order (#1, #2, …) and never renumbered. Open one for the whole flow: the reading list, the Scout's ideas, the code gate, the Skeptic, the bull and the bear, every manager attempt, the swing rules and the core council.</p>
+</header>
+{% endblock %}
+{% block main %}
+{% call m.section("dec-list", 1, "Every decision", "pm") %}
+{% if rows %}
+{{ m.wrap_open("Every decision") }}
+<table class="wide stack decisions" role="table">
+  <thead><tr role="row"><th role="columnheader" class="n">#</th><th role="columnheader">When</th><th role="columnheader">Kind</th><th role="columnheader" class="n">Ideas</th><th role="columnheader">Chosen</th><th role="columnheader">Why</th><th role="columnheader">Seal</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr role="row">
+    <td role="cell" class="n" data-label="#">{% if r.no %}<a href="../{{ r.href }}">#{{ r.no }}</a>{% else %}—{% endif %}</td>
+    <td role="cell" class="when" data-label="When"><a href="../{{ r.href }}">{{ r.slot | when }}</a></td>
+    <td role="cell" data-label="Kind">{{ pm.badge(r.badge) }}</td>
+    <td role="cell" class="n" data-label="Ideas">{{ r.ideas }}</td>
+    <td role="cell" data-label="Chosen">{{ r.chosen }}</td>
+    <td role="cell" class="text" data-label="Why">{{ r.why }}</td>
+    <td role="cell" data-label="Seal">{% if r.verified %}<span class="chip state-executed"><span aria-hidden="true">✓ </span>VERIFIED</span>{% else %}<span class="chip state-warn">UNVERIFIED</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Paper runs are revealed at once (no approval): the cycle file is the exact sealed bytes and its salt opens the commitment in the row. Sizes are shares of the portfolio.</p>
+{% else %}
+{{ m.empty("No decision yet", "The first paper or live decision will appear here.") }}
+{% endif %}
+{% endcall %}
+{% if paper %}{{ pm.panel(paper, "../") }}{% endif %}
+{% endblock %}

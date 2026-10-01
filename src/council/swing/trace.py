@@ -104,6 +104,7 @@ def trace_record(result: Any, inputs: Any, *, real_rules: tuple[Sequence[Any], S
             "side": getattr(x, "side", ""), "setup": getattr(x, "setup", ""),
             "has_card": getattr(idea, "card", None) is not None, "batch": t.get("batch"),
             "real_gate_outcome": real, "traced_outcome": traced, "paper_leg": leg,
+            "real_leg": _leg(real_ok[ref]) if ref in real_ok else None,
             "same": (real.get("stage"), real.get("code")) == (traced.get("stage"), traced.get("code")),
         })
     chosen = [i for i in ideas if (i["paper_leg"] or {}).get("ok")]

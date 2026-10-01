@@ -192,6 +192,11 @@ def cycle(
     trace_all: bool = typer.Option(False, "--trace-all", help="--paper only: every idea with a fact card goes "
                                    "through every swing stage (Skeptic, debate, PM, S-rules); the verdicts "
                                    "do not block, the real outcome is recorded beside the traced one."),
+    publish: bool = typer.Option(False, "--publish", help="--paper only: write the paper run's PUBLIC record "
+                                 "(journal/paper/: the numbered decision, the paper portfolio) through the "
+                                 "public pipeline into the repo. Never commits or pushes."),
+    publish_dir: Path = typer.Option(None, "--publish-dir", help="--paper --publish: the repo dir to write "
+                                     "journal/paper/ into (default: the repo the code runs from)."),
 ) -> None:
     """Run the council cycle for the current 4-hour slot."""
     from council.cycle import run_cycle
@@ -203,11 +208,19 @@ def cycle(
         _refuse("--ideas is for --paper runs only (a live, rehearsal or dry-run slot keeps the policy caps)")
     if trace_all and (not paper or sandbox is not None):
         _refuse("--trace-all is for --paper runs only (a live, rehearsal or dry-run slot never traces)")
+    if (publish or publish_dir is not None) and (not paper or sandbox is not None):
+        _refuse("--publish is for --paper runs only (a live or rehearsal slot publishes through its own pipeline)")
+    if publish_dir is not None and not publish:
+        _refuse("--publish-dir needs --publish")
     if sandbox is not None:
         ctx = sandbox                         # [REHEARSAL] shell: stub model, fake broker, sandbox remote
     elif paper:
         ctx = paper_context(settings, stub_llm=stub_llm, ideas=ideas)
         ctx.swing_trace_all = bool(trace_all)
+        if publish:
+            from council.paths import REPO_ROOT
+
+            ctx.paper_publish_dir = Path(publish_dir) if publish_dir is not None else REPO_ROOT
     elif rehearsal:
         from council import paths
         from council.context import build_context

@@ -1,5 +1,22 @@
 # Changelog
 
+## Paper publishing and the decisions pages (2026-10-01)
+- `council cycle --paper --publish [--publish-dir DIR]` (paper only; refused off paper like
+  `--trace-all`): writes the paper run's PUBLIC record into the repo (default: the repo the code runs
+  from), never committing or pushing: `journal/paper/cycles/YYYY/MM/<cycle>.json` (the sealed bytes
+  of a `PublicPaperCycle`: the core council's `PublicCycleV1` from `redact.public_cycle` + the paper
+  swing part), its `.reveal.json` (revealed at once: paper has no approval), `decisions.jsonl`
+  (numbered #1, #2, ... append-only; a re-run keeps its number) and `latest.json` (the paper
+  portfolio: core weights %, open paper swing legs %, swing/core split, paper swing P&L % since the
+  first decision). Trace-all data: real vs traced outcome, Skeptic verdicts + reasons, bull/bear
+  per batch, every PM replicate's actions + reasons and the tally, S-rule results, would-be legs
+  (% NAV, stop %, target %, time stop; declared cost, never the actual one), budget split. Licensed
+  `N:` items id + feed label only; agent text overlapping licensed text withheld; every file passes
+  the leak scan first. Flags `paper_published:<N>` / `paper_publish_error:<type>`.
+- Site: a PAPER portfolio panel and "Latest decision #N — what we chose" first on the home page;
+  `/decisions/` (the numbered history, PAPER / LIVE badges, verified seals); `/decisions/<N>/` (the
+  whole flow top to bottom). No script, fixed CSP. Runbook §7b. No policy change.
+
 ## Paper trace-all and the local paper report (2026-10-01)
 - `council cycle --paper --trace-all` (paper only; refused like `--ideas` / `--at`; combinable with
   both): every swing idea with a fact card goes through every stage. The gate, the best-N cut, the

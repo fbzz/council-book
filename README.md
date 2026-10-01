@@ -14,6 +14,14 @@ before it can be executed.**
 - A public record: every cycle's evidence, every agent's card, the debate, the portfolio manager's
   decision, the risk engine's clips, the costs, and the human's approve/reject — all in `journal/`.
 
+## The paper portfolio
+Until the broker account is live, the council runs on paper: real data, the real agents, nothing
+traded. Each paper run is published as a numbered decision (#1, #2, ...) in `journal/paper/` and on
+the site's home page and `/decisions/`: what it chose, the full flow (reading list, Scout, code gate,
+Skeptic, bull and bear, every manager attempt, the swing rules, the core council) and every agent's
+feedback. To publish one: `COUNCIL_MODE=dry_run council cycle --paper --trace-all --publish`, then
+commit and push `journal/paper` (see `docs/runbook.md` §7b).
+
 ## What this is not
 - Not investment advice, not a signal service, not a fund. See [DISCLAIMER.md](DISCLAIMER.md).
 - Not evidence that LLMs can trade. The honest prior, from the research that preceded this repo, is

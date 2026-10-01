@@ -1,0 +1,42 @@
+{# Paper runs: the PAPER badge, the home panel (paper portfolio + latest decision). #}
+{% macro badge(kind="PAPER") %}{% if kind == "PAPER" %}<span class="chip state-rehearsal paper-badge" title="A paper run: real data and models, nothing traded, no approval">PAPER</span>{% else %}<span class="chip state-executed" title="A live run">LIVE</span>{% endif %}{% endmacro %}
+
+{% macro side(s) %}<span class="chip pos-chip pc-{{ s }}">{{ s }}</span>{% endmacro %}
+
+{% macro panel(p, root) %}
+{% set lt = p.latest %}
+<section class="card accent-pm paper-panel" id="paper" aria-labelledby="paper-h">
+  <h2 id="paper-h">{{ badge() }} The paper portfolio{% if lt %} <span class="muted small">after decision #{{ lt.decision_no }} · {{ lt.as_of | when }}</span>{% endif %}</h2>
+  <p class="small">Paper runs use real data and the real agents, trade nothing and need no approval, so each one is published at once. Every figure is a share of the paper portfolio.</p>
+  {% if lt %}
+  <dl class="strip paper-strip">
+    <div class="st"><dt>Swing / core</dt><dd class="st-v st-v-sm">{{ "%g" | format(lt.swing_pct) }}% / {{ "%g" | format(lt.core_pct) }}%</dd><dd class="st-sub">swing budget {{ "—" if lt.swing_budget_pct is none else ("%g%%" | format(lt.swing_budget_pct)) }}, set by the council</dd></div>
+    <div class="st"><dt>Open paper swing trades</dt><dd class="st-v">{{ lt.swing_open | length }}</dd><dd class="st-sub">{{ lt.decisions }} decision(s) published</dd></div>
+    {% if p.perf %}<div class="st"><dt>Paper swing P/L</dt><dd class="st-v st-v-sm">{{ p.perf.swing }}</dd><dd class="st-sub">since {{ p.perf.since }} · {{ p.perf.legs }} closed leg(s), after a declared cost per leg</dd></div>{% endif %}
+  </dl>
+  <div class="paper-cols">
+    <div>
+      <h3 class="small">Core lines (target weight)</h3>
+      {% if lt.core %}<ul class="paper-list">{% for h in lt.core %}<li><span class="mono">{{ h.line | ticker }}</span> <strong class="n">{{ h.weight_pct | pct1 }}</strong></li>{% endfor %}</ul>{% else %}<p class="muted small">No core weight.</p>{% endif %}
+    </div>
+    <div>
+      <h3 class="small">Open paper swing trades</h3>
+      {% if lt.swing_open %}<ul class="paper-list">{% for t in lt.swing_open %}<li><span class="mono">{{ t.ticker | ticker }}</span> {{ side(t.side) }} <strong class="n">{{ "%g" | format(t.size_nav_pct) }}%</strong> <span class="muted small">stop {{ "—" if t.stop_pct is none else ("%g%%" | format(t.stop_pct)) }} · target {{ "—" if t.target_pct is none else ("%g%%" | format(t.target_pct)) }} · until {{ t.time_stop_date | day }} · <a href="{{ root }}decisions/{{ t.decision_no }}/index.html">#{{ t.decision_no }}</a></span></li>{% endfor %}</ul>{% else %}<p class="muted small">None open: idle swing money stays in the core.</p>{% endif %}
+    </div>
+  </div>
+  {% if p.perf %}<p class="small muted">{{ p.perf.note | cap }}.</p>{% endif %}
+  {% endif %}
+  {% if p.last %}
+  <div class="paper-latest">
+    <h3>{{ badge() }} Latest decision <a href="{{ root }}{{ p.href }}">#{{ p.last.decision_no }}</a> — what we chose</h3>
+    <p><strong>{{ p.chosen | cap }}</strong>. {{ p.last.why | cap }}.</p>
+    {% if p.ideas %}
+    <ul class="paper-why">
+      {% for i in p.ideas %}<li><span class="mono">{{ i.ticker | ticker }}</span> {{ side(i.side) }} <span class="chip state-{{ i.out.css }}">{{ "chosen" if i.chosen else "not chosen" }}</span> {{ i.why }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    <p class="small"><a href="{{ root }}{{ p.href }}">The full flow of #{{ p.last.decision_no }}</a> · <a href="{{ root }}decisions/index.html">every decision</a></p>
+  </div>
+  {% endif %}
+</section>
+{% endmacro %}

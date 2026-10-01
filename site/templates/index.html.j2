@@ -1,5 +1,6 @@
 {% extends "base.html.j2" %}
 {% import "macros.html.j2" as m %}
+{% import "paper_macros.html.j2" as pm %}
 {% block title %}Portfolio{% endblock %}
 {# the book's header carries the account state, so the top bar does not repeat it #}
 {% block status_chip %}{% endblock %}
@@ -8,6 +9,8 @@
 {% block main %}
 {% set h = holdings %}
 {% set st = h.strip %}
+
+{% if paper %}{{ pm.panel(paper, "") }}{% endif %}
 
 {# ================================================================== THE BOOK #}
 {% set n_seats = roster | sum(attribute="members", start=[]) | length %}

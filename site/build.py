@@ -60,6 +60,12 @@ from council.publish.labels import (
     MARKET_FIELDS,
     VOL_FIELDS,
 )
+from council.publish.paper import (
+    PaperReveal,
+    PublicPaperCycle,
+    PublicPaperDecisionRow,
+    PublicPaperLatest,
+)
 from council.publish.public_models import (
     PublicAdvocate,
     PublicBook,
@@ -572,6 +578,11 @@ class JournalView:
     copies: dict[str, Path] = field(default_factory=dict)   # site path -> journal source file
     commitments: dict[str, PublicCommitment] = field(default_factory=dict)   # every sealed run, revealed or not
     swing: PublicSwingBook | None = None                     # journal/swing/latest.json (swing-book §7.4)
+    # journal/paper/: the paper runs' public record (numbered decisions, the paper portfolio)
+    paper_rows: list[PublicPaperDecisionRow] = field(default_factory=list)
+    paper_cycles: dict[int, PublicPaperCycle] = field(default_factory=dict)
+    paper_verified: dict[int, bool] = field(default_factory=dict)
+    paper_latest: PublicPaperLatest | None = None
 
     @property
     def has_swing(self) -> bool:
@@ -633,6 +644,7 @@ def load_journal(journal_dir: Path) -> JournalView:
     if swing_file.exists():
         view.swing = PublicSwingBook.model_validate_json(swing_file.read_text())
         view.copies["journal/swing/latest.json"] = swing_file
+    load_paper(journal_dir, view)
     book_file = journal_dir / "book" / "latest.json"
     if book_file.exists():
         view.book = PublicBook.model_validate_json(book_file.read_text())
@@ -647,6 +659,39 @@ def load_journal(journal_dir: Path) -> JournalView:
             key=lambda i: i.incident_id, reverse=True,
         )
     return view
+
+
+def load_paper(journal_dir: Path, view: JournalView) -> None:
+    """journal/paper/: decisions.jsonl (numbered, append-only), each revealed paper cycle (the exact
+    sealed bytes + its salt, verified against the row's commitment) and latest.json."""
+    paper = journal_dir / "paper"
+    if not paper.exists():
+        return
+    view.paper_rows = sorted((PublicPaperDecisionRow.model_validate(r) for r in _jsonl(paper / "decisions.jsonl")),
+                             key=lambda r: r.decision_no)
+    if (paper / "decisions.jsonl").exists():
+        view.copies["journal/paper/decisions.jsonl"] = paper / "decisions.jsonl"
+    for row in view.paper_rows:
+        file = journal_dir.parent / row.path if (journal_dir.parent / row.path).exists() else None
+        if file is None:
+            continue
+        data = file.read_bytes()
+        doc = PublicPaperCycle.model_validate_json(data)
+        if doc.decision_no != row.decision_no or doc.cycle_id != row.cycle_id:
+            raise SiteBuildError(f"paper decision #{row.decision_no} does not match its file")
+        view.paper_cycles[row.decision_no] = doc
+        view.copies[row.path] = file
+        reveal = file.with_name(file.name[: -len(".json")] + ".reveal.json")
+        ok = False
+        if reveal.exists():
+            rv = PaperReveal.model_validate_json(reveal.read_text())
+            ok = rv.commitment_sha256 == row.commitment_sha256 and commit_reveal.verify_bytes(
+                data, rv.salt, row.commitment_sha256)
+            view.copies[row.path[: -len(".json")] + ".reveal.json"] = reveal
+        view.paper_verified[row.decision_no] = ok
+    if (paper / "latest.json").exists():
+        view.paper_latest = PublicPaperLatest.model_validate_json((paper / "latest.json").read_text())
+        view.copies["journal/paper/latest.json"] = paper / "latest.json"
 
 
 def load_manifest(prompts_dir: Path) -> dict[str, list[dict[str, str]]]:
@@ -4497,6 +4542,133 @@ def swing_assets(view: JournalView, now: datetime) -> dict[str, dict[str, Any]]:
 
 
 # ------------------------------------------------------------------------------ rendering
+# ------------------------------------------------------------------------------ paper decisions
+DECISIONS_NAV = {"key": "decisions", "href": "decisions/index.html", "label": "Decisions"}
+PAPER_STAGE = {"scout": "Scout check", "gate": "code gate", "skeptic": "Skeptic", "pm": "manager",
+               "rules": "S-rules", "leg": "paper leg", "unknown": "not recorded"}
+
+
+def outcome_view(o: Any) -> dict[str, str]:
+    """A real / traced outcome in words and a chip colour (never colour alone)."""
+    if o is None:
+        return {"text": "—", "css": "stone"}
+    stage = PAPER_STAGE.get(o.stage, o.stage)
+    if o.stage == "leg":
+        return {"text": "paper leg (would trade)", "css": "executed", "note": o.note}
+    if o.stage == "pm" and o.code == "enter":
+        return {"text": "manager: enter", "css": "proposed", "note": o.note}
+    code = (o.code or "passed").replace("_", " ")
+    return {"text": f"{stage}: {code}", "css": "halted" if o.stage in ("skeptic", "rules") else "stone",
+            "note": o.note}
+
+
+def leg_view(leg: Any) -> dict[str, Any] | None:
+    if leg is None:
+        return None
+    if not leg.ok:
+        return {"ok": False, "text": " ".join(x for x in ((leg.rule or ""), (leg.code or "dropped").replace("_", " ")) if x)}
+    return {"ok": True, "size": "—" if leg.size_nav_pct is None else f"{leg.size_nav_pct:g}%",
+            "stop": "—" if leg.stop_pct is None else f"{leg.stop_pct:g}%",
+            "target": "—" if leg.target_pct is None else f"{leg.target_pct:g}%",
+            "time": fmt_day(leg.time_stop_date) if leg.time_stop_date else (
+                f"{leg.time_stop_days} sessions" if leg.time_stop_days is not None else "—")}
+
+
+def paper_href(no: int) -> str:
+    return f"decisions/{no}/index.html"
+
+
+def chosen_words(chosen: list[Any]) -> str:
+    return ", ".join(f"{c.ticker.replace('_', '.')} {c.side}" + (f" {c.size_nav_pct:g}%" if c.size_nav_pct is not None else "")
+                     for c in chosen) or "no trade"
+
+
+def decision_rows(view: JournalView) -> list[dict[str, Any]]:
+    """The numbered history, newest first: every paper decision (#n) and every live run with a
+    swing part (no number: live runs are listed on the Runs page)."""
+    rows = []
+    for r in view.paper_rows:
+        rows.append({"no": r.decision_no, "slot": r.slot, "badge": "PAPER", "ideas": r.ideas,
+                     "chosen": chosen_words(list(r.chosen)), "why": r.why, "href": paper_href(r.decision_no),
+                     "verified": view.paper_verified.get(r.decision_no, False)})
+    for cv in view.cycles:
+        sec = cv.doc.swing
+        if sec is None or cv.doc.mode != "live":
+            continue
+        chosen = [i for i in sec.ideas if i.stage_reached in ("planned", "approved", "executed")]
+        rows.append({"no": None, "slot": cv.doc.slot, "badge": "LIVE", "ideas": len(sec.ideas),
+                     "chosen": ", ".join(f"{i.ticker.replace('_', '.')} {i.side}" for i in chosen) or "no trade",
+                     "why": f"{len(sec.ideas)} idea(s) reviewed", "href": f"cycles/{cv.doc.cycle_id}.html",
+                     "verified": cv.verified})
+    rows.sort(key=lambda r: r["slot"], reverse=True)
+    return rows
+
+
+def paper_core_view(c: PublicCycleV1, lines: Lines) -> dict[str, Any]:
+    r = c.risk
+    moves = []
+    if r is not None:
+        for k in lines.sort(set(r.final_x) | set(r.base_x)):
+            before, after = r.base_x.get(k, 0.0), r.final_x.get(k, 0.0)
+            moves.append({"line": k, "before": fmt_pct1(before * 100.0), "after": fmt_pct1(after * 100.0),
+                          "moved": abs(after - before) > EPS})
+    pm = c.pm
+    return {"basis": BASIS_WORDS.get(c.basis or "", (c.basis or "—").replace("_", " ")), "moves": moves,
+            "moved": sum(1 for m in moves if m["moved"]), "hold": list(r.hold_reasons) if r else [],
+            "macro": c.macro.regime.replace("_", " ") if c.macro else None,
+            "bull": c.debate.bull.argument if c.debate.bull else "", "bear": c.debate.bear.argument if c.debate.bear else "",
+            "reps": [{"n": x.replicate, "valid": x.valid, "sided": x.sided_with or "—",
+                      "fact": x.decisive_fact.text if x.decisive_fact else "", "why": x.no_change_reason,
+                      "devs": [f"{d.line} {d.direction}: {d.reason}" for d in x.deviations]}
+                     for x in pm.replicates],
+            "valid": pm.valid_replicates, "cards": len(c.cards)}
+
+
+def decision_view(doc: PublicPaperCycle, verified: bool, lines: Lines) -> dict[str, Any]:
+    sw = doc.swing
+    ideas = []
+    for i in (sw.ideas if sw else []):
+        ideas.append({"p": i, "v": swing_idea_view(i.idea), "real": outcome_view(i.real_outcome),
+                      "traced": outcome_view(i.traced_outcome), "leg": leg_view(i.leg),
+                      "tleg": leg_view(i.traced_leg)})
+    chosen = [x for x in ideas if x["p"].chosen]
+    reading = []
+    for r in (sw.inputs.reading if sw else []):
+        it = r.item
+        if it.kind in ("licensed_news", "broker_feed"):
+            label, note = it.id, (f"{it.source} headline (licensed): id and source only" if it.source
+                                  else "broker news item (licensed): id only")
+        elif it.kind == "filing":
+            label, note = " ".join(x for x in (it.form or "filing", ", ".join(it.items)) if x), it.id
+        else:
+            label, note = it.title or it.id, it.id
+        reading.append({"label": label, "note": note, "href": it.link or "", "age": f"{r.age_h:g} h",
+                        "tickers": ", ".join(t.replace("_", ".") for t in r.tickers) or "market-wide",
+                        "licensed": it.kind in ("licensed_news", "broker_feed")})
+    gate = [{"ref": x["p"].idea.ref, "ticker": x["p"].idea.ticker, "side": x["p"].idea.side,
+             "stopped": x["p"].real_outcome.stage in ("scout", "gate"), "out": x["real"]} for x in ideas]
+    return {"doc": doc, "sw": sw, "ideas": ideas, "chosen": chosen, "reading": reading, "gate": gate,
+            "core": paper_core_view(doc.core, lines), "verified": verified,
+            "differ": sum(1 for x in ideas if not x["p"].same)}
+
+
+def paper_home(view: JournalView, lines: Lines) -> dict[str, Any] | None:
+    if view.paper_latest is None and not view.paper_rows:
+        return None
+    latest = view.paper_latest
+    last = view.paper_rows[-1] if view.paper_rows else None
+    doc = view.paper_cycles.get(last.decision_no) if last else None
+    ideas = []
+    for i in (doc.swing.ideas if doc and doc.swing else []):
+        ideas.append({"ticker": i.idea.ticker, "side": i.idea.side, "chosen": i.chosen, "why": i.why,
+                      "out": outcome_view(i.real_outcome)})
+    perf = latest.performance if latest else None
+    return {"latest": latest, "last": last, "ideas": ideas, "href": paper_href(last.decision_no) if last else "",
+            "chosen": chosen_words(list(last.chosen)) if last else "",
+            "perf": {"swing": fmt_signed(perf.swing_return_pct), "legs": perf.swing_closed_legs,
+                     "since": fmt_day(perf.since) if perf.since else "—", "note": perf.note} if perf else None}
+
+
 def make_env(lines: Lines | list[str] | None = None) -> Environment:
     if not isinstance(lines, Lines):
         lines = Lines({"lines": [{"symbol": s} for s in (lines or [])]})
@@ -4652,6 +4824,8 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     nav = list(NAV)
     if view.has_swing:                          # the swing page joins the menu once there is a swing record
         nav.insert(2, SWING_NAV)
+    if view.paper_rows or view.has_swing:       # the numbered decisions page (paper and live)
+        nav.insert(1, DECISIONS_NAV)
     common = {
         "csp": Markup(CSP),               # a constant; single quotes must not be entity-escaped
         "nav": tuple(nav),
@@ -4709,6 +4883,7 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
     roster = build_roster(latest, runs[latest.doc.cycle_id] if latest else None,
                           transcripts[latest.doc.cycle_id] if latest else None, lines)
     render("index.html.j2", "index.html", "", "portfolio", latest=latest, bmap=book_map(holdings, geo),
+           paper=paper_home(view, lines),
            split=book_split(latest),
            roster=roster,
            pending=[dict(x, chip=chip(DECISION_CHIP, x["state"] or "awaiting_publication")) for x in sealed if x["state"] in PENDING_STATES],
@@ -4745,6 +4920,12 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
             render("swing_asset.html.j2", asset_page(k), "../", "swing", s=row)
     if view.has_swing:
         render("swing.html.j2", "swing/index.html", "../", "swing", sp=swing_page_view(view, geo))
+    if view.paper_rows or view.has_swing:
+        render("decisions.html.j2", "decisions/index.html", "../", "decisions", rows=decision_rows(view),
+               paper=paper_home(view, lines))
+        for no, doc in sorted(view.paper_cycles.items()):
+            render("decision.html.j2", paper_href(no), "../../", "decisions",
+                   d=decision_view(doc, view.paper_verified.get(no, False), lines))
     render("how.html.j2", "how.html", "", "how", roster=load_roster(prompts_dir, policy_dir))
     render("rules.html.j2", "rules.html", "", "rules", rules=load_rules(policy_dir))
     render("record.html.j2", "record.html", "", "record", incidents=view.incidents, withdrawn=load_withdrawn())

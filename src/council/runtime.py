@@ -106,6 +106,9 @@ class CycleContext:
     # `council cycle --paper --trace-all` only: every idea with a fact card goes through every swing
     # stage (the real outcome is recorded beside it). Refused off paper (cycle.swing_trace_of).
     swing_trace_all: bool = False
+    # `council cycle --paper --publish` only: the repo dir the paper run's PUBLIC record is written
+    # into (journal/paper/...; never committed or pushed here). Refused off paper (cycle.paper_publish_of).
+    paper_publish_dir: Path | None = None
 
 
 # --------------------------------------------------------------------------------------- lock

@@ -79,6 +79,7 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -431,6 +432,8 @@ async def _run(ctx: CycleContext, info: clock.SlotInfo, now: datetime) -> CycleO
     else:
         published, sha = _seal_and_publish(ctx, rec, pack, reveal_now=decision_id is None,
                                            snapshot=snapshot, smoke_open=bool(smoke))
+    if ctx.publisher is None and getattr(ctx, "paper_publish_dir", None) is not None:
+        _paper_publish(ctx, rec, pack, snapshot)
     state = rec.decision_state
     if redact_failed(rec):
         # no commitment exists: the decision never becomes `proposed` (approve refuses it) and
@@ -2005,6 +2008,44 @@ def swing_trace_of(ctx: CycleContext, *, live: bool = False) -> bool:
     if not paper:
         raise SwingWideRefused("swing_trace_all is for `council cycle --paper` runs only")
     return True
+
+
+PAPER_PUBLISHED_FLAG = "paper_published"
+PAPER_PUBLISH_ERROR = "paper_publish_error"
+
+
+def paper_publish_of(ctx: CycleContext) -> Path | None:
+    """The `--publish` target of a paper run (None when unset). Raises `SwingWideRefused` when it is
+    set on anything but a paper run (the same test as `swing_wide_of`)."""
+    root = getattr(ctx, "paper_publish_dir", None)
+    if root is None:
+        return None
+    paper = (getattr(ctx.settings, "mode", "live") != "live" and ctx.publisher is None
+             and getattr(ctx.sources, "broker", None) is None and ctx.notifier is None
+             and ctx.state_dir.name == PAPER_STATE_DIR)
+    if not paper:
+        raise SwingWideRefused("paper_publish_dir is for `council cycle --paper` runs only")
+    return Path(root)
+
+
+def _paper_publish(ctx: CycleContext, rec: CycleRecord, pack: Any, snapshot: Any) -> None:
+    """`council cycle --paper --publish`: write the paper run's public record (journal/paper/...)
+    through the public pipeline (`council.publish.paper`). A failure is a flag, never a crash, and
+    writes nothing."""
+    try:
+        root = paper_publish_of(ctx)
+        if root is None:
+            return
+        from council.publish.paper import publish_paper
+
+        no, _ = publish_paper(rec, pack, state_dir=ctx.state_dir, root=root, lines=ctx.policy.universe,
+                              install_key=cycle_install_key(ctx, rec), paper_rows=ctx.ledger.paper_trades(),
+                              canaries=publish_canaries(ctx, snapshot), code_commit=ctx.code_commit or "",
+                              now=ctx.clock())
+        rec.flags.append(f"{PAPER_PUBLISHED_FLAG}:{no}")
+    except Exception as exc:  # noqa: BLE001 - the paper record never stops the cycle
+        rec.flags.append(f"{PAPER_PUBLISH_ERROR}:{type(exc).__name__}")
+    ctx.ledger.record_cycle(rec)
 
 
 async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, snapshot: Any, kill_state: str,

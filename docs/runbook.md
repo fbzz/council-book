@@ -211,6 +211,32 @@ The swing pipeline on real data and real models, with no broker token and nothin
    `<state dir>/rss_backoff.json`). A market feed (e.g. PR Newswire) is retried once on a transient
    404 / 5xx; a persistent failure is still `news_source_error:rss:<feed>`.
 
+## 7b. Publishing a paper run (the public decisions record)
+
+A paper run trades nothing and has no approval, so its public record is revealed at once. `--publish`
+writes it into the repo through the same public pipeline as a live cycle (allow-listed fields,
+licensed `N:` items as id + source label only, agent text that overlaps licensed text withheld,
+percent-only, sealed and revealed, leak-scanned before anything is written). It never commits or
+pushes: you do.
+
+```bash
+cd <this checkout>                                  # or pass --publish-dir <repo>
+COUNCIL_MODE=dry_run council cycle --paper --trace-all --publish
+#   (add --at 2026-10-01T18:40Z to replay a missed swing slot)
+git status journal/paper                            # cycles/YYYY/MM/<cycle>.json + .reveal.json,
+                                                    # decisions.jsonl (#1, #2, ...), latest.json
+git add journal/paper && git commit -m "paper decision #N" && git push origin main
+```
+
+- The cycle prints `paper_published:<N>` in its flags; `paper_publish_error:<type>` means nothing was
+  written (the run itself is unaffected) — re-run with `--force` after fixing it. A re-run of the same
+  slot keeps its number and replaces its row in place; numbers are never reused.
+- The site shows it on the home page (paper portfolio + "Latest decision #N"), on `/decisions/`
+  and on `/decisions/<N>/` (the whole flow). The private, licensed-text view stays
+  `council paper report <cycle>` (local only, never commit it).
+- Paper P&L: closed paper swing legs only (size x net return after the declared 1.25% per leg), in %
+  of the paper NAV since the first published decision. The core shows weights only (no paper fills).
+
 ## 7a. Paper swing job (launchd, operator-installed)
 
 `ops/paper-cycle.sh` runs `COUNCIL_MODE=dry_run council cycle --paper` from this checkout at
