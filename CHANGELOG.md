@@ -1,32 +1,37 @@
 # Changelog
 
-## Core news / macro JSON fix, wider movers screen, overnight news first, RSS pacing, paper job — policy change (2026-10-01)
-- **Policy change** (user decision 2026-10-01, "do everything"):
-  - Core `news` / `macro` were `parse_fail` on most real runs: the replies were valid JSON cut off at
-    `max_num_predict` (1200 / 700 tokens), and the decoder then validated an inner card. Budgets
-    `policy/council.yaml` `roles.news` 1200 -> 3000, `roles.macro` 700 -> 2000; prompts
-    `council-news/v2` and `council-macro/v2` (manifest regenerated; golden input digests change for
-    these two system prompts only) gain a HOW TO REPLY block (the JSON object only, keep it short,
-    never a lone card); the gateway always sends both roles' schema as `format` (structured
-    output), reports a cut-off reply as `reply truncated ...` and gives the correction turn 2x the
-    budget with a "fewer, shorter items" ask. Replayed on the 2026-09-30 and 2026-10-01 captured
-    inputs (4 real calls, deepseek-v4.1-flash): all 4 parsed on the first turn.
-  - `news.rss.yahoo_max_tickers` 30 -> 10; per-ticker requests one at a time, one per 1.5 s; a 429
-    stops them for the New York day (`news_source_backoff:rss:<feed>`, flagged once). Market feeds get
-    one retry on a transient 404 / 5xx / transport error (PR Newswire's edge answered 404 on
-    2026-09-30; 25 probes today all 200).
-- Movers screen universe ~604 -> ~1,520 names: + S&P MidCap 400 and S&P SmallCap 600 through the
-  existing Wikipedia membership fetcher (`stocks.universe.SWING_INDEXES`; the stock sleeve keeps its
-  two indexes). Screen budget: 16 requests per screen, `symbols_per_month` 2,500, 40 / h, 80 / day,
-  `MAX_REQUESTS` 24, deadline 300 s; a universe cached before the change is rebuilt.
-- Scout reading list: at the first swing slot of a session, items available since the previous US
-  close (after-hours + pre-market) come first, in the RSS selection and in the final list order.
-- Ollama HTTP 401 / 402 / 403 (e.g. "payment past due"): error `http <code> llm_billing_error`, not
-  retried, flag `llm_billing_error` on the cycle (the council skips the 3 x 120 s outage waits), and
-  one URGENT ntfy per 4 hours when a topic is configured.
-- `ops/paper-cycle.sh` + `ops/launchd/com.fbzz.council-paper.cycle.plist.tmpl` (weekday 14:52 /
-  18:52 UTC; winter 18:52 only): operator-installed (runbook §7a), denied to agents. Runbook: FRED
-  key in `.env` (`COUNCIL_FRED_TOKEN`), ntfy topic for outage alerts.
+## Day-2 confirmation, slot-price paper entries, early economics gate, 5 Skeptic reviews — policy change (2026-10-01)
+- **Policy change** (user decision 2026-10-01, "do everything", after 7 real paper runs: 32 ideas, 0
+  entries; most ideas were same-session news already traded for hours, and the PM passed geometry
+  such as a 5% stop with an 8% target).
+- Day-2 confirmation: a Skeptic `wait` (a heard wait the PM did not enter included) is now kept
+  `pending` in the ledger with the whole Scout idea and its US wait day. At a later slot, once >= 1
+  session has completed since the wait, `cycle.carried_waits` re-proposes it and the council adds it
+  as a code-made idea with the new LIVE setup `day2_confirmation` (`policy/swing.yaml` setups_live;
+  `swing/policy.Setup`); the Scout may not pick it (`setup_not_allowed`) and is shown the carried
+  waits. Only still-admitted catalyst ids are kept (none -> flag `day2_catalyst_gone`); a Scout idea
+  on the same ticker supersedes it unless same side with no new catalyst (flag `day2_superseded`).
+  Gate: >= 1 completed session since the news and a completed-close move in the trade's direction,
+  else `day2_unconfirmed` (stays parked for the next session). The existing re-proposal limit (<= 2
+  within 3 sessions, then `expired`) applies; at most one re-proposal per completed close. The
+  Skeptic's input gets a code-written CONFIRMATION CHECK line (still blind: no thesis, setup or levels).
+- Prompts (manifest regenerated for these roles only): `council-scout/v3` (day2 is code-only; the
+  economics line: target >= min_net_rr x (stop + declared round trip) + round trip, i.e. 9.1% for
+  a 3% stop and 11.5% for a 5% stop, and the 1.5 x sigma x sqrt(days) ceiling), `council-skeptic/v4`
+  (pass case: hard/new catalyst, completed close in the trade's direction by ~0.5 up to
+  `prior_wait_sigma`, not chased; one or two sessions of age do not make a hard catalyst stale),
+  `council-swing_pm/v2` (a day-2 confirmation move is the setup, not by itself "already moved").
+- Economics early: `rules.gate_net_rr` at the council's code gate, before the Skeptic: the Scout's
+  levels (stop widened to 1 ATR as S5 would) must give net reward/risk >= `targets.min_net_rr` at
+  the DECLARED cost (1.25% a leg, `public_record`), else `S6:net_rr_below_min` and no call is spent.
+  The S-rules final pass is unchanged.
+- Paper reference: paper entries use the fact card's private `slot_price` (the delayed 15-minute
+  Alpaca SIP bar at or before the slot via `alpaca.fetch_delayed_last` on a paper run); the last
+  close stays only as the fallback with flag `paper_reference_last_close`.
+- `policy/swing.yaml` llm: `max_skeptic_calls` 3 -> 5, `max_calls_per_slot` 9 -> 12, `deadline_s`
+  360 -> 450; `invariants.SWING_MAX_LLM_CALLS_PER_SLOT` 9 -> 12 (1 Scout + 5 Skeptic + bull + bear +
+  3 PM + 1 spare). The paper-only wide mode is unchanged.
+- NOT changed: position size and capital (`size.*`, the funded account) — the user's decision is pending.
 
 ## Skeptic relaxed: prompt v3, no `mostly` override, heard waits, chase 4 sigma — policy change (2026-10-01)
 - **Policy change** (user decision 2026-10-01, "lets relax a little bit more"): across 6 real paper

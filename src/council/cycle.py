@@ -73,11 +73,12 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import math
 import time
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -1821,13 +1822,18 @@ def _swing_drop_code(result: Any, ref: str, *, accepted: bool, rule_code: str | 
 
 
 def _swing_ledger_idea(ledger: Any, cycle_id: str, idea: Any, status: str, now: datetime, *,
-                       drop_code: str | None = None) -> str:
+                       drop_code: str | None = None, wait_day: str | None = None) -> str:
     """The ledger id of one Scout idea: a pending idea on the same ticker and side is carried
     forward (its record rewritten, `carry_cycle` = this cycle), else a new id. `drop_code`: the
-    seal-time drop code (codes only, never a number or text)."""
-    rec = {"ref": idea.ref, "setup": idea.idea.setup, "stop_pct": idea.idea.stop_pct,
-           "target_pct": idea.idea.target_pct, "time_stop_days": idea.idea.time_stop_days,
-           "drop_code": drop_code}
+    seal-time drop code (codes only, never a number or text). `wait_day` (a parked Skeptic wait,
+    status `pending`): the US date of this slot, plus the whole Scout idea, so a later slot can
+    re-propose it as `day2_confirmation` (`carried_waits`; the record is private and purged)."""
+    rec: dict[str, Any] = {"ref": idea.ref, "setup": idea.idea.setup, "stop_pct": idea.idea.stop_pct,
+                           "target_pct": idea.idea.target_pct, "time_stop_days": idea.idea.time_stop_days,
+                           "drop_code": drop_code}
+    if wait_day is not None:
+        rec["wait_day"] = wait_day
+        rec["idea"] = idea.idea.model_dump(mode="json")
     for row in ledger.swing_ideas(status="pending"):
         if row["ticker"] == idea.ticker and row["side"] == idea.idea.side:
             ledger.update_swing_idea(row["idea_id"], status=status, record=rec, carry_cycle=cycle_id, now=now)
@@ -1842,6 +1848,57 @@ def _swing_ledger_idea(ledger: Any, cycle_id: str, idea: Any, status: str, now: 
 
 
 REPROPOSAL_SESSIONS = 3          # §4.3: at most `entry_guard.max_reproposals` re-proposals within 3 sessions
+DAY2_PARK_CODES = frozenset({"day2_unconfirmed"})   # a carried wait the gate found unconfirmed stays parked
+
+
+def parks_as_wait(result: Any, ref: str, idea: Any) -> bool:
+    """True when this slot leaves the idea a parked Skeptic `wait` (ledger status `pending`, a
+    day-2 confirmation candidate): its verdict is a wait (a heard wait the PM did not enter
+    included), or it is a carried wait whose card did not confirm yet (`day2_unconfirmed`)."""
+    outcome = next((o for o in getattr(result, "outcomes", []) if o.ref == ref), None)
+    if getattr(idea, "day2", False) and outcome is not None and outcome.code in DAY2_PARK_CODES:
+        return True
+    v = getattr(idea, "verdict", None)
+    return v is not None and v.status == "wait" and idea not in getattr(result, "paper_only", [])
+
+
+def carried_waits(ledger: Any, policy: Any, slot: datetime, now: datetime) -> list[Any]:
+    """The pending Skeptic waits to re-propose this slot as `day2_confirmation` (user decision
+    2026-10-01): parked at an earlier US date (so >= 1 session completed since), within the §4.3
+    re-proposal limits (at most `entry_guard.max_reproposals` carries within REPROPOSAL_SESSIONS
+    sessions; over the limit -> `expired`). A pending row without a parked wait (a missed entry) is
+    not carried here. Never raises (an unreadable row is skipped)."""
+    from council.clock import NEW_YORK
+    from council.swing.council import DAY2_SETUP, CarriedWait
+    from council.swing.models import ScoutIdea
+
+    if DAY2_SETUP not in policy.swing.setups_live:
+        return []
+    today = slot.astimezone(NEW_YORK).date()
+    limit = int(policy.swing.entry_guard.max_reproposals)
+    out: list[Any] = []
+    try:
+        rows = ledger.swing_ideas(status="pending")
+    except Exception:  # noqa: BLE001 - no ledger read: nothing carried
+        return []
+    for row in rows:
+        rec = row.get("record") or {}
+        raw, day = rec.get("idea"), rec.get("wait_day")
+        if not isinstance(raw, Mapping) or not isinstance(day, str):
+            continue
+        try:
+            parked = date.fromisoformat(day)
+            idea = ScoutIdea.model_validate({**raw, "setup": DAY2_SETUP})
+        except (ValueError, TypeError):
+            continue
+        if today <= parked:
+            continue                                   # no session completed since the wait
+        carried = [c for c in row.get("carry_cycles") or [] if c != row.get("origin_cycle")]
+        if len(carried) >= limit or _idea_sessions(row, now) > REPROPOSAL_SESSIONS:
+            ledger.update_swing_idea(row["idea_id"], status="expired", now=now)
+            continue
+        out.append(CarriedWait(idea_id=str(row["idea_id"]), idea=idea, wait_day=day))
+    return out
 
 
 def _idea_sessions(row: Mapping[str, Any], now: datetime) -> int:
@@ -1928,6 +1985,11 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
         out.flags.append(f"swing_wide:{wide}")
     views = _open_trade_views(ledger, snapshot, slot, out.exits)
     inputs = src.inputs(slot, views, list(out.exits))
+    carried = carried_waits(ledger, policy, slot, now)     # day-2 confirmation (user decision 2026-10-01)
+    if carried:
+        from dataclasses import replace as _replace_carried
+
+        inputs = _replace_carried(inputs, carried=carried)
     if events:                                   # the cycle's scheduled macro events (CPI / NFP / PCE, FOMC)
         from dataclasses import replace as _replace
 
@@ -1978,9 +2040,11 @@ async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, 
             v = None                                    # §4.3: over the re-proposal limit -> expired
             out.flags.append(REPROPOSAL_FLAG)
             rule_codes[ref] = REPROPOSAL_CODE
-        status = "accepted" if v is not None else "dropped"
+        status = "accepted" if v is not None else ("pending" if parks_as_wait(result, ref, idea) else "dropped")
         drop = _swing_drop_code(result, ref, accepted=v is not None, rule_code=rule_codes.get(ref), live=out.live)
-        idea_id = _swing_ledger_idea(ledger, cycle_id, idea, status, now, drop_code=drop)
+        idea_id = _swing_ledger_idea(ledger, cycle_id, idea, status, now, drop_code=drop,
+                                     wait_day=slot.astimezone(clock.NEW_YORK).date().isoformat()
+                                     if status == "pending" else None)
         idea_ids[ref] = idea_id
         verdict = idea.verdict.verdict if idea.verdict is not None else None
         if v is not None:
@@ -2107,6 +2171,18 @@ def _paper_group(result: Any, ref: str, idea: Any, accepted: bool, live: bool) -
     return "code_dropped"
 
 
+def paper_slot_price(idea: Any) -> float | None:
+    """The paper entry reference at the slot: the fact card's private slot price (the delayed
+    15-minute SIP bar at or just before the slot on a paper run, `alpaca.fetch_delayed_last`; the
+    broker rate when one fed the card). None without a card or a valid price (the caller then falls
+    back to the last close, flag `paper_reference_last_close`)."""
+    card = getattr(idea, "card", None)
+    price = getattr(card, "slot_price", None) if card is not None else None
+    if isinstance(price, bool) or not isinstance(price, int | float) or not math.isfinite(price) or price <= 0:
+        return None
+    return float(price)
+
+
 def _paper_track(ctx: CycleContext, out: SwingRun, result: Any, ref: str, idea: Any, idea_id: str, v: Any, *,
                  slot: datetime, now: datetime, cycle_id: str, skeptic: str | None,
                  drop_code: str | None = None) -> None:
@@ -2117,7 +2193,9 @@ def _paper_track(ctx: CycleContext, out: SwingRun, result: Any, ref: str, idea: 
     from council.swing.rules import add_sessions
 
     src = getattr(ctx.sources, "swing", None)
-    price = src.reference_price(idea.ticker) if src is not None and src.reference_price else None
+    price = paper_slot_price(idea)       # the price at the slot (user decision 2026-10-01) ...
+    if price is None:                    # ... else the last completed close (flag paper_reference_last_close)
+        price = src.reference_price(idea.ticker) if src is not None and src.reference_price else None
     if not isinstance(price, int | float) or not price > 0:
         out.flags.append("paper_no_reference")
         return

@@ -128,6 +128,7 @@ class SwingIdea:
     canary: bool = False
     card: FactCard | None = None
     verdict: VerdictOutcome | None = None
+    day2: bool = False          # a carried Skeptic `wait` re-proposed by code (setup day2_confirmation)
 
     @property
     def ticker(self) -> str:

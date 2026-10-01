@@ -62,11 +62,12 @@ def test_repository_swing_policy_loads_with_the_users_decisions():
     assert swing.llm.skeptic_model == "deepseek-v4.1-flash:cloud"
     assert swing.llm.skeptic_model_family == "same"
     assert swing.llm.skeptic_model == policy.council["model"]  # user 2026-09-29: the Scout's model
-    assert swing.llm.max_calls_per_slot == 9
+    assert swing.llm.max_calls_per_slot == 12                # user 2026-10-01: 5 Skeptic reviews
+    assert swing.llm.max_skeptic_calls == 5 and swing.llm.deadline_s == 450
     assert swing.public_record.declared_cost_pct_per_leg == 1.25
     assert swing.tracking.paper_track_every_idea is True
     assert swing.tracking.paper_run_before_live is False
-    assert swing.setups_live == ["news_continuation", "post_earnings_drift", "second_order"]
+    assert swing.setups_live == ["news_continuation", "post_earnings_drift", "second_order", "day2_confirmation"]
 
 
 def test_swing_file_is_part_of_the_policy_hash(tmp_path):
@@ -121,7 +122,7 @@ def test_code_ceilings_match_the_design():
     (("stops", "max_short_pct"), 0.10),
     (("targets", "min_net_rr"), 1.0),
     (("entry_guard", "valid_minutes"), 90),
-    (("llm", "max_calls_per_slot"), 10),
+    (("llm", "max_calls_per_slot"), 13),
     (("public_record", "declared_cost_pct_per_leg"), 1.0),
     (("brake", "pnl_nav"), -0.5),
     (("brake", "window_days"), 5),
@@ -203,7 +204,7 @@ def test_shorts_disabled_in_code_refuse_a_short_capacity(monkeypatch):
     (("slots", "winter_utc"), ["18:40", "14:40"]),   # unsorted
     (("slots", "winter_utc"), ["25:40"]),
     (("llm", "pm_entry_votes"), 1),                  # not a majority of 3
-    (("llm", "max_skeptic_calls"), 5),               # 3 + 5 + 3 > 9
+    (("llm", "max_skeptic_calls"), 7),               # 3 + 7 + 3 > 12
     (("llm", "skeptic_model"), "GLM 5.3"),
     (("budget", "idle"), "bonds"),
     (("public_record", "percent_only"), False),

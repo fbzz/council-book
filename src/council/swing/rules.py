@@ -18,7 +18,7 @@ Reason codes (public; the numbers behind them are not):
 | S3 weekly cap | `weekly_cap` |
 | S4 open risk | `open_risk` |
 | S5 stops | `stop_missing`, `stop_out_of_range`, `stop_inside_atr` (a stop inside 1 ATR is widened when the wider stop still passes S1/S6), `atr_unknown` (no ATR: the 1-ATR check cannot run, so the entry drops; fail closed) |
-| S6 targets | `target_missing`, `vol_unknown`, `vol_too_high`, `target_too_small`, `target_beyond_vol`, `cost_unavailable` |
+| S6 targets | `target_missing`, `vol_unknown`, `vol_too_high`, `target_too_small`, `target_beyond_vol`, `cost_unavailable`; at the council's code gate, before the Skeptic: `net_rr_below_min` (`gate_net_rr`: the Scout's levels net of the DECLARED cost) |
 | S7 time stop | `time_stop_out_of_range` |
 | S8 liquidity | `illiquid`, `price_too_low` |
 | S9 earnings | `earnings_window`, `earnings_window_estimated`, `post_earnings_wait` |
@@ -61,7 +61,7 @@ RULE_OF: dict[str, str] = {
     "stop_missing": "S5", "stop_out_of_range": "S5", "stop_inside_atr": "S5",
     "atr_unknown": "S5",
     "target_missing": "S6", "vol_unknown": "S6", "vol_too_high": "S6", "target_too_small": "S6",
-    "target_beyond_vol": "S6", "cost_unavailable": "S6",
+    "target_beyond_vol": "S6", "cost_unavailable": "S6", "net_rr_below_min": "S6",
     "time_stop_out_of_range": "S7",
     "illiquid": "S8", "price_too_low": "S8",
     "earnings_window": "S9", "earnings_window_estimated": "S9", "post_earnings_wait": "S9",
@@ -167,6 +167,37 @@ def limits(sp: SwingPolicy) -> Limits:
         ts_min=sp.time_stop.min_sessions,
         ts_max=min(sp.time_stop.max_sessions, inv.SWING_MAX_TOTAL_SESSIONS),
     )
+
+
+# ------------------------------------------------------------------------- early economics gate
+def declared_rt_pct(sp: SwingPolicy) -> float:
+    """The declared round trip in percent of the position (two legs of `public_record`, never below
+    the code floor per leg): the cost the early gate and the Scout's prompt use."""
+    leg = max(sp.public_record.declared_cost_pct_per_leg, inv.SWING_MIN_DECLARED_COST_PCT_PER_LEG)
+    return swing_costs.declared_rt_pct(leg)
+
+
+def min_target_for(stop_pct: float, sp: SwingPolicy) -> float:
+    """The smallest target (fraction) whose net reward/risk at the declared cost meets
+    `targets.min_net_rr`: target >= min_net_rr x (stop + rt) + rt."""
+    rt = declared_rt_pct(sp) / 100.0
+    return limits(sp).min_net_rr * (float(stop_pct) + rt) + rt
+
+
+def gate_net_rr(stop_pct: float | None, target_pct: float | None, *, atr_pct: float | None,
+                sp: SwingPolicy) -> str | None:
+    """The council's code gate (user decision 2026-10-01), BEFORE the Skeptic so uneconomic
+    geometry spends no call: the Scout's levels (fractions), the stop first widened to the 1-ATR
+    floor exactly as S5 would (`atr_pct` a fraction; unknown -> the stop as given), must give
+    (target - rt) / (stop + rt) >= `targets.min_net_rr` with rt = the DECLARED round trip
+    (`public_record`, 1.25% a leg). `net_rr_below_min` or None. The S-rules final pass still runs
+    S6 on the PM's levels with the measured cost."""
+    if stop_pct is None or target_pct is None:
+        return None                      # S5/S6 drop these later with their own codes
+    stop = float(stop_pct)
+    if atr_pct is not None and math.isfinite(atr_pct) and atr_pct > 0:
+        stop = max(stop, limits(sp).atr_mult * float(atr_pct))
+    return None if float(target_pct) >= min_target_for(stop, sp) - EPS else "net_rr_below_min"
 
 
 # ------------------------------------------------------------------------------------ inputs

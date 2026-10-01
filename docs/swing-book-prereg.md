@@ -38,6 +38,15 @@ happened next. It is judged only on trades opened after go-live.
   stale or restated + pass still does); a supported `wait` (priced_in no or partly) is still heard
   by the bull / bear debate and the PM (group `skeptic_wait_debated`), and the PM's 2-of-3 vote and
   every S-rule still apply. The S11 hard chase drop is 4 sigma (was 3); the prior-wait sigma stays 2.
+- Day-2 confirmation, early economics, 5 reviews (user decision 2026-10-01, after 7 paper runs, 32
+  ideas, 0 entries): a Skeptic `wait` stays pending and code re-proposes it as the live setup
+  `day2_confirmation` at the next slot after >= 1 completed session, within the re-proposal limit
+  (<= 2 within 3 sessions); the gate requires a completed-close move since the news in the trade's
+  direction, and the Skeptic (`council-skeptic/v4`) treats a hard catalyst confirmed by about 0.5 up
+  to 2 sigma, not chased, as a pass. Levels whose net reward/risk at the declared 1.25% a leg is
+  below 1.2 are dropped at the code gate before any Skeptic call (`S6:net_rr_below_min`); the Scout
+  (`council-scout/v3`) is told the implied minimum target. The Skeptic reviews up to 5 ideas a slot
+  (12 calls, 450 s). Position size and capital are unchanged (the user's decision is pending).
 - The SQ-8 mechanical stock rule is a public PAPER benchmark only; it never trades.
 
 ## 3. Primary metric
@@ -51,7 +60,8 @@ are kept private.
 
 Every idea — executed, manager-passed, Skeptic-rejected, Skeptic-wait, Skeptic-wait-debated, code-dropped (eligible names
 only), paper-only setups, missed entries — is tracked the same way: entry at the slot-time reference
-price (Alpaca SIP minute close at the decision's seal time), exits on completed daily bars at the
+price (the fact card's slot price: the delayed 15-minute Alpaca SIP bar at or just before the
+slot on a paper run; the last completed close only as a flagged fallback, `paper_reference_last_close`), exits on completed daily bars at the
 idea's stop, target or time stop; a bar touching both books the stop; a gap through the stop books at
 that session's open; the declared cost on both legs. Real fills are measured separately as slippage.
 

@@ -1,16 +1,17 @@
 """The swing council of one US swing slot (design swing-book.md rev 2, §1 steps ②-⑥, §1.5, §5; SW-3).
 
-    Scout (1) -> accept_ideas (H3/H4/H10, paper-only setups leave here: no call) -> code gate
-    (resolve + fact card, injected; chase > hard sigma dropped; best <= max_skeptic_calls) ->
+    Scout (1) -> accept_ideas (H3/H4/H10, paper-only setups leave here: no call) + carried waits
+    (day2_confirmation, code-made) -> code gate (resolve + fact card, injected; chase > hard sigma
+    dropped; day-2 confirmation; net reward/risk at the declared cost; best <= max_skeptic_calls) ->
     Skeptic (1 per idea, BLIND, its own model family) -> accept_verdict (§1.5 rules) ->
     bull (1) -> bear (1) -> PM (replicates, 2 of 3) -> aggregate.
 
-- BUDGET: at most `llm.max_calls_per_slot` (9) first attempts per slot, separate from the core's
+- BUDGET: at most `llm.max_calls_per_slot` (12) first attempts per slot, separate from the core's
   budget. Over budget, the drop order is: Skeptic calls beyond the first 2 ideas (those ideas are
   dropped, never sent on without a verdict) -> PM replicates 3 -> 1 -> skip the debate. 0 calls
   after the Scout when nothing survives and no open trade is under review.
 - DEADLINE: `run_swing_stage` bounds the whole stage with `asyncio.wait_for` (`llm.deadline_s`,
-  360 s). On expiry -> flag `swing_error:timeout`, no new entries, holds unchanged; code-made exits
+  450 s). On expiry -> flag `swing_error:timeout`, no new entries, holds unchanged; code-made exits
   (time stops, earnings), computed before any LLM stage, stay in the result.
 - NEVER RAISES (from `run_swing_stage`): a failure becomes `swing_error:<stage>:<type>` and the core
   cycle continues untouched. `CanaryLeak` (H11) is the one exception: it is a code bug and raises.
@@ -22,6 +23,17 @@
   the call budget to 1 + 2N + 2 + PM replicates (N Skeptic calls, N fallback retries, the debate,
   the PM) and the deadline to 360 + 45N s (`swing_limits`). The policy and the live invariants
   are untouched; the cycle refuses a wide override on any context that is not a paper run.
+- DAY-2 CONFIRMATION (user decision 2026-10-01): `SwingInputs.carried` holds the pending Skeptic
+  `wait` ideas the cycle re-proposes (`cycle.carried_waits`: >= 1 session completed since the wait,
+  within the re-proposal limits). Code rebuilds each as a `day2_confirmation` idea on its own still
+  admitted catalyst ids (H10 does not apply: the completed close since the news is the new fact); a
+  Scout idea on the same ticker supersedes it unless it is the same side with no new catalyst. At
+  the gate the card must show >= 1 completed session since the news and a completed-close move in
+  the trade's direction (else `day2_unconfirmed`). The Skeptic is told, by code, that this is a
+  confirmation check (no thesis, no setup name, no levels).
+- ECONOMICS EARLY (user decision 2026-10-01): `rules.gate_net_rr` drops uneconomic Scout levels at
+  the gate (`net_rr_below_min`: net reward/risk at the declared 1.25% a leg below
+  `targets.min_net_rr`), before any Skeptic call.
 - BLIND SKEPTIC: `skeptic_input` builds its text only from the ticker, the side, the cited
   catalyst items with the code-attached form/items/titles, the one-line factual claim, the fact card,
   the market context and the open book. The thesis, why_not_priced_in, the setup and the Scout's
@@ -48,6 +60,7 @@ from council.llm.gateway import Gateway, LLMResult
 from council.llm.prompts import PromptRegistry
 from council.models.cycle import RoleCall
 from council.policy import Policy
+from council.stocks.universe import try_normalise_id
 from council.swing.aggregate import SwingAggregate, aggregate_actions
 from council.swing.canary import PastEvent, build_canary, grade_canary
 from council.swing.facts import FactCard
@@ -75,6 +88,7 @@ from council.swing.roles import (
     directional_sigma,
     guard_no_canary,
 )
+from council.swing.rules import declared_rt_pct, gate_net_rr, min_target_for
 
 if TYPE_CHECKING:
     from council.deliberation.capture import InputSink
@@ -82,6 +96,7 @@ if TYPE_CHECKING:
 SWING_ROLES = ("scout", "skeptic", "swing_bull", "swing_bear", "swing_pm")
 NUM_PREDICT = {"scout": 2400, "skeptic": 3000, "swing_bull": 1600, "swing_bear": 1800, "swing_pm": 1400}
 SEEDS = {"scout": 42, "skeptic": 42, "swing_bull": 42, "swing_bear": 43}
+DAY2_SETUP = "day2_confirmation"    # code-made only: the Scout may not pitch it
 SKEPTIC_FIRST_IDEAS = 2            # the drop order keeps the Skeptic for the first 2 ideas
 MAX_SCOUT_IDEAS = 5
 WIDE_MAX_IDEAS = 20                 # `council cycle --paper --ideas N`: 1 <= N <= 20 (paper only)
@@ -133,6 +148,17 @@ class GateResult:
 Gate = Callable[[list[SwingIdea]], Awaitable[Mapping[str, GateResult]]]
 
 
+@dataclass(frozen=True)
+class CarriedWait:
+    """A pending Skeptic `wait` idea the cycle re-proposes this slot (day-2 confirmation). `idea` is
+    the parked Scout idea with its setup set to `day2_confirmation`; `wait_day` the US date of the
+    slot that parked it."""
+
+    idea_id: str
+    idea: ScoutIdea
+    wait_day: str
+
+
 @dataclass
 class SwingInputs:
     slot: datetime
@@ -147,6 +173,7 @@ class SwingInputs:
     code_exits: Sequence[str] = ()                       # trade refs exited by code (no LLM)
     max_entries: int | None = None                       # room S1-S4 leave
     screened: frozenset[str] | None = None               # the movers-screen universe (line ids); None = unknown
+    carried: Sequence[CarriedWait] = ()                  # day-2 confirmation re-proposals (code-made)
 
 
 # ---------------------------------------------------------------------------------- results
@@ -252,7 +279,8 @@ def scout_schema(limits: SwingLimits) -> type[ScoutOutput]:
 
 
 def swing_prompt_context(policy: Policy, limits: SwingLimits | None = None) -> dict[str, Any]:
-    """Numbers the swing prompts EXPLAIN (code enforces each independently). No fee number (D17)."""
+    """Numbers the swing prompts EXPLAIN (code enforces each independently). No measured fee
+    number (D17): the cost shown is the public DECLARED round trip (`public_record`)."""
     sw = _swing(policy)
     limits = limits or swing_limits(policy)
     return {
@@ -274,6 +302,11 @@ def swing_prompt_context(policy: Policy, limits: SwingLimits | None = None) -> d
         "time_max": sw.time_stop.max_sessions,
         "pm_replicates": sw.llm.pm_replicates,
         "pm_entry_votes": sw.llm.pm_entry_votes,
+        # the DECLARED (public) cost, not the measured fee: the minimum target the early gate demands
+        "declared_rt_pct": f"{declared_rt_pct(sw):g}",
+        "min_target_stop3": f"{min_target_for(0.03, sw) * 100:.1f}",
+        "min_target_stop5": f"{min_target_for(0.05, sw) * 100:.1f}",
+        "max_vol_mult": f"{sw.targets.max_vol_mult:g}",
     }
 
 
@@ -414,14 +447,19 @@ def _book_rows(trades: Sequence[OpenTrade]) -> list[tuple[str, str]]:
 
 def skeptic_input(idea: SwingIdea, *, catalysts: Mapping[str, CatalystMeta], inputs: SwingInputs) -> tuple[list[Segmented], set[str]]:
     """The Skeptic's user message and its admissible ids. BLIND by construction: only these
-    attributes of the idea are read: ref, ticker, side, catalyst_ids, catalyst_claim, card."""
+    attributes of the idea are read: ref, ticker, side, catalyst_ids, catalyst_claim, card, and the
+    code flag `day2` (a code-written confirmation line; never the thesis, the setup or the levels)."""
     ref, ticker, side = idea.ref, idea.idea.ticker, idea.idea.side
     cat_ids, claim, card = list(idea.idea.catalyst_ids), idea.idea.catalyst_claim, idea.card
     cats = catalyst_rows(cat_ids, catalysts, card, inputs.slot)
     facts = card_rows(card)
     ctx = [(c.id, c.text) for c in inputs.context]
+    day2 = (f"CONFIRMATION CHECK (written by code): this ticker and side were parked as \"wait\" at an "
+            f"earlier slot on this same news. At least one session has completed since the news; the "
+            f"completed close since the news (X:{idea.line_id}:move_since_news_close_sigma, "
+            f"X:{idea.line_id}:news_age_sessions) is the confirmation to judge.\n\n") if idea.day2 else ""
     text = (
-        f"IDEA TO REVIEW: {ref}\nticker: {ticker}\nside: {side}\n\n"
+        f"IDEA TO REVIEW: {ref}\nticker: {ticker}\nside: {side}\n\n" + day2
         + _block("CATALYST ITEMS (metadata attached by code)", cats)
         + f"\nCLAIM (one factual line from the proposer; check it against the items):\n{claim}\n\n"
         + _block(f"FACT CARD (X:{idea.line_id}:<field>; percentages)", facts)
@@ -457,12 +495,17 @@ def scout_input(inputs: SwingInputs, catalysts: Mapping[str, CatalystMeta]) -> t
                f"volume x{_num(r.get('vol_ratio'))}, sector {r.get('sector') or 'n/a'}")
               for r in inputs.screen_rows if str(r["id"]) in catalysts]
     ctx = [(c.id, c.text) for c in inputs.context]
+    carried = [(c.idea.ticker, f"{c.idea.side}, parked as wait on {c.wait_day}")
+               for c in inputs.carried]
     text = (
         _block("READING LIST (newest first)", reading)
         + "\n" + _block("MOVERS SCREEN (completed bars; facts, not picks)", screen)
         + "\n" + _block("MARKET CONTEXT", ctx)
         + "\n" + _block("OPEN SWING TRADES", _book_rows(inputs.open_trades))
         + "\nIDEAS OF THE LAST 5 SESSIONS\n" + ("\n".join(f"- {x}" for x in inputs.recent_ideas) or "- none")
+        + ("\n\n" + _block("CARRIED WAITS (code re-proposes these this slot as day2_confirmation; do not "
+                             "pitch them again unless a newer catalyst exists)", carried).rstrip("\n")
+           if carried else "")
         + f"\n\nCORE BOOK\n{inputs.core_summary or 'n/a'}\n"
     )
     admissible = {r[0] for r in reading} | {s[0] for s in screen} | {c[0] for c in ctx}
@@ -575,8 +618,10 @@ async def run_swing_council(
     scout = res.parsed if isinstance(res.parsed, ScoutOutput) else None
     if scout is None:
         result.flags.append(f"scout_failed:{res.call.status}")
-    check = accept_ideas(scout, catalysts=catalysts, setups_live=sw.setups_live,
+    check = accept_ideas(scout, catalysts=catalysts, setups_live=[x for x in sw.setups_live if x != DAY2_SETUP],
                          setups_paper_only=sw.setups_paper_only, recent_rejections=inputs.recent_rejections)
+    add_carried(check, inputs.carried, catalysts, result,
+                start=len(scout.ideas) + 1 if scout is not None else 1, live=DAY2_SETUP in sw.setups_live)
     for d in check.drops:
         result.outcomes.append(IdeaOutcome(d.ref, d.ticker, "", "", "scout", d.code))
     for i in check.paper_only:
@@ -601,7 +646,17 @@ async def run_swing_council(
         if sig is not None and sig > sw.chase.max_move_since_news_sigma:
             _outcome(result, i, "gate", "chased")
             continue
+        if i.day2 and not day2_confirmed(i.card, i.idea.side):
+            _outcome(result, i, "gate", "day2_unconfirmed")
+            continue
+        atr = i.card.fields.get("atr14_pct")
+        econ = gate_net_rr(i.idea.stop_pct, i.idea.target_pct, sp=sw,
+                           atr_pct=float(atr) / 100.0 if isinstance(atr, int | float) and not isinstance(atr, bool) else None)
+        if econ is not None:
+            _outcome(result, i, "gate", econ)
+            continue
         survivors.append(i)
+    survivors.sort(key=lambda i: not i.day2)      # a confirmed carried wait first (stable otherwise)
     for i in survivors[lim.max_skeptic:]:
         _outcome(result, i, "gate", "not_best_3")
     survivors = survivors[:lim.max_skeptic]
@@ -701,6 +756,52 @@ async def run_swing_council(
 
 
 WAIT_DEBATED = "skeptic_wait_debated"
+
+
+def add_carried(check: Any, carried: Sequence[CarriedWait], catalysts: Mapping[str, CatalystMeta],
+                result: SwingCouncilResult, *, start: int, live: bool) -> None:
+    """Append the carried waits to the accepted ideas as code-made `day2_confirmation` ideas
+    (refs idea:<start>.. after the Scout's). Each keeps only its still-admitted catalyst ids (none ->
+    flag `day2_catalyst_gone`, not re-proposed); a Scout idea on the same ticker supersedes it unless
+    it is the same side citing no new catalyst (then the Scout's copy is dropped `duplicate_idea`).
+    `live` False (the setup is not in `setups_live`) -> nothing is added."""
+    if not live:
+        return
+    k = start
+    for c in carried:
+        line = try_normalise_id(c.idea.ticker)
+        if line is None:
+            continue
+        twin = next((i for i in [*check.accepted, *check.paper_only] if i.line_id == line), None)
+        if twin is not None:
+            if twin.idea.side != c.idea.side or set(twin.idea.catalyst_ids) - set(c.idea.catalyst_ids):
+                result.flags.append("day2_superseded")
+                continue
+            for bucket in (check.accepted, check.paper_only):
+                if twin in bucket:
+                    bucket.remove(twin)
+            check.drops.append(Drop(twin.ref, twin.ticker, "duplicate_idea"))
+        ids = [cid for cid in c.idea.catalyst_ids if cid in catalysts]
+        if not ids:
+            result.flags.append("day2_catalyst_gone")
+            continue
+        idea = c.idea.model_copy(update={"setup": DAY2_SETUP, "catalyst_ids": ids})
+        check.accepted.append(SwingIdea(ref=f"idea:{k}", idea=idea, line_id=line, day2=True))
+        k += 1
+
+
+def day2_confirmed(card: FactCard | None, side: str) -> bool:
+    """The day-2 code check: >= 1 completed session since the news and a completed-close move since
+    the news in the trade's direction (the Skeptic judges the size: ~0.5 sigma up to the prior)."""
+    if card is None:
+        return False
+    age = card.fields.get("news_age_sessions")
+    raw = card.fields.get("move_since_news_close_sigma")
+    if isinstance(age, bool) or not isinstance(age, int) or age < 1:
+        return False
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return False
+    return (float(raw) if side == "long" else -float(raw)) > 0
 
 
 def wait_gets_hearing(out: VerdictOutcome) -> bool:

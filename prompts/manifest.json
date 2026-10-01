@@ -20,28 +20,28 @@
     "sha256": "4ff0bba5a21569b3fe3b75b04a29b546d0064f4b7b74bd37341b2c4bd3e16ea1"
   },
   "macro": {
-    "id": "council-macro/v2",
-    "sha256": "d6288b179b4d2234a11e8115201fff56fb21f9b65a414639c9bed43908bf671c"
+    "id": "council-macro/v1",
+    "sha256": "a14f388dfd953b90adada9afb2083972823c0af77822f381c45e907f4ae99810"
   },
   "news": {
-    "id": "council-news/v2",
-    "sha256": "0143d986084bef9a873787f37513a8f91fc3b84d727975b9786cf326aa531438"
+    "id": "council-news/v1",
+    "sha256": "4c2cb3b72e9b49639ba3a30692a7c0aa78d22baf9a4cac9e3d8d3e00cb925d83"
   },
   "pm": {
     "id": "council-pm/v1",
     "sha256": "3732a765b3c2586616786c12f7e20b9604e8d49e6afaa9c9fb4e0410894701e7"
   },
   "scout": {
-    "id": "council-scout/v2",
-    "sha256": "092ab39d4c852c709f104b12c0aaacfd5fa7a6fcc67124ad5dab5f0dfcc6cb0f"
+    "id": "council-scout/v3",
+    "sha256": "2e02a273ce304398b25f0e6e6d2b922318bcef8c2e3533515f11486bfa2631a1"
   },
   "single_agent": {
     "id": "council-single_agent/v1",
     "sha256": "a66e23487d2151162636366bad2050e6f2a0d80018ca32781a852ff4dff225c9"
   },
   "skeptic": {
-    "id": "council-skeptic/v3",
-    "sha256": "3a96011404dc2ce4615a20275b4feb17d72b32c83ab46ff613fa390cacd8d562"
+    "id": "council-skeptic/v4",
+    "sha256": "ef62bb6ea9a83404f05745a087986704e0556a25c73019d30cc8c3feafac5d78"
   },
   "swing_bear": {
     "id": "council-swing_bear/v1",
@@ -52,7 +52,7 @@
     "sha256": "407e5420ec7562554783ec1a5bf6ab995d135db1b7f3346a7691e2e5b8b1c13c"
   },
   "swing_pm": {
-    "id": "council-swing_pm/v1",
-    "sha256": "398026e9d0586def096f9f38ca06bd38bfacc71c3f9ba888675ee34af3fcf474"
+    "id": "council-swing_pm/v2",
+    "sha256": "9c142ad9c8c0fa176af709dad522149db8dd8866e9485f3536bd419fe8daf518"
   }
 }

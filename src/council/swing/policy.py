@@ -20,7 +20,7 @@ PosInt = Annotated[int, Field(strict=True, ge=1)]
 NonNegInt = Annotated[int, Field(strict=True, ge=0)]
 PosFloat = Annotated[float, Field(gt=0)]
 SlotHHMM = Annotated[StrictStr, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")]
-Setup = Literal["news_continuation", "post_earnings_drift", "second_order",
+Setup = Literal["news_continuation", "post_earnings_drift", "second_order", "day2_confirmation",
                 "gap_fade", "breakout", "mean_reversion", "event_run_up"]
 _MODEL = re.compile(r"^[a-z0-9][a-z0-9._\-]*(:[a-z0-9._\-]+)?$")
 

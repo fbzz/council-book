@@ -90,6 +90,10 @@ class FactCard:
     fields: dict[str, Any] = field(default_factory=dict)
     catalyst_items: list[dict[str, Any]] = field(default_factory=list)     # SEC metadata (public)
     flags: list[str] = field(default_factory=list)
+    # PRIVATE, not a card field: the price at the slot (the broker rate, or a paper run's delayed
+    # 15-minute SIP bar) the live layer was computed from. Never prompted, hashed or published; the
+    # paper tracker's slot-time entry reference (user decision 2026-10-01).
+    slot_price: float | None = field(default=None, repr=False, compare=False)
 
     def fact_ids(self) -> list[str]:
         return [f"X:{self.line_id}:{k}" for k in sorted(self.fields)]
@@ -302,6 +306,7 @@ def build_card(
     med_last = series.volume_median(vol, end=last - 1)
     f["vol_ratio_last"] = _r(float(vol[last]) / med_last if med_last else None)
     if live_price is not None and live_price > 0:
+        card.slot_price = float(live_price) if math.isfinite(live_price) else None
         today = series.pct(live_price, close[last])
         f["move_today_live_pct"] = _r(today)
         f["move_today_live_sigma"] = _r(series.sigma_move(today, sigma, 1) if sigma else None)

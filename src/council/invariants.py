@@ -41,7 +41,7 @@ SWING_MIN_GAP_MULT = 1.5
 SWING_MAX_TOTAL_SESSIONS = 20   # time stop including the one extension
 SWING_MIN_NET_RR = 1.2          # net reward/risk floor (the policy may demand more)
 SWING_MAX_ENTRY_VALID_MIN = 60  # an approved entry is stale after this many minutes
-SWING_MAX_LLM_CALLS_PER_SLOT = 9
+SWING_MAX_LLM_CALLS_PER_SLOT = 12   # 1 Scout + 5 Skeptic + bull + bear + 3 PM + 1 spare (user 2026-10-01)
 SWING_MIN_DECLARED_COST_PCT_PER_LEG = 1.25   # public R is net of at least this cost per leg
 # S15 brake and S17 drawdown scaling are protections the swing book ADDS (design §3.7 "stricter than
 # today"): the policy may trigger them earlier or scale harder, never switch them off by moving the

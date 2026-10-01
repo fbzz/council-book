@@ -103,9 +103,9 @@ slots:                         # SB2 / Q-S8: US slots whose session is >= 60 min
   min_to_close_min: 30
 
 llm:                           # §5
-  max_calls_per_slot: 9
-  deadline_s: 360
-  max_skeptic_calls: 3         # one Skeptic call per idea, at most 3 ideas
+  max_calls_per_slot: 12       # user 2026-10-01: 1 Scout + 5 Skeptic + bull + bear + 3 PM + 1 spare (a fallback retry)
+  deadline_s: 450              # 360 + 45 s for each of the 2 extra Skeptic reviews (they run concurrently)
+  max_skeptic_calls: 5         # one Skeptic call per idea, at most 5 ideas (user 2026-10-01; was 3)
   pm_replicates: 3
   pm_entry_votes: 2
   skeptic_model: deepseek-v4.1-flash:cloud   # user 2026-09-29: GLM could not return JSON reliably
@@ -122,5 +122,7 @@ tracking:
   paper_track_every_idea: true # SB12: every idea (passes, waits, drops) is tracked for measurement
   paper_run_before_live: false # the user's decision: no paper run; live once built and smoke-tested
 
-setups_live: [news_continuation, post_earnings_drift, second_order]   # SB16
+setups_live: [news_continuation, post_earnings_drift, second_order, day2_confirmation]   # SB16
+# day2_confirmation (user 2026-10-01): a carried Skeptic `wait` re-proposed by code at a later slot once
+# >= 1 session completed after the news; the completed close since the news is the confirmation.
 setups_paper_only: [gap_fade, breakout, mean_reversion, event_run_up]

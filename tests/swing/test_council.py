@@ -261,9 +261,16 @@ def test_skeptic_outage_mid_call_falls_back(reg, policy):
     assert res.calls_used <= 9
 
 
+def tight_policy(policy, *, calls: int = 9, skeptic: int = 3):
+    """The policy with a tighter LLM budget (the 2026-09 numbers): budget-edge tests."""
+    llm = policy.swing.llm.model_copy(update={"max_calls_per_slot": calls, "max_skeptic_calls": skeptic})
+    return policy.model_copy(update={"swing": policy.swing.model_copy(update={"llm": llm})})
+
+
 def test_skeptic_retry_never_eats_the_pm_budget(reg, policy):
     """3 ideas plan all 9 calls: a Skeptic transport failure gets no retry (that idea drops), and
     the PM still runs its 3 replicates instead of aborting the slot with BudgetExceeded."""
+    policy = tight_policy(policy)
     main, sk = full_pass_responses(3)
     gw = StubGateway(responses={**main, **sk}, model=MAIN)
     good = sk["skeptic"]
