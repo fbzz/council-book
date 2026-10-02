@@ -1,0 +1,9 @@
+{
+  "algo": "sha256(salt||canonical_json)",
+  "code_commit": "",
+  "commitment_sha256": "0e910cd18c7e1428117fe66124f9c7dd1eb64ab61438e473ae19743194585d3f",
+  "cycle_id": "2026-10-02T1840Z",
+  "salt": "10248bc0eee67e19c7511bf737de246f80bb0aa7aeab23f188f982ae6b2bbfb8",
+  "schema_id": "council-book/paper-reveal/v1",
+  "sealed_at": "2026-10-02T19:40:38.506520Z"
+}

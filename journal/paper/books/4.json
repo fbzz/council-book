@@ -1,0 +1,41 @@
+{
+  "as_of": "2026-10-02T18:40:00Z",
+  "book": {
+    "cash_pct": 11.76,
+    "core": [
+      {
+        "line": "BTC",
+        "weight_pct": 13.45
+      },
+      {
+        "line": "ETH",
+        "weight_pct": 5.14
+      },
+      {
+        "line": "GOLD",
+        "weight_pct": 3.07
+      },
+      {
+        "line": "NDX",
+        "weight_pct": 35.79
+      },
+      {
+        "line": "SEMIS",
+        "weight_pct": 15.46
+      },
+      {
+        "line": "SPX",
+        "weight_pct": 15.32
+      }
+    ],
+    "core_pct": 88.23,
+    "cost_pct": 2.5,
+    "paper_return_pct": -1.92,
+    "started": "2026-10-01",
+    "swing_pct": 0.0,
+    "swing_trades": []
+  },
+  "cycle_id": "2026-10-02T1840Z",
+  "decision_no": 4,
+  "schema_id": "council-book/paper-book/v1"
+}

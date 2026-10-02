@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-02T14:40:00Z",
+  "as_of": "2026-10-02T18:40:00Z",
   "book": {
     "cash_pct": 11.76,
     "core": [
@@ -62,9 +62,9 @@
     }
   ],
   "core_pct": 100.0,
-  "cycle_id": "2026-10-02T1440Z",
-  "decision_no": 3,
-  "decisions": 3,
+  "cycle_id": "2026-10-02T1840Z",
+  "decision_no": 4,
+  "decisions": 4,
   "performance": {
     "core_return_pct": null,
     "note": "core: weights only (no paper fills); swing: closed paper legs, net of the declared cost",
