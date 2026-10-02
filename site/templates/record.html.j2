@@ -6,6 +6,7 @@
 {{ m.toc_item("score", "Scoreboard", "pm") }}
 {{ m.toc_item("controls", "Against the controls", "neutral") }}
 {{ m.toc_item("funnel", "Idea funnel", "scout") }}
+{{ m.toc_item("whatif", "If we had bought every idea", "neutral") }}
 {{ m.toc_item("skeptic", "Skeptic health", "skeptic") }}
 {{ m.toc_item("incidents", "Incidents", "halted" if incidents else "stone") }}
 {{ m.toc_item("smaller", "Smaller problems", "stone") }}
@@ -114,7 +115,43 @@
 {% endif %}
 {% endcall %}
 
-{% call m.section("skeptic", 4, "Skeptic health", "skeptic") %}
+{% call m.section("whatif", 4, "If we had bought every idea", "neutral") %}
+{% set w = rv.whatif if rv.whatif is defined else none %}
+{% if w %}
+<p>{{ swm.paper() }} Every idea the swing council saw (n = {{ w.n }} across {{ w.decisions }} paper {{ "decision" if w.decisions == 1 else "decisions" }}), priced as if it had been bought at its slot, whatever stopped it. Same paper rules for every idea: exits from the next completed session, a gap through the stop books at the open, a session touching both stop and target books the stop, the time stop books the close. Returns are net of the declared {{ w.cost }} cost on each leg; open ideas are marked to the close of {{ w.marked }}.</p>
+<ul class="wi-caveats small">
+  <li><strong>n is tiny</strong>: {{ w.open }} of {{ w.n }} ideas are still open, so none of these numbers says anything yet.</li>
+  {% if w.prior is defined and w.prior %}<li>{{ w.prior }} early {{ "idea was" if w.prior == 1 else "ideas were" }} priced at the previous close, not at the slot (marked <span class="wi-prior">prior close</span>).</li>{% endif %}
+  <li>Splits, spin-offs and other corporate actions are listed below and left out of every average.</li>
+</ul>
+{{ m.wrap_open("If we had bought every idea, by group") }}
+<table class="wide stack wi-table">
+  <thead><tr><th scope="col">Group</th><th scope="col" class="n">n</th><th scope="col" class="n">Average net</th><th scope="col" class="n">Median net</th><th scope="col" class="n">Hit rate</th><th scope="col" class="n">Open · resolved</th></tr></thead>
+  <tbody>
+  {% for g in w.groups %}
+  <tr><td>{{ g.label }}</td><td class="n" data-label="n">n = {{ g.n }}</td><td class="n" data-label="Average net">avg {{ g.mean }}</td><td class="n" data-label="Median net">median {{ g.median }}</td><td class="n" data-label="Hit rate">hit {{ g.hit }}</td><td class="n" data-label="Open · resolved">{{ g.open }} open · {{ g.resolved }} resolved{% if g.excluded %} · {{ g.excluded }} excluded{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Hit rate: the share of priced ideas above zero after costs. Open ideas count at their mark.</p>
+<details class="jd rf-group">
+  <summary><strong>Every idea</strong> <span class="n">{{ w.ideas | length }}</span> <span class="jd-sum">coloured by the seat that stopped it</span></summary>
+  <div class="jd-body accent-neutral">
+    <ul class="wi-list">
+      {% for i in w.ideas %}<li class="wi-row"><span class="pbook-sw rf-{{ i.seat }}" aria-hidden="true"></span><a href="{{ i.href }}"><span class="tkr">{{ i.ticker }}</span> {{ i.side }} · decision #{{ i.no }}</a> <span class="wi-why">{{ i.group }}{% if i.who %} · stopped by {{ i.who }}{% endif %}{% if i.code %} <span class="jc-code">{{ i.code }}</span>{% endif %}</span> <span class="wi-ret n"><span class="{{ 'up' if i.up else ('down' if i.up is false else 'muted') }}">{{ i.net }}</span> net · {{ i.status }} · {{ i.days }}d</span>{% if i.prior is defined and i.prior %} <span class="wi-prior">prior close</span>{% endif %}</li>{% endfor %}
+    </ul>
+  </div>
+</details>
+{% if w.excluded %}
+<p class="small"><strong>Left out (corporate action):</strong> {% for i in w.excluded %}<a href="{{ i.href }}"><span class="tkr">{{ i.ticker }}</span> {{ i.side }} · decision #{{ i.no }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+{% endif %}
+{% else %}
+{{ m.empty("Nothing priced yet", "Every idea is priced as if bought once a paper decision with swing ideas has been published.") }}
+{% endif %}
+{% endcall %}
+
+{% call m.section("skeptic", 5, "Skeptic health", "skeptic") %}
 {% set k = rv.skeptic %}
 {% if k %}
 <p>{{ swm.paper() }} What the Skeptic said on the ideas it judged (n = {{ k.n }}), and how often its reply could not be used. Small numbers: one idea moves a share by {{ "%.0f" | format(100 / k.n) if k.n else "—" }} points.</p>
@@ -129,7 +166,7 @@
 {% endif %}
 {% endcall %}
 
-{% call m.section("incidents", 5, "Incidents", "halted" if incidents else "stone") %}
+{% call m.section("incidents", 6, "Incidents", "halted" if incidents else "stone") %}
 {% if incidents %}
 {{ m.wrap_open("Incidents") }}
 <table class="wide stack">
@@ -152,7 +189,7 @@
 {% endif %}
 {% endcall %}
 
-{% call m.section("smaller", 6, "Smaller problems, from the logs", "stone") %}
+{% call m.section("smaller", 7, "Smaller problems, from the logs", "stone") %}
 <p>Read straight from the published runs: late starts, model replies that could not be used, fallbacks and inputs that were missing. Minor on their own, listed so none is hidden.</p>
 {% if rv.minor %}
 <ul class="rec-minor">
@@ -165,7 +202,7 @@
 {% endif %}
 {% endcall %}
 
-{% call m.section("withdrawn", 7, "Withdrawn claims", "stone") %}
+{% call m.section("withdrawn", 8, "Withdrawn claims", "stone") %}
 <p>Claims from the research that preceded this project which were later withdrawn. They are kept here so they are not repeated.</p>
 {% for w in withdrawn %}
 <article class="withdrawn">

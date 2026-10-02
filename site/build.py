@@ -87,6 +87,7 @@ from council.publish.public_models import (
     PublicSwingSection,
 )
 from council.publish.redact import _clip
+from council.publish.whatif import PublicPaperWhatIf
 from council.swing.rules import RULE_OF as SWING_RULE_CODES
 
 HERE = Path(__file__).resolve().parent
@@ -607,6 +608,7 @@ class JournalView:
     paper_verified: dict[int, bool] = field(default_factory=dict)
     paper_latest: PublicPaperLatest | None = None
     paper_books: dict[int, PublicPaperBookAfter] = field(default_factory=dict)   # journal/paper/books/<n>.json
+    paper_whatif: PublicPaperWhatIf | None = None        # journal/paper/whatif.json (every idea, as if bought)
 
     @property
     def has_swing(self) -> bool:
@@ -723,6 +725,9 @@ def load_paper(journal_dir: Path, view: JournalView) -> None:
             raise SiteBuildError(f"paper book {f.name} does not match its decision number")
         view.paper_books[b.decision_no] = b
         view.copies[f"journal/paper/books/{f.name}"] = f
+    if (paper / "whatif.json").exists():
+        view.paper_whatif = PublicPaperWhatIf.model_validate_json((paper / "whatif.json").read_text())
+        view.copies["journal/paper/whatif.json"] = paper / "whatif.json"
 
 
 def load_manifest(prompts_dir: Path) -> dict[str, list[dict[str, str]]]:
@@ -4889,6 +4894,59 @@ def idea_funnel(view: JournalView, geo: Geometry) -> dict[str, Any] | None:
             "decisions": len({no for no, _, _ in ideas})}
 
 
+WHATIF_STATUS_WORDS = {"open": "open", "stop": "stop", "target": "target", "time": "time stop",
+                       "corporate_action": "corporate action"}
+WHATIF_GROUP_ORDER = ("executed", "pm_passed", "skeptic_wait_debated", "skeptic_wait", "skeptic_rejected",
+                      "code_dropped", "paper_only", "missed")
+
+
+def _idea_seat(view: JournalView, no: int, ref: str) -> tuple[str, str]:
+    """(seat, who) that stopped one public paper idea (FUNNEL_STOPS), ("stone", "") when unknown."""
+    doc = view.paper_cycles.get(no)
+    p = next((x for x in (doc.swing.ideas if doc is not None and doc.swing else []) if x.idea.ref == ref), None)
+    if p is None:
+        return "stone", ""
+    idx = _stop_index(p)
+    return next(((seat, who) for i, _, who, seat in FUNNEL_STOPS if i == idx), ("stone", ""))
+
+
+def whatif_chip(w: Any) -> dict[str, Any]:
+    """'if bought: +x.x% net (open|target|stop)' for one what-if idea."""
+    if w.status == "corporate_action":
+        return {"text": "if bought: corporate action, not counted", "css": "stone", "up": None}
+    net = "not priced yet" if w.net_pct is None else f"{fmt_signed(w.net_pct, 1)} net"
+    return {"text": f"if bought: {net} ({WHATIF_STATUS_WORDS.get(w.status, w.status)})",
+            "css": "stone" if w.net_pct is None else ("executed" if w.net_pct > 0 else "halted"),
+            "up": None if w.net_pct is None else w.net_pct > 0, "prior": w.ref_prior_close}
+
+
+def whatif_view(view: JournalView) -> dict[str, Any] | None:
+    """"If we had bought every idea": the per-group table and every idea's row (journal/paper/whatif.json)."""
+    w = view.paper_whatif
+    if w is None or not w.ideas:
+        return None
+    order = {g: n for n, g in enumerate(WHATIF_GROUP_ORDER)}
+    groups = [{"label": GROUP_WORDS.get(a.key, a.key.replace("_", " ")), "key": a.key, "n": a.n,
+               "mean": fmt_signed(a.mean_net_pct, 1), "median": fmt_signed(a.median_net_pct, 1),
+               "hit": "—" if a.hit_rate_pct is None else f"{a.hit_rate_pct:.0f}%",
+               "open": a.open, "resolved": a.resolved, "excluded": a.excluded}
+              for a in sorted(w.groups, key=lambda a: order.get(a.key, 99))]
+    ideas, excluded = [], []
+    for x in w.ideas:
+        seat, who = _idea_seat(view, x.decision_no, x.ref)
+        row = {"no": x.decision_no, "ticker": x.ticker.replace("_", "."), "side": x.side, "seat": seat, "who": who,
+               "group": GROUP_WORDS.get(x.group, x.group.replace("_", " ")), "code": x.drop_code or "",
+               "status": WHATIF_STATUS_WORDS.get(x.status, x.status), "days": x.days_held,
+               "gross": fmt_signed(x.gross_pct, 1), "net": fmt_signed(x.net_pct, 1),
+               "up": None if x.net_pct is None else x.net_pct > 0, "prior": x.ref_prior_close,
+               "href": paper_href(x.decision_no) + "#sw-" + x.ref.replace(":", "-")}
+        (excluded if x.status == "corporate_action" else ideas).append(row)
+    return {"groups": groups, "ideas": ideas, "excluded": excluded, "n": len(w.ideas),
+            "decisions": w.decisions, "prior": sum(1 for x in w.ideas if x.ref_prior_close),
+            "cost": f"{w.declared_cost_pct_per_leg:g}%", "marked": fmt_day(w.marked_to) if w.marked_to else "—",
+            "open": sum(1 for x in w.ideas if x.status == "open")}
+
+
 def skeptic_health(view: JournalView, geo: Geometry) -> dict[str, Any] | None:
     """The Skeptic's verdict shares over every paper idea it judged, and its unusable replies."""
     verdicts = [p.idea.verdict.verdict for _, _, p in _paper_ideas(view) if p.idea.verdict is not None]
@@ -4953,6 +5011,7 @@ def record_view(view: JournalView, geo: Geometry) -> dict[str, Any]:
                 "days": (as_of - started).days if started and as_of else None,
                 "since": fmt_day(started) if started else "—", "as_of": fmt_when(latest.as_of) if latest else "—"}
     return {"head": head, "controls": record_controls(view), "funnel": idea_funnel(view, geo),
+            "whatif": whatif_view(view),
             "skeptic": skeptic_health(view, geo), "minor": minor_problems(view),
             "swing_page": view.has_swing}
 
@@ -6829,6 +6888,9 @@ def build(journal_dir: Path, prompts_dir: Path, policy_dir: Path, out_dir: Path,
             if after is None and view.paper_latest is not None and view.paper_latest.decision_no == no:
                 after = SimpleNamespace(book=view.paper_latest.book, as_of=view.paper_latest.as_of)
             dv = decision_view(doc, view.paper_verified.get(no, False), lines)
+            wi = {x.ref: x for x in (view.paper_whatif.ideas if view.paper_whatif else []) if x.decision_no == no}
+            for j in dv["journeys"]:
+                j["whatif"] = whatif_chip(wi[j["ref"]]) if j["ref"] in wi else None
             if doc.cycle_id in runs:            # a live run of the same slot has its own page
                 dv["run_href"] = f"cycles/{doc.cycle_id}.html"
             render("decision.html.j2", paper_href(no), "../../", "decisions", d=dv,

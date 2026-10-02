@@ -381,6 +381,92 @@ def paper_status(
         typer.echo("  (none)")
 
 
+def _alpaca_daily_bars():
+    """`daily_bars(tickers, since)` over Alpaca's read-only daily bars (None without keys)."""
+    from datetime import timedelta
+
+    from council.data import alpaca
+
+    keys = alpaca.load_keys()
+    if keys is None:
+        return None
+
+    def fetch(tickers: list[str], since) -> dict:
+        out: dict = {}
+        for i in range(0, len(tickers), alpaca.SYMBOLS_PER_REQUEST):
+            out.update(alpaca.fetch_daily(tickers[i:i + alpaca.SYMBOLS_PER_REQUEST], since - timedelta(days=10),
+                                          keys=keys))
+        return out
+
+    return fetch
+
+
+@paper_app.command("whatif")
+def paper_whatif(
+    state_dir: Path = typer.Option(None, "--state-dir", help="The paper state dir (default <state>/paper); "
+                                                            "any other directory is refused."),
+    as_json: bool = typer.Option(False, "--json", help="Print the per-idea rows and aggregates as JSON."),
+    publish: bool = typer.Option(False, "--publish", help="Also write journal/paper/whatif.json (published "
+                                 "decisions only, percent only, leak-scanned); nothing is committed."),
+    publish_dir: Path = typer.Option(None, "--publish-dir", help="--publish: the repo holding journal/paper "
+                                     "(default: the repo the code runs from)."),
+) -> None:
+    """If we had bought every idea: each paper idea (deduped by ticker + side + slot) walked on
+    completed daily bars with the paper convention, net of the declared 1.25% per leg; aggregates by
+    group, drop code and Skeptic verdict. Corporate-action artefacts are listed and excluded. Percent
+    only. Reads the PAPER state; bars from Alpaca (read-only)."""
+    from council import paths
+    from council.ledger.db import Ledger
+    from council.swing import whatif as W
+
+    root = Path(state_dir) if state_dir is not None else paths.state_dir() / PAPER_STATE
+    if root.name != PAPER_STATE:
+        _refuse(f"--state-dir must be the paper state dir (a directory named {PAPER_STATE!r})")
+    if not (root / "ledger.sqlite3").exists():
+        _refuse("no paper ledger yet (run `council cycle --paper`)")
+    fetch = _alpaca_daily_bars()
+    if fetch is None:
+        _refuse("paper whatif: no Alpaca keys (needs COUNCIL_MODE=dry_run and the Keychain items)")
+    ledger = Ledger(root / "ledger.sqlite3")
+    items, marked = W.run(ledger, fetch, state_dir=root)
+    s = W.summary(items)
+    if publish:
+        from datetime import UTC, datetime
+
+        from council.publish.leakscan import env_canaries
+        from council.publish.paper import PaperPublishError
+        from council.publish.whatif import publish_whatif
+
+        try:
+            written = publish_whatif(items, root=Path(publish_dir) if publish_dir else paths.REPO_ROOT,
+                                     as_of=datetime.now(UTC), marked_to=marked,
+                                     canaries=[*env_canaries(), *W.private_canaries(ledger.paper_trades())])
+        except (PaperPublishError, ValueError) as exc:
+            _refuse(f"paper whatif --publish: {exc}")
+        typer.echo(f"written: {', '.join(str(p) for p in written)}", err=True)
+    if as_json:
+        typer.echo(json.dumps({"marked_to": marked.isoformat() if marked else None,
+                               "ideas": [{k: v for k, v in W.as_dict(x).items() if k not in ("paper_id", "ref")}
+                                         for x in items], **s}, indent=1, default=str))
+        return
+    fmt = lambda v: "   -  " if v is None else f"{v:+6.2f}"          # noqa: E731
+    typer.echo(f"what if we had bought every idea: {len(items)} ideas (deduped), marked to {marked or '-'}, "
+               f"net of {W.paper.DECLARED_COST_PCT_PER_LEG}%/leg")
+    for x in items:
+        tag = " ref: prior close" if x.ref_source == "prior_close" else ""
+        typer.echo(f"  {x.cycle_id}  {x.ticker:<6} {x.side:<5} {x.group:<20} {(x.drop_code or '-'):<18} "
+                   f"{x.status:<16} {x.days_held:>2}d  gross {fmt(x.gross_pct)}%  net {fmt(x.net_pct)}%{tag}")
+    for title, key in (("by group", "groups"), ("by drop code", "drop_codes"), ("by Skeptic verdict", "verdicts")):
+        typer.echo(f"{title}:")
+        for a in s[key]:
+            hit = "  -  " if a["hit_rate_pct"] is None else f"{a['hit_rate_pct']:5.1f}"
+            typer.echo(f"  {a['key']:<22} n {a['n']:>3}  mean {fmt(a['mean_net_pct'])}%  median "
+                       f"{fmt(a['median_net_pct'])}%  hit {hit}%  open {a['open']}  resolved {a['resolved']}"
+                       + (f"  excluded {a['excluded']}" if a["excluded"] else ""))
+    for c in s["corporate_actions"]:
+        typer.echo(f"corporate action (excluded): {c['cycle_id']} {c['ticker']} {c['side']} {c['code']}")
+
+
 @app.command()
 def watch() -> None:
     """Read-only watch: expiries, reveals, execution records, kill switch, heartbeat."""

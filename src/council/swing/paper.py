@@ -178,16 +178,18 @@ def paper_id(ref: str, group: str) -> str:
 
 
 def track(ledger: Any, idea: PaperIdea, *, origin_cycle: str, opened_at: datetime,
-          skeptic_verdict: str | None = None, drop_code: str | None = None) -> str:
+          skeptic_verdict: str | None = None, drop_code: str | None = None, ref_source: str | None = None) -> str:
     """Record a paper idea through the ledger's public API (`Ledger.add_paper_trade`). `drop_code`:
-    the idea's seal-time drop code (a code only; None when it was not dropped)."""
+    the idea's seal-time drop code (a code only; None when it was not dropped). `ref_source`: `slot`
+    (the slot-time price) or `prior_close` (the last completed close fallback)."""
     pid = paper_id(idea.ref, idea.group)
     ledger.add_paper_trade(
         pid, origin_cycle=origin_cycle, ticker=idea.ticker, side=idea.side, opened_at=opened_at,
         idea_id=idea.ref if idea.ref.startswith("idea:") else None, entry_ref=idea.entry_ref,
         stop_pct=idea.stop_pct, target_pct=idea.target_pct, time_stop_date=idea.time_stop_day.isoformat(),
         record={"group": idea.group, "ref": idea.ref, "entry_day": idea.entry_day.isoformat(),
-                "skeptic_verdict": skeptic_verdict, "drop_code": drop_code})
+                "skeptic_verdict": skeptic_verdict, "drop_code": drop_code,
+                **({"ref_source": ref_source} if ref_source else {})})
     return pid
 
 

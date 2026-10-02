@@ -1760,3 +1760,18 @@ a.rule-link.jc-code { color: var(--link); }
 .dpath-no { font: 600 var(--fs-1)/1.4 var(--font-mono); color: var(--ink-strong); }
 .dpath-when { font-size: var(--fs-1); color: var(--muted); }
 .dpath-verdict { flex: 1 1 14rem; min-width: 0; overflow-wrap: break-word; }
+
+/* record: if we had bought every idea */
+.wi-caveats { margin: var(--sp-2) 0 var(--sp-3); padding-left: var(--sp-5); color: var(--ink); max-width: 72ch; }
+.wi-caveats li { margin: var(--sp-1) 0; }
+.wi-table td, .wi-table th { white-space: nowrap; }
+.wi-list { list-style: none; margin: var(--sp-2) 0; padding: 0; }
+.wi-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--sp-2); min-height: 44px; padding: var(--sp-1) 0; border-bottom: 1px solid var(--line-soft); overflow-wrap: break-word; }
+.wi-row a { color: var(--link); display: inline-flex; align-items: center; min-height: 44px; }
+.wi-why { color: var(--muted); font-size: var(--fs-1); }
+.wi-ret { margin-left: auto; font: 500 var(--fs-1)/1.3 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.wi-ret .up { color: var(--long); }
+.wi-ret .down { color: var(--short); }
+.wi-prior { font: 500 var(--fs-label)/1.3 var(--font-mono); color: var(--ink); background: var(--inset); border: 1px dashed var(--line-strong); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.chip.wi-chip { text-transform: none; letter-spacing: 0; font-family: var(--font-body); }
+.rf-stone { background: var(--stone); }

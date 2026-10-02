@@ -2069,9 +2069,32 @@ def _paper_publish(ctx: CycleContext, rec: CycleRecord, pack: Any, snapshot: Any
                               canaries=publish_canaries(ctx, snapshot), code_commit=ctx.code_commit or "",
                               now=ctx.clock())
         rec.flags.append(f"{PAPER_PUBLISHED_FLAG}:{no}")
+        rec.flags += paper_whatif_publish(ctx, root, snapshot)
     except Exception as exc:  # noqa: BLE001 - the paper record never stops the cycle
         rec.flags.append(f"{PAPER_PUBLISH_ERROR}:{type(exc).__name__}")
     ctx.ledger.record_cycle(rec)
+
+
+PAPER_WHATIF_ERROR = "paper_whatif_error"
+
+
+def paper_whatif_publish(ctx: CycleContext, root: Path, snapshot: Any = None) -> list[str]:
+    """After the paper publish (`paper.settle` ran in `swing_daily`): every paper idea's what-if
+    outcome (`council.swing.whatif`) written to journal/paper/whatif.json, percent only, through the
+    leak scan (canaries: the private slot references). A failure is a flag and writes nothing."""
+    try:
+        from council.publish.whatif import publish_whatif
+        from council.swing import whatif as W
+
+        src = getattr(ctx.sources, "swing", None)
+        bars = getattr(src, "daily_bars", None) if src is not None else None
+        flags = [] if bars is not None else ["paper_whatif_no_bars"]     # still published: nothing priced
+        items, marked = W.run(ctx.ledger, bars or (lambda tickers, since: {}), state_dir=ctx.state_dir)
+        canaries = [*publish_canaries(ctx, snapshot), *W.private_canaries(ctx.ledger.paper_trades())]
+        publish_whatif(items, root=root, as_of=ctx.clock(), marked_to=marked, canaries=canaries)
+        return flags
+    except Exception as exc:  # noqa: BLE001 - measurement never stops a cycle
+        return [f"{PAPER_WHATIF_ERROR}:{type(exc).__name__}"]
 
 
 async def _swing_council(ctx: CycleContext, rec: CycleRecord, out: SwingRun, *, snapshot: Any, kill_state: str,
@@ -2330,8 +2353,10 @@ def _paper_track(ctx: CycleContext, out: SwingRun, result: Any, ref: str, idea: 
 
     src = getattr(ctx.sources, "swing", None)
     price = paper_slot_price(idea)       # the price at the slot (user decision 2026-10-01) ...
+    ref_source = "slot"
     if price is None:                    # ... else the last completed close (flag paper_reference_last_close)
         price = src.reference_price(idea.ticker) if src is not None and src.reference_price else None
+        ref_source = "prior_close"
     if not isinstance(price, int | float) or not price > 0:
         out.flags.append("paper_no_reference")
         return
@@ -2348,7 +2373,7 @@ def _paper_track(ctx: CycleContext, out: SwingRun, result: Any, ref: str, idea: 
                         time_stop_day=add_sessions(day, days))
     try:
         out.paper.append(paper.track(ctx.ledger, p, origin_cycle=cycle_id, opened_at=now,
-                                     skeptic_verdict=skeptic, drop_code=drop_code))
+                                     skeptic_verdict=skeptic, drop_code=drop_code, ref_source=ref_source))
     except Exception as exc:  # noqa: BLE001 - a duplicate paper row (re-run slot) is not an error
         out.flags.append(f"paper_track_error:{type(exc).__name__}")
 

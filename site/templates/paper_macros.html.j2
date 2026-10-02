@@ -92,7 +92,7 @@
 <article class="jc{% if j.stop == 6 %} jc-entered{% endif %}" id="{{ j.anchor }}" aria-labelledby="{{ j.anchor }}-h">
   <header class="jc-head">
     <h3 id="{{ j.anchor }}-h"><span class="tkr jc-tk">{{ i.ticker | ticker }}</span> {{ side(i.side) }} <span class="jc-setup">{{ j.setup }}</span>{% if j.paper_setup %} <span class="chip state-rehearsal" title="A paper-only setup: tracked on paper, never traded">paper-only setup</span>{% endif %}</h3>
-    <p class="jc-out">{% if j.stop == 6 %}<strong>Entered</strong> on paper{% if j.leg %}: {{ j.leg.size }} of the paper portfolio{% endif %}.{% else %}Stopped at <strong>{{ j.stop_label }}</strong>: {{ j.reason }}. {{ code(j.code, root) }}{% endif %} <span class="muted small tkr">{{ j.ref }}</span></p>
+    <p class="jc-out">{% if j.stop == 6 %}<strong>Entered</strong> on paper{% if j.leg %}: {{ j.leg.size }} of the paper portfolio{% endif %}.{% else %}Stopped at <strong>{{ j.stop_label }}</strong>: {{ j.reason }}. {{ code(j.code, root) }}{% endif %} <span class="muted small tkr">{{ j.ref }}</span>{% if j.whatif is defined and j.whatif %} <span class="chip wi-chip state-{{ j.whatif.css }}" title="As if this idea had been bought at its slot, net of the declared costs{% if j.whatif.prior is defined and j.whatif.prior %}; priced at the previous close{% endif %}">{{ j.whatif.text }}</span>{% endif %}</p>
   </header>
   <ol class="jp" aria-label="How far {{ i.ticker | ticker }} got">
     {% for s in j.steps %}
