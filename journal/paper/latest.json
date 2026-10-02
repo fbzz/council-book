@@ -1,36 +1,36 @@
 {
-  "as_of": "2026-10-01T18:40:00Z",
+  "as_of": "2026-10-02T14:40:00Z",
   "book": {
-    "cash_pct": 11.83,
+    "cash_pct": 11.76,
     "core": [
       {
         "line": "BTC",
-        "weight_pct": 13.33
+        "weight_pct": 13.45
       },
       {
         "line": "ETH",
-        "weight_pct": 5.13
+        "weight_pct": 5.14
       },
       {
         "line": "GOLD",
-        "weight_pct": 3.08
+        "weight_pct": 3.07
       },
       {
         "line": "NDX",
-        "weight_pct": 35.9
+        "weight_pct": 35.79
       },
       {
         "line": "SEMIS",
-        "weight_pct": 15.35
+        "weight_pct": 15.46
       },
       {
         "line": "SPX",
-        "weight_pct": 15.38
+        "weight_pct": 15.32
       }
     ],
-    "core_pct": 88.17,
+    "core_pct": 88.23,
     "cost_pct": 2.5,
-    "paper_return_pct": -2.5,
+    "paper_return_pct": -1.92,
     "started": "2026-10-01",
     "swing_pct": 0.0,
     "swing_trades": []
@@ -38,7 +38,7 @@
   "core": [
     {
       "line": "BTC",
-      "weight_pct": 13.3
+      "weight_pct": 13.5
     },
     {
       "line": "ETH",
@@ -50,21 +50,21 @@
     },
     {
       "line": "NDX",
-      "weight_pct": 35.9
+      "weight_pct": 35.8
     },
     {
       "line": "SEMIS",
-      "weight_pct": 15.3
+      "weight_pct": 15.5
     },
     {
       "line": "SPX",
-      "weight_pct": 15.4
+      "weight_pct": 15.3
     }
   ],
   "core_pct": 100.0,
-  "cycle_id": "2026-10-01T1840Z",
-  "decision_no": 2,
-  "decisions": 2,
+  "cycle_id": "2026-10-02T1440Z",
+  "decision_no": 3,
+  "decisions": 3,
   "performance": {
     "core_return_pct": null,
     "note": "core: weights only (no paper fills); swing: closed paper legs, net of the declared cost",

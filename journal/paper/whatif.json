@@ -1,6 +1,6 @@
 {
-  "as_of": "2026-10-02T11:20:28.635100Z",
-  "decisions": 2,
+  "as_of": "2026-10-02T15:14:03.172251Z",
+  "decisions": 3,
   "declared_cost_pct_per_leg": 1.25,
   "drop_codes": [
     {
@@ -44,7 +44,7 @@
       "mean_net_pct": -2.5,
       "median_net_pct": -2.5,
       "n": 1,
-      "open": 1,
+      "open": 3,
       "resolved": 0
     },
     {
@@ -66,6 +66,28 @@
       "mean_net_pct": 3.6,
       "median_net_pct": 3.6,
       "n": 1,
+      "open": 1,
+      "resolved": 0
+    },
+    {
+      "excluded": 0,
+      "hit_rate_pct": null,
+      "key": "day2_unconfirmed",
+      "mean_gross_pct": null,
+      "mean_net_pct": null,
+      "median_net_pct": null,
+      "n": 0,
+      "open": 1,
+      "resolved": 0
+    },
+    {
+      "excluded": 0,
+      "hit_rate_pct": null,
+      "key": "no_catalyst_id",
+      "mean_gross_pct": null,
+      "mean_net_pct": null,
+      "median_net_pct": null,
+      "n": 0,
       "open": 1,
       "resolved": 0
     }
@@ -90,7 +112,7 @@
       "mean_net_pct": -2.71,
       "median_net_pct": -2.71,
       "n": 2,
-      "open": 2,
+      "open": 4,
       "resolved": 0
     },
     {
@@ -112,7 +134,7 @@
       "mean_net_pct": -2.5,
       "median_net_pct": -2.5,
       "n": 1,
-      "open": 1,
+      "open": 3,
       "resolved": 0
     }
   ],
@@ -236,6 +258,66 @@
       "skeptic_verdict": "wait",
       "status": "open",
       "ticker": "PLMK"
+    },
+    {
+      "corporate_action": null,
+      "days_held": 0,
+      "decision_no": 3,
+      "drop_code": "pm_pass",
+      "gross_pct": null,
+      "group": "skeptic_wait_debated",
+      "net_pct": null,
+      "ref": "idea:1",
+      "ref_prior_close": false,
+      "side": "long",
+      "skeptic_verdict": "wait",
+      "status": "open",
+      "ticker": "TSLA"
+    },
+    {
+      "corporate_action": null,
+      "days_held": 0,
+      "decision_no": 3,
+      "drop_code": "pm_pass",
+      "gross_pct": null,
+      "group": "skeptic_wait_debated",
+      "net_pct": null,
+      "ref": "idea:2",
+      "ref_prior_close": false,
+      "side": "long",
+      "skeptic_verdict": "wait",
+      "status": "open",
+      "ticker": "FCX"
+    },
+    {
+      "corporate_action": null,
+      "days_held": 0,
+      "decision_no": 3,
+      "drop_code": "no_catalyst_id",
+      "gross_pct": null,
+      "group": "code_dropped",
+      "net_pct": null,
+      "ref": "idea:3",
+      "ref_prior_close": true,
+      "side": "long",
+      "skeptic_verdict": null,
+      "status": "open",
+      "ticker": "MAT"
+    },
+    {
+      "corporate_action": null,
+      "days_held": 0,
+      "decision_no": 3,
+      "drop_code": "day2_unconfirmed",
+      "gross_pct": null,
+      "group": "code_dropped",
+      "net_pct": null,
+      "ref": "idea:4",
+      "ref_prior_close": false,
+      "side": "long",
+      "skeptic_verdict": null,
+      "status": "open",
+      "ticker": "PLMK"
     }
   ],
   "marked_to": "2026-10-01",
@@ -261,7 +343,7 @@
       "mean_net_pct": 3.6,
       "median_net_pct": 3.6,
       "n": 1,
-      "open": 1,
+      "open": 3,
       "resolved": 0
     },
     {
@@ -283,7 +365,7 @@
       "mean_net_pct": -2.5,
       "median_net_pct": -2.5,
       "n": 1,
-      "open": 1,
+      "open": 3,
       "resolved": 0
     }
   ]
