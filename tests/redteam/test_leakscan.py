@@ -160,3 +160,12 @@ def test_clean_text_never_lets_a_dollar_amount_through(amount):
 def test_clean_text_never_lets_an_unmapped_instrument_id_through(instrument_id):
     out = clean_text(f"skipped UNMAPPED_{instrument_id}: no line")
     assert str(instrument_id) not in out and leakscan.scan(out) == []
+
+
+def test_all_digit_evidence_ids_and_their_anchors_are_not_long_numbers():
+    from council.publish import leakscan
+
+    pat = dict(leakscan.VALUE_PATTERNS)["long_number"]
+    assert not pat.search('href="#f-P-89541043" title="P:89541043">P:89541043')
+    assert pat.search("balance 12345678 left")
+    assert pat.search("ref-12345678")

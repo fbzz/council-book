@@ -117,7 +117,7 @@ _MONEY = re.compile(
     r"|\b(?:USD|EUR|GBP)\s?\d[\d,]*(?:\.\d+)?"
     r"|\d[\d,]*(?:\.\d+)?\s?(?:USD|EUR|GBP|dollars?)\b"
 )
-_LONG_NUMBER = re.compile(r"(?<![\w.])(?<!\b[NPSMECFVK]:)\d{7,}(?!\w)")
+_LONG_NUMBER = re.compile(r"(?<![\w.])(?<!\b[NPSMECFVK]:)(?<!f-[NPSMECFVK]-)\d{7,}(?!\w)")
 _UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 # Positions on symbols outside the universe are keyed UNMAPPED_<instrument id>; the id is private.
 _UNMAPPED = re.compile(r"(?i)UNMAPPED_[0-9A-Za-z]+")
